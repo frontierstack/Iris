@@ -215,7 +215,7 @@ async def review_graph(store: Any, scope: str = "all", focus: Optional[str] = No
         user = build_prompt(gb, nodes, edges, events, known_links, focus, question or "")
         yield {"type": "thinking", "text": f"asking {client.model} for missing links, aliases and an attack-path narrative"}
 
-        data = await client.complete_json(SYSTEM_PROMPT, user, max_tokens=2500, temperature=0.0)
+        data = await client.complete_json(SYSTEM_PROMPT, user, temperature=0.0)
 
         links = validate_links(data.get("links"), gb, known_links)
         aliases = validate_aliases(data.get("aliases"), gb)

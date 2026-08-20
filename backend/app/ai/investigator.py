@@ -154,24 +154,15 @@ def limits(max_steps: Optional[int] = None, max_seconds: Optional[int] = None) -
             "maxToolSeconds": tool_budget_seconds()}
 
 
-def tool_turn_tokens() -> int:
-    """How many tokens ONE model turn may write, arguments included. `IRIS_AI_MAX_TOOL_TOKENS`.
-
-    It was 1400, and that is where the analyst's runs kept dying: `build_case_graph` may draw up to
-    MAX_GRAPH_LINKS (40) links, each with `why` prose and citations, and `add_note` writes a whole
-    write-up. Two live failures, one hitting Iris's parser and one the gateway's own:
-
-        build_case_graph — could not parse the arguments you sent (unexpected end of data:
-                           line 1 column 3314 (char 3313))
-        add_note         — … (unexpected end of data: line 1 column 2308 (char 2308))
-
-    Both are ARGUMENT TEXT RUNNING OUT OF TOKENS, not a model that cannot write JSON — ~3.3 kB is
-    about what 1400 tokens buys once the turn has also written prose. The default is 4096 so a full
-    batch of links fits; the repair pass in `ai/argrepair.py` is the second line of defence, not the
-    first. Raise it further for a model that writes long notes; every provider still enforces its own
-    ceiling, and a turn that is cut off anyway is now reported as cut off.
-    """
-    return _env_int("IRIS_AI_MAX_TOOL_TOKENS", 4096, 32_768)
+# NO OUTPUT CAP. Iris sends no `max_tokens` on any request — the analyst's instruction, and the right
+# one: a cap Iris picks is a cap Iris cannot pick correctly. The hard-coded 1400 here is what cut
+# `build_case_graph` off at char 3313 and `add_note` at char 2308 mid-argument, and the provider then
+# refused the whole call as invalid JSON ("could not parse the arguments you sent"). The backend model
+# knows its own context window and enforces its own ceiling; a second, blind, smaller limit in front of
+# it can only truncate replies that were going to finish. See `client._chat_body`. What stays is
+# `ai/argrepair.py`, which salvages a reply the PROVIDER truncated, and the CONTEXT bound
+# (IRIS_AI_MAX_CONTEXT_TOKENS) — that one is not a limit on the model, it is when Iris folds its own
+# transcript into a brief so a long run keeps working.
 
 
 def _bad_args_message(exc: Exception, finish: str) -> str:
@@ -639,8 +630,7 @@ async def investigate(store: Any, objective: str, run_id: str,
             final_msg: dict[str, Any] = {}
             finish = ""
             try:
-                async for item in client.stream_chat(messages, tools=tools, max_tokens=tool_turn_tokens(),
-                                                     temperature=0.1):
+                async for item in client.stream_chat(messages, tools=tools, temperature=0.1):
                     # Checked INSIDE the token loop, not only between steps: a plain question streams
                     # prose and never calls a tool, so a stop that was only checked at the two old
                     # checkpoints could not interrupt it at all — which is what "there is no way to
@@ -798,8 +788,8 @@ async def investigate(store: Any, objective: str, run_id: str,
             messages.append({"role": "user", "content": WRAP_UP})
             buf = []
             wrap_msg: dict[str, Any] = {}
-            async for item in client.stream_chat(messages, tools=None, max_tokens=tool_turn_tokens(),
-                                                 temperature=0.1, tool_choice="none"):
+            async for item in client.stream_chat(messages, tools=None, temperature=0.1,
+                                                 tool_choice="none"):
                 if runs.stop_requested(run_id):
                     break
                 if item["type"] == "text":

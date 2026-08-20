@@ -1146,8 +1146,10 @@ running as it was) and the reason goes back to the model. AI-authored rules carr
   two places: Iris's own parse of `function.arguments`, and the gateway's (llama.cpp answers HTTP 500 "Failed to
   parse tool call arguments as JSON"). Both were seen live on the same investigation — `build_case_graph` cut off
   at char 3313, `add_note` at char 2308 — and both are the argument text RUNNING OUT OF TOKENS, not a model that
-  cannot write JSON. Three layers, in order: `IRIS_AI_MAX_TOOL_TOKENS` (default 4096, was 1400) so a full call
-  fits; `ai/argrepair.repair_arguments`, a mechanical repair (escape raw control characters and bare quotes inside
+  cannot write JSON. **Iris sends no `max_tokens` on any request** — that 1400-token cap was Iris's own and is
+  gone; the backend model knows its own context window and enforces its own ceiling, and a second blind limit in
+  front of it can only truncate replies that were going to finish. What remains handles the truncation Iris does
+  not control: `ai/argrepair.repair_arguments`, a mechanical repair (escape raw control characters and bare quotes inside
   a string, drop a trailing comma, and for a truncated blob discard the incomplete trailing record and close the
   JSON) whose every repair is streamed as a `warning`, recorded in the transcript and returned to the model as
   `argumentsRepaired` on the tool result — a repaired write that landed nine of ten links must never look like

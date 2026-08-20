@@ -293,23 +293,33 @@ class LLMClient:
             h["Authorization"] = f"Bearer {self.api_key}"
         return h
 
-    def _body(self, system: str, user: str, max_tokens: int, temperature: float, stream: bool,
+    def _body(self, system: str, user: str, temperature: float, stream: bool,
               json_mode: bool = False) -> dict[str, Any]:
-        body: dict[str, Any] = {"model": self.model, "stream": stream, "max_tokens": max_tokens, "temperature": temperature,
+        # NO `max_tokens` — see `_chat_body`. The model's budget is the model's to keep.
+        body: dict[str, Any] = {"model": self.model, "stream": stream, "temperature": temperature,
                                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
         if json_mode:
             body["response_format"] = {"type": "json_object"}
         return body
 
-    def _chat_body(self, messages: list[dict[str, Any]], max_tokens: int, temperature: float, stream: bool,
+    def _chat_body(self, messages: list[dict[str, Any]], temperature: float, stream: bool,
                    tools: Optional[list[dict[str, Any]]] = None, tool_choice: str = "auto") -> dict[str, Any]:
         """Body for a MULTI-TURN chat with optional tools (the investigator loop).
 
         `messages` is the running transcript — system, user, assistant (possibly with tool_calls) and
         role='tool' results — exactly as the OpenAI chat-completions schema defines it, so any
         compatible gateway that supports function calling works unchanged.
+
+        **Iris sends NO `max_tokens`, here or anywhere else**, on the analyst's instruction: no token
+        limit in Iris at all, the backend model handles tokens. The reason is on the record — a cap
+        Iris picks is a cap Iris cannot pick correctly. It was 1400, which cut `build_case_graph` off
+        at char 3313 and `add_note` at char 2308 mid-argument, and the provider then refused the whole
+        call as invalid JSON. Every gateway already enforces its own ceiling and knows its own context
+        window; a second, smaller, blind limit in front of it can only truncate replies the model was
+        going to finish. Never reintroduce it — not as a default, not as a setting.
+        `ai/argrepair.py` stays as the salvage for a reply the PROVIDER truncates.
         """
-        body: dict[str, Any] = {"model": self.model, "stream": stream, "max_tokens": max_tokens,
+        body: dict[str, Any] = {"model": self.model, "stream": stream,
                                 "temperature": temperature, "messages": messages}
         if tools:
             body["tools"] = tools
@@ -317,11 +327,11 @@ class LLMClient:
         return body
 
     # -------------------------------------------------------------- streaming
-    async def stream(self, system: str, user: str, max_tokens: int = 1200, temperature: float = 0.2) -> AsyncIterator[str]:
+    async def stream(self, system: str, user: str, temperature: float = 0.2) -> AsyncIterator[str]:
         """Yield text deltas from a chat completion."""
         if not self.configured:
             raise AIError("AI provider is not configured (settings.ai.provider = none)")
-        body = self._body(system, user, max_tokens, temperature, stream=True)
+        body = self._body(system, user, temperature, stream=True)
         # A 404 means "no chat endpoint here", not "request rejected" — walk the other conventional
         # layouts on this origin before failing, and remember whichever one answers.
         bases = [self.resolved_base] if self.resolved_base else self.candidate_bases()
@@ -369,7 +379,7 @@ class LLMClient:
 
     # ------------------------------------------------------------ tool calling
     async def stream_chat(self, messages: list[dict[str, Any]], tools: Optional[list[dict[str, Any]]] = None,
-                          max_tokens: int = 1200, temperature: float = 0.1,
+                          temperature: float = 0.1,
                           tool_choice: str = "auto") -> AsyncIterator[dict[str, Any]]:
         """One turn — retried ONCE if the model wrote tool arguments the provider could not parse.
 
@@ -387,16 +397,16 @@ class LLMClient:
         takes over, tells the model its call never ran and asks for a smaller one (prompts.ARG_TOO_BIG).
         """
         try:
-            async for item in self._stream_once(messages, tools, max_tokens, temperature, tool_choice):
+            async for item in self._stream_once(messages, tools, temperature, tool_choice):
                 yield item
             return
         except BadToolArguments:
             pass
-        async for item in self._stream_once(messages, tools, max_tokens, 0.0, tool_choice):
+        async for item in self._stream_once(messages, tools, 0.0, tool_choice):
             yield item
 
     async def _stream_once(self, messages: list[dict[str, Any]], tools: Optional[list[dict[str, Any]]] = None,
-                           max_tokens: int = 1200, temperature: float = 0.1,
+                           temperature: float = 0.1,
                            tool_choice: str = "auto") -> AsyncIterator[dict[str, Any]]:
         """One turn of a tool-using conversation, streamed.
 
@@ -409,7 +419,7 @@ class LLMClient:
         """
         if not self.configured:
             raise AIError("AI provider is not configured (settings.ai.provider = none)")
-        body = self._chat_body(messages, max_tokens, temperature, True, tools, tool_choice)
+        body = self._chat_body(messages, temperature, True, tools, tool_choice)
         bases = [self.resolved_base] if self.resolved_base else self.candidate_bases()
         async with httpx.AsyncClient(timeout=self.timeout, verify=self.verify) as client:
             for i, cand in enumerate(bases):
@@ -514,13 +524,13 @@ class LLMClient:
         yield {"type": "message", "message": msg, "finish": finish}
 
     # ------------------------------------------------------------ non-stream
-    async def complete(self, system: str, user: str, max_tokens: int = 800, temperature: float = 0.2) -> str:
+    async def complete(self, system: str, user: str, temperature: float = 0.2) -> str:
         parts: list[str] = []
-        async for chunk in self.stream(system, user, max_tokens, temperature):
+        async for chunk in self.stream(system, user, temperature):
             parts.append(chunk)
         return "".join(parts)
 
-    async def complete_json(self, system: str, user: str, max_tokens: int = 800, temperature: float = 0.0) -> dict[str, Any]:
+    async def complete_json(self, system: str, user: str, temperature: float = 0.0) -> dict[str, Any]:
         """Single non-streaming request in JSON mode; falls back to a plain request if the server rejects response_format."""
         if not self.configured:
             raise AIError("AI provider is not configured (settings.ai.provider = none)")
@@ -531,7 +541,7 @@ class LLMClient:
             for i, cand in enumerate(bases):  # same endpoint walk as stream()
                 url = f"{cand}/chat/completions"
                 resp = await client.post(url, headers=self._headers(False),
-                                         content=orjson.dumps(self._body(system, user, max_tokens, temperature, False, json_mode=True)))
+                                         content=orjson.dumps(self._body(system, user, temperature, False, json_mode=True)))
                 if resp.status_code in (404, 405) and i < len(bases) - 1:
                     continue
                 self.resolved_base = cand
@@ -539,7 +549,7 @@ class LLMClient:
             assert resp is not None
             if resp.status_code == 400 and b"response_format" in resp.content:
                 resp = await client.post(url, headers=self._headers(False),
-                                         content=orjson.dumps(self._body(system, user, max_tokens, temperature, False)))
+                                         content=orjson.dumps(self._body(system, user, temperature, False)))
             if resp.status_code >= 400:
                 raise AIError(self._http_error(resp.status_code, resp.text, url, tried=bases))
             try:
@@ -553,7 +563,8 @@ class LLMClient:
             return False, "No provider selected", None
         t0 = time.perf_counter()
         try:
-            text = await self.complete("You are a connectivity probe. Reply with the single word OK.", "ping", max_tokens=8, temperature=0.0)
+            text = await self.complete("You are a connectivity probe. Reply with the single word OK.", "ping",
+                                       temperature=0.0)
         except AIError as exc:
             # Nothing served chat completions. Probe for a /models listing so we can name a base that
             # does respond, instead of leaving the analyst to guess the path.

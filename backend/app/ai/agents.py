@@ -203,7 +203,7 @@ async def analyze_stream(store: Store, scope: str, id: Optional[str], event_ids:
     try:
         system, user = synth_prompt(outputs, header, question)
         buf: list[str] = []
-        async for chunk in client.stream(system, user, max_tokens=1600):
+        async for chunk in client.stream(system, user):
             buf.append(chunk)
             yield _sse({"type": "agent", "agent": "synthesizer", "text": chunk})
         summary, findings = _parse_synth("".join(buf), rep.summary)

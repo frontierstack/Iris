@@ -8,10 +8,12 @@ The analyst's local gateway produced this, repeatedly, mid-investigation:
 and the same run also died on the provider's own version of it (HTTP 500 "Failed to parse tool call
 arguments as JSON … column 3326"). Both numbers are the point: ~3.3 kB of argument text is roughly
 where a 1400-token reply RUNS OUT. The arguments were not gibberish — they were CUT OFF mid-string,
-because `build_case_graph` may draw up to 40 links and each carries prose and citations. The first
-fix is therefore the token budget (see `investigator.tool_turn_tokens`); this module is the second,
-because a model that writes JSON by sampling will still occasionally leave an unescaped quote or a
-raw newline inside a long string.
+because `build_case_graph` may draw up to 40 links and each carries prose and citations. That 1400
+was IRIS'S OWN cap, and the first fix was to delete it: Iris now sends no `max_tokens` on any request
+at all (see `client._chat_body`), because a cap Iris picks is a cap Iris cannot pick correctly and
+every gateway already enforces its own. This module is the second fix, for the truncation Iris does
+not control — the PROVIDER's own ceiling — and for the model that writes JSON by sampling and still
+occasionally leaves an unescaped quote or a raw newline inside a long string.
 
 What this does NOT do is guess at meaning. It performs exactly four mechanical repairs, each of which
 either succeeds or leaves the call refused:

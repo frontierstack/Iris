@@ -69,7 +69,7 @@ async def suggest_mapping(lines: list[str], current_fields: Optional[list[str]] 
         f"Sample rows ({len(sample)}):\n" + "\n".join(f"{i + 1}: {l[:400]}" for i, l in enumerate(sample))
     )
     try:
-        obj = await client.complete_json(SYSTEM, user, max_tokens=600, temperature=0.0)
+        obj = await client.complete_json(SYSTEM, user, temperature=0.0)
     except (AIError, httpx.HTTPError) as exc:
         return {**fallback, "rationale": f"AI suggestion unavailable ({exc}); showing the heuristic guess."}
     except Exception as exc:  # pragma: no cover - never 500 for a suggestion

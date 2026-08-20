@@ -8,16 +8,18 @@ Reported twice, from the analyst's own local gateway, mid-investigation:
 
 Both are the same fact: the ARGUMENT TEXT RAN OUT OF TOKENS. `build_case_graph` may draw 40 links with
 prose and citations and `add_note` writes a whole write-up, and the turn was capped at 1400 tokens —
-about 3.3 kB once the model has also written prose. So the first fix is the budget, the second is the
-mechanical repair here, and the third is telling the model its call never ran instead of ending a
-27-call investigation on a sampling accident.
+about 3.3 kB once the model has also written prose. That cap was IRIS'S, so the first fix was to stop
+sending one at all; the second is the mechanical repair here, for the truncation the PROVIDER does;
+and the third is telling the model its call never ran instead of ending a 27-call investigation on a
+sampling accident.
 """
 from __future__ import annotations
 
 import orjson
 
 from app.ai.argrepair import repair_arguments
-from app.ai.investigator import _bad_args_message, tool_turn_tokens
+from app.ai.client import LLMClient
+from app.ai.investigator import _bad_args_message
 
 
 def test_valid_json_is_returned_untouched_and_reports_no_repair():
@@ -76,14 +78,24 @@ def test_the_refusal_names_truncation_because_send_valid_json_is_unactionable():
     assert "Send valid JSON" in _bad_args_message(ValueError("invalid character"), "stop")
 
 
-def test_the_turn_budget_is_big_enough_for_a_full_batch_of_links(monkeypatch):
-    """1400 tokens is where the analyst's runs died; the default must clear a real call."""
-    monkeypatch.delenv("IRIS_AI_MAX_TOOL_TOKENS", raising=False)
-    assert tool_turn_tokens() >= 4096
-    monkeypatch.setenv("IRIS_AI_MAX_TOOL_TOKENS", "8000")
-    assert tool_turn_tokens() == 8000
-    monkeypatch.setenv("IRIS_AI_MAX_TOOL_TOKENS", "not a number")
-    assert tool_turn_tokens() == 4096
+def test_iris_sends_no_output_cap_on_any_request():
+    """The 1400 that cut `build_case_graph` off at char 3313 was IRIS'S OWN, and it is gone.
+
+    Not raised — REMOVED. A cap Iris picks is a cap Iris cannot pick correctly: every gateway already
+    enforces its own ceiling and knows its own context window, so a second, smaller, blind limit in
+    front of it can only truncate replies that were going to finish. This pins every body Iris builds,
+    because the knob was in three of them.
+    """
+    c = LLMClient("openai", model="local-model", base_url="http://127.0.0.1:9/v1", api_key="k")
+    bodies = [
+        c._body("sys", "user", 0.2, stream=True),
+        c._body("sys", "user", 0.0, stream=False, json_mode=True),
+        c._chat_body([{"role": "user", "content": "hi"}], 0.1, True, tools=[{"type": "function"}]),
+        c._chat_body([{"role": "user", "content": "hi"}], 0.1, False, tool_choice="none"),
+    ]
+    for body in bodies:
+        assert "max_tokens" not in body, "Iris must never cap what the model may write"
+        assert "max_completion_tokens" not in body, "nor under the newer spelling of it"
 
 
 def test_a_cut_inside_a_nested_value_does_not_leave_a_half_link_behind():
@@ -146,12 +158,13 @@ class _Provider:
         self.turns = list(turns)
         self.model = "local-model"
         self.configured = True
-        self.max_tokens = 0
         self.seen: list[list[dict]] = []
+        # Every keyword the loop actually passed. `max_tokens` reappearing here is the regression.
+        self.kwargs: list[dict] = []
 
-    async def stream_chat(self, messages, tools=None, max_tokens=1400, temperature=0.1, tool_choice="auto"):
+    async def stream_chat(self, messages, tools=None, temperature=0.1, tool_choice="auto", **kwargs):
         self.seen.append([dict(m) for m in messages])
-        self.max_tokens = max_tokens
+        self.kwargs.append(dict(kwargs))
         turn = self.turns.pop(0) if self.turns else {"text": "Done."}
         if turn.get("providerRefuses"):
             raise BadToolArguments("HTTP 500: Failed to parse tool call arguments as JSON: parse error "
@@ -224,6 +237,10 @@ def test_the_run_still_fails_if_it_never_stops_happening(client):
     assert last["type"] == "error" and "parse" in last["message"].lower()
 
 
-def test_the_loop_asks_for_more_tokens_than_the_budget_that_caused_this(client):
+def test_the_loop_never_caps_what_the_model_may_write(client):
+    """The investigator's own turn carries no output cap either — 1400 is what cut
+    `build_case_graph` off at 3.3 kB, and Iris no longer picks a number here at all."""
     _, p = _drive([{"text": "Done."}])
-    assert p.max_tokens >= 4096, "1400 tokens is what cut build_case_graph off at 3.3 kB"
+    assert p.kwargs, "the loop never called the model"
+    for kw in p.kwargs:
+        assert "max_tokens" not in kw and "max_completion_tokens" not in kw

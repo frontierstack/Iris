@@ -189,7 +189,7 @@ async def suggest_rule(prompt: str, examples: list[str], events: list[Event]) ->
     best: Optional[dict[str, Any]] = None
     for attempt in range(2):
         try:
-            obj = await client.complete_json(SYSTEM, user, max_tokens=700, temperature=0.0)
+            obj = await client.complete_json(SYSTEM, user, temperature=0.0)
             name, description, sev, pattern, field, ignore_case, source_filter, tags, rationale = _coerce(obj, prompt)
             compile_pattern(pattern, RuleFlags(ignoreCase=ignore_case))
         except (AIError, httpx.HTTPError, RuleError) as exc:
