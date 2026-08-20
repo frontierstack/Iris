@@ -1,0 +1,21 @@
+# Default: let git normalise text in the repo, check out native on the host.
+* text=auto
+
+# Shell scripts MUST be LF. A CRLF shebang makes Linux report
+# "/usr/bin/env: 'bash\r': No such file or directory" — the script is fine, the line ending is not.
+*.sh text eol=lf
+setup.sh text eol=lf
+start.sh text eol=lf
+uninstall.sh text eol=lf
+Dockerfile text eol=lf
+*.yml text eol=lf
+
+# PowerShell scripts stay CRLF and keep their BOM (see HOWTO: PS 5.1 decodes a BOM-less file as cp1252).
+*.ps1 text eol=crlf working-tree-encoding=UTF-8
+
+# Never diff these as text.
+*.evtx binary
+*.pkl binary
+*.png binary
+*.jpg binary
+*.pdf binary

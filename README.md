@@ -28,6 +28,7 @@ schema, runs detections, correlates events into incident clusters and an entity 
 | Force a mode | `./setup.sh gpu` · `./setup.sh cpu` · `.\setup.ps1 -Mode gpu` |
 | No Docker (native install) | `./setup.sh local` · `.\setup.ps1 -Mode local` |
 | Stop / logs | `./setup.sh down` · `./setup.sh logs` |
+| Uninstall | `./uninstall.sh` · `.\uninstall.ps1` — add `local`/`all`; your evidence is kept unless you pass `--purge-data` |
 
 Then open http://localhost:8000 and drop your first files onto the **Sources** screen.
 

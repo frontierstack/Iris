@@ -31,6 +31,7 @@ Three scripts, each with one job — plus the escape hatch:
 | `setup.ps1` / `setup.sh` | **First run.** Environment + Docker checks, GPU passthrough probe, per-host GPU wheel resolution, image build. |
 | `start.ps1` / `start.sh` | **Every day.** Bring the app up (or stop / restart / logs / status), wait for `/api/health`, open the browser. |
 | `wsl.ps1` | **Windows only.** Report and apply the WSL 2 settings Iris wants. |
+| `uninstall.ps1` / `uninstall.sh` | **Removal.** Take out the Docker install, the local install, or both. Your evidence is kept unless you ask for it to go. |
 | `docker compose` | The escape hatch if you would rather not use any of them. |
 
 One script per platform, no wrappers: the `start.cmd` / `setup.cmd` double-click launchers are gone. On Windows,
@@ -145,6 +146,52 @@ including ones that have nothing to do with Iris. That is why `-Restart` is opt-
 
 > The setting an earlier version wrote, `sysctl.vm.compact_memory=0`, is a **no-op** — `compact_memory` is a
 > write-only trigger, not a tunable. If your `.wslconfig` still has it, `wsl.ps1` will report the drift.
+
+## `uninstall.*` — removing Iris
+
+```powershell
+.\uninstall.ps1                # Docker install: container, images, and an offer to prune the build cache
+.\uninstall.ps1 local          # local (no-Docker) install: node_modules, dist, __pycache__, caches, venv
+.\uninstall.ps1 all            # both
+.\uninstall.ps1 -Pip           # local/all: also `pip uninstall` backend\requirements*.txt
+.\uninstall.ps1 -PurgeData     # ALSO delete backend\data — irreversible, and it asks you to type DELETE
+.\uninstall.ps1 -Yes           # don't ask (does NOT cover -PurgeData)
+.\uninstall.ps1 -DryRun        # print what would go and stop
+```
+
+```bash
+./uninstall.sh                 # Docker install
+./uninstall.sh local | all     # local install, or both
+./uninstall.sh --pip           # also pip uninstall the Python dependencies
+./uninstall.sh --purge-data    # ALSO delete backend/data — irreversible, asks you to type DELETE
+./uninstall.sh --yes  | -y     # don't ask (does NOT cover --purge-data)
+./uninstall.sh --dry-run | -n  # print what would go and stop
+./uninstall.sh --help | -h     # print the usage header
+```
+
+**Your evidence is kept by default.** `backend/data` holds every case, every uploaded log, `rules.json`,
+`settings.json` and `auth.json` — the one thing here that cannot be rebuilt from the repo. It goes only with
+`--purge-data` / `-PurgeData`, which prints what is about to be lost (case count, staged file count, size) and
+then requires you to type `DELETE`. `--yes` deliberately does **not** answer that prompt: an uninstall flag
+should never be the thing that quietly destroys an investigation.
+
+What each mode removes:
+
+| Mode | What goes |
+|---|---|
+| `docker` | The `iris` container (`docker compose down --remove-orphans`), the `iris:cpu` / `iris:cuda` images, and — **only if you say yes** — the shared BuildKit cache. |
+| `local` | `frontend/node_modules`, `frontend/dist`, `frontend/.vite`, every `__pycache__`, the pytest/mypy/ruff caches, and `.venv` if you made one. Python packages stay unless you pass `--pip`. |
+| `all` | Both of the above, in that order. |
+
+Three things it will not do, each on purpose:
+
+- **It never deletes the source tree it lives in.** Delete that folder yourself once you are happy — a script
+  that removes its own working directory cannot report what it did.
+- **The build cache is offered, never assumed.** BuildKit does not tag layers by project, so Iris's cache is
+  indistinguishable from every other project's on this machine. `--pip` is gated the same way: `setup.* local`
+  installs into whatever interpreter ran it rather than a venv, so those packages are very likely shared.
+- **It does not shrink `docker_data.vhdx`.** Removing the images frees space *inside* Docker; Windows does not
+  get it back until that file is made sparse — see `wsl.ps1` and the disk notes below.
 
 ## Plain `docker compose`
 
