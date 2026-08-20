@@ -273,11 +273,25 @@ export function GraphScreen() {
 
   placeTooltipRef.current = placeTooltip;
 
-  useEffect(() => sim.onTick(scheduleDraw), [sim, scheduleDraw]);
+  // The camera follows the layout while auto-fit is on. bounds() is one pass over the nodes, next to a
+  // tick that is O(n log n) — it does not show up next to the force step.
+  const onTick = useCallback(() => {
+    if (autoFit.current) fitViewRef.current(false);
+    scheduleDraw();
+  }, [scheduleDraw]);
+  useEffect(() => sim.onTick(onTick), [sim, onTick]);
   useEffect(() => {
-    const off = () => setRunning(false);
+    // One last fit when the layout goes cold, then the camera stops for good. Both paths matter: `end`
+    // fires when the simulation reaches alphaMin on its own, and the poll catches the case where it was
+    // reheated and settled between two `end` events.
+    const settle = () => { if (autoFit.current) { autoFit.current = false; fitViewRef.current(false); } };
+    const off = () => { setRunning(false); settle(); };
     sim.sim.on('end.ui', off);
-    const id = window.setInterval(() => setRunning(sim.sim.alpha() > sim.sim.alphaMin()), 500);
+    const id = window.setInterval(() => {
+      const hot = sim.sim.alpha() > sim.sim.alphaMin();
+      setRunning(hot);
+      if (!hot) settle();
+    }, 500);
     setRunning(true);
     return () => { sim.sim.on('end.ui', null); window.clearInterval(id); };
   }, [sim]);
@@ -357,6 +371,13 @@ export function GraphScreen() {
   }, [edgesData, selected]);
 
   /* ── view: pan / zoom / fly (unchanged from v1) ── */
+  /** While true the camera keeps the whole graph framed as the layout settles; any deliberate view
+   *  change turns it off for good. The reasoning is at `fitView`, where it is set. */
+  const autoFit = useRef(false);
+  const stopAutoFit = useCallback(() => { autoFit.current = false; }, []);
+  /** Same indirection as `centerOnRef` / `placeTooltipRef`: the tick and settle effects are declared
+   *  above `fitView` and must not re-subscribe every time the canvas size changes. */
+  const fitViewRef = useRef<(animate?: boolean) => void>(() => {});
   const flyRaf = useRef(0);
   const flyTo = useCallback((target: View, ms = 420) => {
     cancelAnimationFrame(flyRaf.current);
@@ -373,29 +394,55 @@ export function GraphScreen() {
   }, [applyView, placeTooltip]);
   useEffect(() => () => cancelAnimationFrame(flyRaf.current), []);
   const zoomAt = useCallback((factor: number, sx: number, sy: number, animate = false) => {
+    stopAutoFit();
     const v = viewRef.current;
     const k = Math.max(MIN_K, Math.min(MAX_K, v.k * factor));
     const x = sx - ((sx - v.x) * k) / v.k;
     const y = sy - ((sy - v.y) * k) / v.k;
     if (animate) flyTo({ x, y, k }, 180); else { viewRef.current = { x, y, k }; applyView(); placeTooltip(); }
-  }, [applyView, flyTo, placeTooltip]);
+  }, [applyView, flyTo, placeTooltip, stopAutoFit]);
   const centerOnRef = useRef<(id: string) => void>(() => {});
   const centerOn = useCallback((id: string) => {
+    stopAutoFit();
     const nd = sim.node(id);
     if (!nd || nd.x === undefined || nd.y === undefined) return;
     const k = Math.max(viewRef.current.k, 1.15);
     flyTo({ k, x: W / 2 - nd.x * k, y: H / 2 - nd.y * k });
-  }, [sim, flyTo, W, H]);
+  }, [sim, flyTo, W, H, stopAutoFit]);
   centerOnRef.current = centerOn;
-  const fitView = useCallback(() => {
+  /** `animate: false` sets the view THIS frame — for the auto-fit below, which runs per tick and would
+   *  otherwise be chasing its own 420 ms animation and never catch the layout. */
+  const fitView = useCallback((animate = true) => {
     const b = sim.bounds();
-    if (!b) { flyTo({ x: 0, y: 0, k: 1 }); return; }
+    const put = (v: View) => {
+      if (animate) { flyTo(v); return; }
+      cancelAnimationFrame(flyRaf.current);   // an in-flight fly would overwrite this on the next frame
+      viewRef.current = v;
+      applyView();
+      placeTooltip();
+    };
+    if (!b) { put({ x: 0, y: 0, k: 1 }); return; }
     const pad = 48;
     const bw = Math.max(1, b.maxX - b.minX);
     const bh = Math.max(1, b.maxY - b.minY);
     const k = Math.max(MIN_K, Math.min(MAX_K, Math.min((W - pad * 2) / bw, (H - pad * 2) / bh)));
-    flyTo({ k, x: (W - bw * k) / 2 - b.minX * k, y: (H - bh * k) / 2 - b.minY * k });
-  }, [sim, flyTo, W, H]);
+    put({ k, x: (W - bw * k) / 2 - b.minX * k, y: (H - bh * k) / 2 - b.minY * k });
+  }, [sim, flyTo, W, H, applyView, placeTooltip]);
+  fitViewRef.current = fitView;
+
+  /* ── the graph must FRAME ITSELF while it settles ────────────────────────────
+   * Reported as "the data loads, but the graph doesn't generate unless I refresh the page".
+   * Nothing was wrong with the query or the paint: `setData` restarts the simulation at alpha 1, which
+   * takes ~300 ticks (about five seconds) to settle, and the fit ran ONCE on a 400 ms timer — tick ~24
+   * of 300. At that moment every node is still inside its spawn ring, a cloud a couple of hundred pixels
+   * across, so fitting it computed a huge zoom (clamped at MAX_K). The layout then expanded for another
+   * five seconds underneath a camera that never moved again, and the whole graph drifted off the edge of
+   * the canvas: a blank screen with correct node counts beside it. Pressing 0 or Fit fixed it, and so did
+   * a reload — which is what made it look like a loading bug rather than a camera one.
+   * So the camera keeps the graph framed until the layout goes cold, and any interaction hands control
+   * back to the analyst for good — re-fitting under someone who has panned somewhere deliberately is the
+   * bug this must not become.
+   */
   /* The first nodes to arrive are FITTED into view — on a first load, and when a build that was
      running while the analyst watched finally lands. Nothing did this before: the canvas kept whatever
      pan/zoom happened to be there, so a graph that arrived after a long build could be laid out
@@ -407,12 +454,11 @@ export function GraphScreen() {
     if (!nodesData.length) { hadNodes.current = false; return; }
     if (hadNodes.current) return;
     hadNodes.current = true;
-    // a beat, so the simulation has moved the nodes off their spawn points before the bounds are read
-    const id = window.setTimeout(() => fitView(), 400);
-    return () => window.clearTimeout(id);
+    autoFit.current = true;
+    fitView(false);   // at once, so the graph is on screen from the first frame it exists
   }, [nodesData, fitView]);
 
-  const panBy = useCallback((dx: number, dy: number) => { const v = viewRef.current; flyTo({ x: v.x + dx, y: v.y + dy, k: v.k }, 120); }, [flyTo]);
+  const panBy = useCallback((dx: number, dy: number) => { stopAutoFit(); const v = viewRef.current; flyTo({ x: v.x + dx, y: v.y + dy, k: v.k }, 120); }, [flyTo, stopAutoFit]);
   const onCanvasKeyDown = (e: ReactKeyboardEvent) => {
     if ((e.target as Element).closest('.node, input, button')) return;
     const step = e.shiftKey ? 160 : 60;
@@ -458,6 +504,8 @@ export function GraphScreen() {
   const onCanvasPointerDown = (e: ReactPointerEvent) => {
     if (e.button !== 0) return;
     if ((e.target as Element).closest('.graph__tools, .graph__side-tools, .graph__querybar')) return;
+    // Touching the canvas at all — panning it, or picking up a node — is the analyst taking the camera.
+    stopAutoFit();
     const hit = hitAt(e.clientX, e.clientY);
     if (hit) { onNodePointerDown(e, hit); return; }
     const v = viewRef.current;
@@ -832,7 +880,7 @@ export function GraphScreen() {
         <div className="graph__tools">
           <button className="btn btn--sm btn--icon" onClick={() => zoomAt(1.25, W / 2, H / 2, true)} aria-label="Zoom in" title="Zoom in"><Icon.Plus /></button>
           <button className="btn btn--sm btn--icon" onClick={() => zoomAt(1 / 1.25, W / 2, H / 2, true)} aria-label="Zoom out" title="Zoom out"><Icon.Minus /></button>
-          <button className="btn btn--sm btn--icon" onClick={fitView} aria-label="Fit to view" title="Fit all nodes (double-click canvas · key 0)"><Icon.Fit /></button>
+          <button className="btn btn--sm btn--icon" onClick={() => fitView()} aria-label="Fit to view" title="Fit all nodes (double-click canvas · key 0)"><Icon.Fit /></button>
           <span className="graph__tools-sep" />
           <button className="btn btn--sm" onClick={() => { sim.relayout(); }} title="Scatter and re-run the layout"><Icon.Refresh />Re-layout</button>
           <button className={cx('btn btn--sm', pinAfterDrag && 'btn--accent')} onClick={() => setPinAfterDrag((p) => !p)} aria-pressed={pinAfterDrag} title="Keep nodes where you drop them"><Icon.Pin />Pin after drag</button>
