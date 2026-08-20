@@ -6,6 +6,10 @@
  * squeezed into 640px whatever the screen. Detaching it makes the log a window you place where you want
  * and size to the content — the rest of the page stays live behind it.
  *
+ * The AI panel is the second tenant, for the same reason turned up one notch: an investigation is
+ * WATCHED while the analyst reads the evidence it is quoting, and a modal slide-over made that two
+ * alternating screens. `flush` and `closeOnEscape` exist for it — see the props.
+ *
  * Deliberate choices:
  * - **No overlay.** The point of detaching is to keep working underneath; an overlay would take the
  *   clicks the analyst detached the window to be able to make.
@@ -16,7 +20,7 @@
  * - Pointer events (not mouse) with capture, so a drag that leaves the window keeps tracking, and touch
  *   works the same as a mouse.
  */
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { cx } from '../utils/format';
 
 export interface WinBox { x: number; y: number; w: number; h: number }
@@ -25,11 +29,14 @@ const MIN_W = 380;
 const MIN_H = 240;
 const HEADER_GRAB = 28;   // keep at least this much of the title bar on screen
 
-function clampBox(b: WinBox): WinBox {
+/** Per-window floors: a window whose own furniture is taller than the default minimum can raise it. */
+interface Mins { w: number; h: number }
+
+function clampBox(b: WinBox, min: Mins): WinBox {
   const vw = window.innerWidth;
   const vh = window.innerHeight;
-  const w = Math.min(Math.max(b.w, MIN_W), Math.max(MIN_W, vw - 16));
-  const h = Math.min(Math.max(b.h, MIN_H), Math.max(MIN_H, vh - 16));
+  const w = Math.min(Math.max(b.w, min.w), Math.max(min.w, vw - 16));
+  const h = Math.min(Math.max(b.h, min.h), Math.max(min.h, vh - 16));
   return {
     w,
     h,
@@ -38,17 +45,17 @@ function clampBox(b: WinBox): WinBox {
   };
 }
 
-function readBox(key: string, fallback: WinBox): WinBox {
+function readBox(key: string, fallback: WinBox, min: Mins): WinBox {
   try {
     const raw = localStorage.getItem(key);
-    if (!raw) return clampBox(fallback);
+    if (!raw) return clampBox(fallback, min);
     const p = JSON.parse(raw) as Partial<WinBox>;
     if (typeof p.x !== 'number' || typeof p.y !== 'number' || typeof p.w !== 'number' || typeof p.h !== 'number') {
-      return clampBox(fallback);
+      return clampBox(fallback, min);
     }
-    return clampBox(p as WinBox);
+    return clampBox(p as WinBox, min);
   } catch {
-    return clampBox(fallback);
+    return clampBox(fallback, min);
   }
 }
 
@@ -56,6 +63,7 @@ type Mode = null | { kind: 'move'; dx: number; dy: number } | { kind: 'resize'; 
 
 export function FloatingWindow({
   title, sub, actions, onClose, children, storageKey, defaultBox,
+  flush = false, ariaLabel, closeOnEscape = true, minW = MIN_W, minH = MIN_H,
 }: {
   title: ReactNode;
   sub?: ReactNode;
@@ -66,15 +74,37 @@ export function FloatingWindow({
   /** localStorage key for the remembered geometry. */
   storageKey: string;
   defaultBox?: Partial<WinBox>;
+  /**
+   * The body scrolls its own content and manages its own padding — for a child that is itself a
+   * flex column with a scrolling middle and a pinned footer (the AI panel). Without it the window
+   * scrolls the child AND the child scrolls itself, so the composer drifts off the bottom.
+   */
+  flush?: boolean;
+  /** Needed when `title` is a node rather than a string; the node is what the analyst reads. */
+  ariaLabel?: string;
+  /**
+   * Escape closes. TRUE for a viewer, FALSE for a window holding an unsent text input: a detached
+   * window is not modal, so Escape is being pressed at whatever the analyst is doing on the page
+   * underneath, and closing on it would throw away a half-written objective.
+   */
+  closeOnEscape?: boolean;
+  /**
+   * Smallest the analyst may drag it. The default suits a viewer; raise `minH` for a window with
+   * fixed furniture of its own — the AI panel spends ~170px on its title bar and pinned composer, so
+   * at the default 240 there is nothing left to read the transcript in.
+   */
+  minW?: number;
+  minH?: number;
 }) {
   const key = `iris.win.${storageKey}`;
+  const min = useMemo<Mins>(() => ({ w: minW, h: minH }), [minW, minH]);
   const [box, setBox] = useState<WinBox>(() =>
     readBox(key, {
       x: defaultBox?.x ?? Math.max(24, window.innerWidth - (defaultBox?.w ?? 900) - 40),
       y: defaultBox?.y ?? 90,
       w: defaultBox?.w ?? 900,
       h: defaultBox?.h ?? Math.min(640, window.innerHeight - 140),
-    }));
+    }, { w: minW, h: minH }));
   const mode = useRef<Mode>(null);
   const ref = useRef<HTMLDivElement | null>(null);
 
@@ -84,22 +114,23 @@ export function FloatingWindow({
 
   // A saved geometry is only valid for the viewport it was saved in.
   useEffect(() => {
-    const onResize = () => setBox((b) => clampBox(b));
+    const onResize = () => setBox((b) => clampBox(b, min));
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
-  }, []);
+  }, [min]);
 
   useEffect(() => {
+    if (!closeOnEscape) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [onClose, closeOnEscape]);
 
   const onPointerMove = (e: React.PointerEvent) => {
     const m = mode.current;
     if (!m) return;
     if (m.kind === 'move') {
-      setBox((b) => clampBox({ ...b, x: e.clientX - m.dx, y: e.clientY - m.dy }));
+      setBox((b) => clampBox({ ...b, x: e.clientX - m.dx, y: e.clientY - m.dy }, min));
       return;
     }
     const dx = e.clientX - m.px;
@@ -112,9 +143,9 @@ export function FloatingWindow({
       if (m.edge.includes('w')) { w = s.w - dx; x = s.x + dx; }
       if (m.edge.includes('n')) { h = s.h - dy; y = s.y + dy; }
       // a west/north drag that hits the minimum must stop moving the far edge, not keep sliding it
-      if (w < MIN_W && m.edge.includes('w')) x = s.x + (s.w - MIN_W);
-      if (h < MIN_H && m.edge.includes('n')) y = s.y + (s.h - MIN_H);
-      return clampBox({ x, y, w, h });
+      if (w < min.w && m.edge.includes('w')) x = s.x + (s.w - min.w);
+      if (h < min.h && m.edge.includes('n')) y = s.y + (s.h - min.h);
+      return clampBox({ x, y, w, h }, min);
     });
   };
 
@@ -143,9 +174,9 @@ export function FloatingWindow({
     <div
       ref={ref}
       className={cx('floatwin', mode.current && 'floatwin--dragging')}
-      style={{ left: box.x, top: box.y, width: box.w, height: box.h }}
+      style={{ left: box.x, top: box.y, width: box.w, height: box.h, minWidth: minW, minHeight: minH }}
       role="dialog"
-      aria-label={typeof title === 'string' ? title : 'Detached window'}
+      aria-label={ariaLabel ?? (typeof title === 'string' ? title : 'Detached window')}
       onPointerMove={onPointerMove}
       onPointerUp={endDrag}
       onPointerCancel={endDrag}
@@ -160,7 +191,7 @@ export function FloatingWindow({
           <button className="close-x" onClick={onClose} aria-label="Close">×</button>
         </div>
       </div>
-      <div className="floatwin__body">{children}</div>
+      <div className={cx('floatwin__body', flush && 'floatwin__body--flush')}>{children}</div>
       {/* edges first, corner last: the corner must win the hit test where they overlap */}
       {(['n', 's', 'e', 'w'] as const).map((edge) => (
         <div key={edge} className={`floatwin__edge floatwin__edge--${edge}`} onPointerDown={startResize(edge)} />

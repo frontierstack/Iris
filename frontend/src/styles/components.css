@@ -1073,10 +1073,15 @@
   gap: 8px;
   justify-content: flex-end;
 }
+/* THE STACK, top down: toasts (80) · modal (70 — its own scrim is a CHILD, so it rises with it) ·
+   detached windows (60) · AI panel (45) · drawer (41) · overlay (40). The modal used to sit at 50,
+   i.e. UNDER a detached window. That was invisible while the raw log was the only detachable thing;
+   the AI panel is left open over the page, so a confirm dialog could open behind it. A notification
+   must still clear a modal, which is why the toasts moved up with it. */
 .modal {
   position: fixed;
   inset: 0;
-  z-index: 50;
+  z-index: 70;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1152,7 +1157,7 @@
   position: fixed;
   right: 18px;
   bottom: 18px;
-  z-index: 60;
+  z-index: 80;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1224,7 +1229,11 @@
   gap: 8px;
 }
 /* the History toggle reads its own state from aria-pressed rather than a second class */
-.ai-panel__head .btn[aria-pressed='true'] { color: var(--accent); border-color: var(--accent-border); }
+.ai-panel__head .btn[aria-pressed='true'],
+.floatwin__actions .btn[aria-pressed='true'] { color: var(--accent); border-color: var(--accent-border); }
+/* Detached (FloatingWindow): the title bar is the window's, so the running spinner rides in the title.
+   `.floatwin__title` is a block — an inline span there would ignore the spinner's width and height. */
+.ai-win__title { display: inline-flex; align-items: center; gap: 8px; }
 .ai-panel__title {
   font-size: var(--fs-3xl);
   font-weight: 600;

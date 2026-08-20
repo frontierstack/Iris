@@ -36,6 +36,7 @@ import { useSettings } from '../hooks/queries';
 import { useToast } from '../hooks/useToast';
 import { cx, errMsg } from '../utils/format';
 import { renderMarkdown } from '../utils/markdown';
+import { FloatingWindow } from './FloatingWindow';
 import { Icon } from './icons';
 
 export interface AiTarget { scope: AiScope; id?: string; eventIds?: string[]; label: string }
@@ -67,6 +68,20 @@ export function AiPanelProvider({ children }: { children: ReactNode }) {
 }
 
 const POLL_MS = 900;
+
+/**
+ * DOCKED OR DETACHED, and the choice is remembered.
+ *
+ * The panel is a modal slide-over: it covers the right of the screen and an overlay takes every click
+ * behind it. That is wrong for THIS panel specifically — the whole value of watching a run is reading
+ * the evidence it cites while it works, and the docked panel makes that two alternating screens (open
+ * the panel, read the answer, close it, find the event, open it again). Detached it is a window: put
+ * it beside the search results, size it to the transcript, and the page underneath stays live.
+ *
+ * Same primitive as the raw log viewer (`FloatingWindow`), same storage-key convention, so the
+ * geometry survives a close and a reload — re-arranging the window on every open is its own annoyance.
+ */
+const AI_DETACHED_KEY = 'iris.ai.detached';
 
 /**
  * Which tools change the case. The PERSISTED transcript carries `writes` on every tool entry, but the
@@ -648,6 +663,13 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
   const [stopping, setStopping] = useState(false);
   const [undoingId, setUndoingId] = useState<string | null>(null);
   const [atBottom, setAtBottom] = useState(true);
+  const [detached, setDetached] = useState<boolean>(() => {
+    try { return localStorage.getItem(AI_DETACHED_KEY) === '1'; } catch { return false; }
+  });
+  const setMode = useCallback((v: boolean) => {
+    setDetached(v);
+    try { localStorage.setItem(AI_DETACHED_KEY, v ? '1' : '0'); } catch { /* private mode: it still works, it just forgets */ }
+  }, []);
 
   const abortRef = useRef<AbortController | null>(null);
   // The live `tool_call` event does not say whether a tool writes, and a write drawn as a read is the
@@ -949,13 +971,20 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
   }, [loadHistory]);
 
   /* ── focus, escape, and follow-the-stream scrolling ─────────────────────────── */
-  useEffect(() => { window.setTimeout(() => promptRef.current?.focus(), 50); }, []);
+  // Also on a dock/detach switch: the two shells are different elements, so the composer is a NEW
+  // textarea each time and the caret would otherwise land back on the page.
+  useEffect(() => { window.setTimeout(() => promptRef.current?.focus(), 50); }, [detached]);
   useEffect(() => () => abortRef.current?.abort(), []);
+  // Escape closes the DOCKED panel, which is modal and covers what is behind it. A detached window is
+  // not: it sits beside the work, Escape is being pressed at whatever the analyst is doing on the page
+  // underneath, and closing on it would throw away a half-written objective. `FloatingWindow` is told
+  // the same thing (closeOnEscape), so neither handler can close it.
   useEffect(() => {
+    if (detached) return;
     const on = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', on);
     return () => window.removeEventListener('keydown', on);
-  }, [onClose]);
+  }, [onClose, detached]);
 
   // Follow the stream ONLY when the analyst is already at the bottom. Yanking someone back while they
   // are reading is the single most annoying thing a chat UI does; "Jump to latest" is offered instead.
@@ -963,7 +992,9 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
     if (!atBottom) return;
     const el = bodyRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [entries, run?.answer, atBottom]);
+    // `detached` is in here because the two shells hold DIFFERENT scroll containers: docking a window
+    // that was following a live run must not silently jump the analyst back to the top of it.
+  }, [entries, run?.answer, atBottom, detached]);
 
   const onScroll = useCallback(() => {
     const el = bodyRef.current;
@@ -1001,6 +1032,152 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
     startRun(prompt, run && run.state !== 'running' ? run.id : undefined);
   }, [prompt, live, run, startRun]);
 
+  /* ── one set of controls, one body, two shells ────────────────────────────────
+   * Docked and detached must be the SAME panel — a second copy of the transcript, the composer or the
+   * write list is a copy that eventually drifts, and on this screen drift means one of them draws a
+   * write as a read. Only the frame around them changes.
+   */
+  const controls = (
+    <>
+      <button
+        className="btn btn--sm btn--ghost"
+        onClick={() => setView((v) => (v === 'history' ? 'chat' : 'history'))}
+        aria-pressed={view === 'history'}
+        title="Past conversations"
+      >
+        History{threadCount ? ` (${threadCount})` : ''}
+      </button>
+      <button className="btn btn--sm btn--ghost" onClick={newConversation} title="Start a new conversation">
+        <Icon.Plus />New
+      </button>
+    </>
+  );
+
+  const body = (
+    <>
+      <div className="ai-panel__body" ref={bodyRef} onScroll={onScroll}>
+        {settings.isLoading && <div className="muted">Loading assistant settings…</div>}
+        {settings.isError && <div className="compute-error">{errMsg(settings.error)}</div>}
+
+        {provider === 'none' && (
+          <div className="ai-cta">
+            <div className="ai-cta__title">AI assistant is off</div>
+            <div className="ai-cta__body">
+              Add an OpenAI API key (or point the base URL at any OpenAI-compatible endpoint such as Ollama, LM Studio or vLLM)
+              to let the assistant investigate the logs with the app&rsquo;s own search, timeline, graph and case tools. The model
+              must support tool calling.
+            </div>
+            <Link to="/settings#ai" className="btn btn--accent" onClick={onClose}>Open settings → AI assistant</Link>
+          </div>
+        )}
+
+        {provider && provider !== 'none' && view === 'history' && (
+          <HistoryList runs={runs} busy={loadingRuns} onOpen={openRun} onDelete={remove} />
+        )}
+
+        {provider && provider !== 'none' && view === 'chat' && !run && (
+          <div className="chat-empty">
+            <div className="chat-empty__title">Describe the investigation</div>
+            <div className="chat-empty__body">
+              The assistant searches the pool, opens events, walks the entity graph and writes what it finds into the
+              case &mdash; citing the event ids behind every claim. Every change it makes is listed here and can be
+              reverted in one click.
+            </div>
+            {scopeNote && (
+              <div className="chat-empty__ctx">
+                <span className="eyebrow">Context</span>
+                <span className="mono">{scopeNote}</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {provider && provider !== 'none' && view === 'chat' && run && (
+          <div className="chat">
+            {thread.map((t) => (
+              <Turn key={t.id} run={t} entries={t.transcript} live={false}
+                    undoing={undoingId === t.id} onUndo={undoRun} />
+            ))}
+            <Turn run={run} entries={entries} live={live} undoing={undoingId === run.id} onUndo={undoRun} />
+          </div>
+        )}
+
+        {error && <div className="compute-error">{error}</div>}
+      </div>
+
+      {provider && provider !== 'none' && (
+        <div className="ai-panel__foot">
+          {!atBottom && live && (
+            <button type="button" className="chat-jump" onClick={jumpToLatest}>Jump to latest</button>
+          )}
+          <form
+            className="chat-composer"
+            onSubmit={(e) => { e.preventDefault(); send(); }}
+          >
+            <textarea
+              ref={promptRef}
+              className="chat-composer__input"
+              rows={1}
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+              }}
+              placeholder={live
+                ? 'The assistant is working — stop it to ask something else'
+                : continueFrom
+                  ? 'Ask a follow-up. It keeps everything this conversation established.'
+                  : 'Describe the investigation. Enter to send, Shift+Enter for a new line.'}
+              aria-label="What should the assistant investigate?"
+              disabled={live}
+            />
+            {live ? (
+              <button type="button" className="btn btn--danger chat-composer__go" onClick={stop} disabled={stopping}>
+                {stopping ? 'Stopping…' : 'Stop'}
+              </button>
+            ) : (
+              <button type="submit" className="btn btn--accent chat-composer__go" disabled={!canSend}>
+                {continueFrom ? 'Send' : 'Investigate'}
+              </button>
+            )}
+          </form>
+          <div className="chat-composer__hint">
+            {live
+              ? 'Stop halts the run on the server at its next checkpoint — anything already written stays and can be reverted.'
+              : continueFrom
+                ? 'This continues the conversation above — the assistant keeps what it already found and does not start over. New begins a fresh one.'
+                : 'Everything is kept in History and survives a refresh. You can keep asking follow-ups in the same chat.'}
+          </div>
+        </div>
+      )}
+    </>
+  );
+
+  if (detached) {
+    return (
+      <FloatingWindow
+        storageKey="ai"
+        flush
+        closeOnEscape={false}
+        ariaLabel="AI assistant"
+        title={<span className="ai-win__title">AI assistant{live && <span className="spinner" style={{ width: 12, height: 12 }} />}</span>}
+        sub={target.label}
+        onClose={onClose}
+        defaultBox={{ w: 620, h: Math.min(760, window.innerHeight - 120) }}
+        minH={380}
+        actions={
+          <>
+            {controls}
+            <button className="btn btn--sm btn--ghost" onClick={() => setMode(false)}
+              title="Dock this back into the side panel">Dock</button>
+          </>
+        }
+      >
+        {body}
+      </FloatingWindow>
+    );
+  }
+
   return (
     <>
       <div className="overlay" onClick={onClose} />
@@ -1009,115 +1186,12 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
           <div className="ai-panel__title">AI assistant</div>
           {live && <span className="spinner" style={{ width: 12, height: 12 }} />}
           <span className="ai-panel__ctx ellipsis" title={target.label}>{target.label}</span>
-          <button
-            className="btn btn--sm btn--ghost"
-            onClick={() => setView((v) => (v === 'history' ? 'chat' : 'history'))}
-            aria-pressed={view === 'history'}
-            title="Past conversations"
-          >
-            History{threadCount ? ` (${threadCount})` : ''}
-          </button>
-          <button className="btn btn--sm btn--ghost" onClick={newConversation} title="Start a new conversation">
-            <Icon.Plus />New
-          </button>
+          {controls}
+          <button className="btn btn--sm btn--ghost" onClick={() => setMode(true)}
+            title="Detach into a window you can move and resize">Detach</button>
           <button className="close-x" onClick={onClose} aria-label="Close">×</button>
         </div>
-
-        <div className="ai-panel__body" ref={bodyRef} onScroll={onScroll}>
-          {settings.isLoading && <div className="muted">Loading assistant settings…</div>}
-          {settings.isError && <div className="compute-error">{errMsg(settings.error)}</div>}
-
-          {provider === 'none' && (
-            <div className="ai-cta">
-              <div className="ai-cta__title">AI assistant is off</div>
-              <div className="ai-cta__body">
-                Add an OpenAI API key (or point the base URL at any OpenAI-compatible endpoint such as Ollama, LM Studio or vLLM)
-                to let the assistant investigate the logs with the app&rsquo;s own search, timeline, graph and case tools. The model
-                must support tool calling.
-              </div>
-              <Link to="/settings#ai" className="btn btn--accent" onClick={onClose}>Open settings → AI assistant</Link>
-            </div>
-          )}
-
-          {provider && provider !== 'none' && view === 'history' && (
-            <HistoryList runs={runs} busy={loadingRuns} onOpen={openRun} onDelete={remove} />
-          )}
-
-          {provider && provider !== 'none' && view === 'chat' && !run && (
-            <div className="chat-empty">
-              <div className="chat-empty__title">Describe the investigation</div>
-              <div className="chat-empty__body">
-                The assistant searches the pool, opens events, walks the entity graph and writes what it finds into the
-                case &mdash; citing the event ids behind every claim. Every change it makes is listed here and can be
-                reverted in one click.
-              </div>
-              {scopeNote && (
-                <div className="chat-empty__ctx">
-                  <span className="eyebrow">Context</span>
-                  <span className="mono">{scopeNote}</span>
-                </div>
-              )}
-            </div>
-          )}
-
-          {provider && provider !== 'none' && view === 'chat' && run && (
-            <div className="chat">
-              {thread.map((t) => (
-                <Turn key={t.id} run={t} entries={t.transcript} live={false}
-                      undoing={undoingId === t.id} onUndo={undoRun} />
-              ))}
-              <Turn run={run} entries={entries} live={live} undoing={undoingId === run.id} onUndo={undoRun} />
-            </div>
-          )}
-
-          {error && <div className="compute-error">{error}</div>}
-        </div>
-
-        {provider && provider !== 'none' && (
-          <div className="ai-panel__foot">
-            {!atBottom && live && (
-              <button type="button" className="chat-jump" onClick={jumpToLatest}>Jump to latest</button>
-            )}
-            <form
-              className="chat-composer"
-              onSubmit={(e) => { e.preventDefault(); send(); }}
-            >
-              <textarea
-                ref={promptRef}
-                className="chat-composer__input"
-                rows={1}
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
-                }}
-                placeholder={live
-                  ? 'The assistant is working — stop it to ask something else'
-                  : continueFrom
-                    ? 'Ask a follow-up. It keeps everything this conversation established.'
-                    : 'Describe the investigation. Enter to send, Shift+Enter for a new line.'}
-                aria-label="What should the assistant investigate?"
-                disabled={live}
-              />
-              {live ? (
-                <button type="button" className="btn btn--danger chat-composer__go" onClick={stop} disabled={stopping}>
-                  {stopping ? 'Stopping…' : 'Stop'}
-                </button>
-              ) : (
-                <button type="submit" className="btn btn--accent chat-composer__go" disabled={!canSend}>
-                  {continueFrom ? 'Send' : 'Investigate'}
-                </button>
-              )}
-            </form>
-            <div className="chat-composer__hint">
-              {live
-                ? 'Stop halts the run on the server at its next checkpoint — anything already written stays and can be reverted.'
-                : continueFrom
-                  ? 'This continues the conversation above — the assistant keeps what it already found and does not start over. New begins a fresh one.'
-                  : 'Everything is kept in History and survives a refresh. You can keep asking follow-ups in the same chat.'}
-            </div>
-          </div>
-        )}
+        {body}
       </aside>
     </>
   );

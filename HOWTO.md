@@ -438,6 +438,12 @@ The agent uses Iris's own tools and streams each step. Everything it writes is l
 event ids or the call is refused. Conversations persist server-side — closing the tab does not stop the run, and
 **Stop** halts it on the server.
 
+**Detach** turns the panel into a floating window you can drag and resize — put it beside the search results and
+read the evidence it is citing while it works, instead of opening and closing a slide-over that covers the page.
+**Dock** puts it back, and the choice and the window's geometry are both remembered. Detached it is not modal: the
+page underneath stays clickable and <kbd>Esc</kbd> no longer closes it (that would throw away a half-written
+objective); use the × on the title bar.
+
 ### 7. Settings
 **Appearance** (5 themes + density) · **Compute** (GPU list, live utilization / VRAM / temp / power / CPU / RSS /
 parse throughput sampled every 2 s with 2–30 min charts, mode auto / CUDA / CPU, *Re-check now*, and

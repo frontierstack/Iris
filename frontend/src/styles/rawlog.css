@@ -268,6 +268,13 @@
   padding: 12px 14px 14px;
   overflow: auto;
 }
+/* `flush`: the child scrolls itself and pads itself. The AI panel is a scrolling transcript above a
+   PINNED composer — Stop has to stay reachable for the whole run — and a window that also scrolls
+   would carry that composer off the bottom edge. */
+.floatwin__body--flush {
+  padding: 0;
+  overflow: hidden;
+}
 
 /* Resize handles: 6px edges, 12px corners. Big enough to hit, invisible until you are on them. */
 .floatwin__edge, .floatwin__corner { position: absolute; touch-action: none; }
