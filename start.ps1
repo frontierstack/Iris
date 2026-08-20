@@ -184,10 +184,20 @@ function Check-Wsl {
 # ── local (no Docker) ────────────────────────────────────────────────────────
 if ($Mode -eq 'local') {
   Step "Checking Python"
-  $py = (Get-Command python -ErrorAction SilentlyContinue), (Get-Command python3 -ErrorAction SilentlyContinue) |
-        Where-Object { $_ } | Select-Object -First 1
-  if (-not $py) { Die "python not found on PATH. Install Python 3.11+ or run .\setup.ps1 -Mode local" }
-  Ok ((& $py.Source --version) 2>&1)
+  # setup.ps1 -Mode local installs into .\.venv, so prefer it: the backend dependencies are installed
+  # THERE, and starting the system interpreter instead fails with ModuleNotFoundError on fastapi.
+  $pyExe = $null
+  $venvPy = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
+  if (Test-Path $venvPy) {
+    $pyExe = $venvPy
+    Info "using the virtualenv (.venv)"
+  } else {
+    $cmd = (Get-Command python -ErrorAction SilentlyContinue), (Get-Command python3 -ErrorAction SilentlyContinue) |
+           Where-Object { $_ } | Select-Object -First 1
+    if ($cmd) { $pyExe = $cmd.Source }
+  }
+  if (-not $pyExe) { Die "python not found on PATH. Install Python 3.11+ or run .\setup.ps1 -Mode local" }
+  Ok ((& $pyExe --version) 2>&1)
 
   if (-not (Test-Path 'frontend/dist/index.html')) {
     Step "Building the UI (frontend/dist is missing)"
@@ -221,7 +231,7 @@ if ($Mode -eq 'local') {
   # page: a browser on this machine reaches localhost whatever the bind address is. That attack is
   # closed by backend/app/security.py.
   $bindHost = if ($env:IRIS_BIND_HOST) { $env:IRIS_BIND_HOST } else { '127.0.0.1' }
-  & $py.Source -m uvicorn app.main:app --host $bindHost --port $Port
+  & $pyExe -m uvicorn app.main:app --host $bindHost --port $Port
   Pop-Location
   exit $LASTEXITCODE
 }

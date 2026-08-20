@@ -173,7 +173,15 @@ open_app() {
 # ── local (no Docker) ────────────────────────────────────────────────────────
 if [ "$MODE" = "local" ]; then
   step "Checking Python"
-  PY="$PY_BIN"
+  # setup.sh local installs into ./.venv (PEP 668 makes the system interpreter unusable on current
+  # distros, and one directory is what uninstall.sh can remove cleanly). Prefer it, or the backend
+  # deps would be invisible to the interpreter this starts.
+  if [ -x .venv/bin/python ]; then
+    PY="$(cd .venv/bin && pwd)/python"
+    info "using the virtualenv (.venv)"
+  else
+    PY="$PY_BIN"
+  fi
   [ -n "$PY" ] || die "python not found. Install Python 3.11+ or run ./setup.sh local"
   ok "$("$PY" --version 2>&1)"
   if [ ! -f frontend/dist/index.html ]; then

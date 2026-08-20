@@ -32,6 +32,11 @@ schema, runs detections, correlates events into incident clusters and an entity 
 
 Then open http://localhost:8000 and drop your first files onto the **Sources** screen.
 
+**Starting from a bare machine is fine.** Setup does not assume Python, Node, Docker or tesseract are
+installed — anything missing is fetched through the system package manager (`apt`/`dnf`/`pacman`/`brew`,
+or `winget` on Windows), showing the command and asking once. Add `--yes` / `-Yes` to skip the prompts,
+or `--no-install` / `-NoInstall` to only be told what is missing.
+
 Already set up? **`.\start.ps1` / `./start.sh`** is the everyday launcher: one
 container serves the API and the UI, it waits for `/api/health` to actually answer, prints numbered steps with a
 live spinner, and opens the browser. `stop`, `restart`, `logs` and `status` do what they say.

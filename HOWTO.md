@@ -100,6 +100,8 @@ which of those is happening.
 .\setup.ps1 -Mode local    # no Docker: install Python/Node deps onto this machine
 .\setup.ps1 -Mode down     # stop & remove the container
 .\setup.ps1 -Mode logs     # follow logs
+.\setup.ps1 -Yes           # install anything missing without asking
+.\setup.ps1 -NoInstall     # never install; report what is missing and stop
 ```
 
 ```bash
@@ -108,7 +110,41 @@ which of those is happening.
 ./setup.sh local           # no Docker: install onto this machine
 ./setup.sh down            # stop & remove
 ./setup.sh logs            # follow logs
+./setup.sh --yes | -y      # install anything missing without asking
+./setup.sh --no-install    # never install; report what is missing and stop
 ```
+
+### Missing dependencies are installed, not reported
+
+**Assume a machine with nothing on it — no Python, no Node, no Docker.** Setup bootstraps whatever Iris
+needs rather than exiting with a link. Every install shows the exact command first and asks once; `--yes`
+answers yes, `--no-install` restores the old behaviour of naming the package and stopping.
+
+| Missing | Linux / macOS | Windows |
+|---|---|---|
+| Python 3.11+ | `apt` / `dnf` / `yum` / `pacman` / `zypper` / `apk` / `brew` | `winget install Python.Python.3.12` |
+| pip | `ensurepip`, then the distro package | `ensurepip` |
+| Node + npm (builds the UI) | same package managers | `winget install OpenJS.NodeJS.LTS` |
+| tesseract (screenshot OCR) | same package managers | `winget install UB-Mannheim.TesseractOCR` |
+| Docker | Docker's official `get.docker.com` script, shown before it runs; `brew install --cask docker` on macOS | `winget install Docker.DockerDesktop` (+ `wsl --install`) |
+| Compose plugin | distro package | bundled with Docker Desktop — update it |
+| NVIDIA Container Toolkit | NVIDIA's repo + `nvidia-ctk runtime configure` (native Linux only) | not applicable — a Windows driver / WSL setting, so setup states the checklist |
+
+Notes that matter in practice:
+
+- **`local` mode installs into a virtualenv at `./.venv`**, and `start.* local` uses it automatically. Two
+  reasons: Debian 12 and Ubuntu 24.04 mark the system interpreter *externally managed* (PEP 668), so a plain
+  `pip install` there fails outright; and uninstalling is then one directory rather than a guess about which
+  shared `site-packages` belong to Iris. If the venv cannot be created, setup falls back to the system
+  interpreter and passes `--break-system-packages` when PEP 668 demands it.
+- **Windows uses `winget`** (shipped as *App Installer* on Windows 10 1809+). If it is absent, setup says how
+  to get it — Microsoft Store, or https://aka.ms/getwinget — instead of failing silently. After an install it
+  rebuilds `PATH` from the registry, so a freshly installed Python or Node is usable **in the same run**.
+- **Docker Desktop usually needs one reboot** after installing before the engine starts, and its first launch
+  asks you to accept the licence. Setup says so rather than reporting an unreachable daemon.
+- **npm lifecycle scripts never run** (`--ignore-scripts`), here and in the Dockerfile — see `frontend/.npmrc`.
+- Nothing is installed without a prompt. In a non-interactive shell (CI, a pipe) with no `--yes`/`-Yes`, every
+  install is declined automatically rather than hanging on a question nobody can answer.
 
 `setup.sh` detects native Linux, WSL2, macOS and Git-Bash-on-Windows; on Git Bash it delegates to `setup.ps1` with
 the same mode. It starts Docker Desktop if it is not running, checks that Docker can *actually* see the GPU (not
@@ -118,7 +154,7 @@ just that one exists), and builds `iris:cuda` (nvidia/cuda base + cupy) or `iris
 per machine: it reads the driver's CUDA version out of `nvidia-smi` — matching both spellings, `CUDA Version:`
 (older) and `CUDA UMD Version:` (580+ drivers) — and picks `cupy-cuda11x`/`12x`/`13x` plus the matching torch index
 (`cu118`…`cu128`), torch's ROCm build on AMD, torch/MPS on Apple Silicon, or numpy alone when there is no GPU.
-`IRIS_CUPY` and `IRIS_TORCH_INDEX` override the guess.
+`IRIS_CUPY` and `IRIS_TORCH_INDEX` override the guess. The dependencies it cannot find, it installs — see above.
 
 On Windows, `setup.ps1` also checks `.wslconfig` and offers to apply the Iris settings before it builds.
 
