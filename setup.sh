@@ -132,20 +132,83 @@ pkg_install() {   # pkg_install <what-for> <pkg...>
   return 0
 }
 
+find_python() {
+  local c
+  for c in python3 python; do
+    if command -v "$c" >/dev/null 2>&1 && "$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3,11) else 1)' 2>/dev/null; then
+      command -v "$c"; return 0
+    fi
+  done
+  return 1
+}
+
+# ── 1c. Preflight ─────────────────────────────────────────────────────────────
+# nvidia-smi ships WITH the driver, so "nvidia-smi not found" cannot tell "no NVIDIA card" from
+# "NVIDIA card, no driver". Iris reported the second as the first and quietly settled for numpy on a
+# machine that has a GPU in it. Ask the PCI bus what the hardware actually is.
+nvidia_hardware() {
+  if command -v lspci >/dev/null 2>&1; then
+    lspci 2>/dev/null | grep -i 'vga\|3d controller' | grep -i nvidia | sed 's/.*: //' | head -1 && return 0
+  fi
+  # WSL has no PCI bus of its own; the Windows host driver surfaces as /dev/dxg.
+  [[ -e /dev/dxg ]] && { echo "GPU via WSL (/dev/dxg)"; return 0; }
+  ls /sys/bus/pci/devices/*/vendor 2>/dev/null | while read -r f; do
+    [[ "$(cat "$f" 2>/dev/null)" == "0x10de" ]] && { echo "NVIDIA device (PCI 0x10de)"; break; }
+  done | head -1
+}
+
+# A dependency that is checked silently is indistinguishable from one that is never checked - which
+# is how "there is no check for Python" gets reported about code that does check. Say it out loud.
+preflight() {
+  local for_what="$1" hw smi
+  log "Preflight ($for_what):"
+  row() { local mark='.'; [[ "$2" == *MISSING* || "$2" == *"NO DRIVER"* ]] && mark='!'; printf '  %s %-14s %s\n' "$mark" "$1" "$2"; }
+  if [[ "$for_what" == "local" ]]; then
+    row "Python 3.11+" "$(find_python >/dev/null 2>&1 && "$(find_python)" --version 2>&1 || echo MISSING)"
+    row "Node + npm"   "$(command -v npm >/dev/null 2>&1 && npm --version 2>&1 || echo MISSING)"
+    row "tesseract"    "$(command -v tesseract >/dev/null 2>&1 && echo present || echo 'MISSING (screenshot OCR)')"
+  else
+    row "docker"       "$(command -v docker >/dev/null 2>&1 && echo present || echo MISSING)"
+    row "compose"      "$( { docker compose version >/dev/null 2>&1 || command -v docker-compose >/dev/null 2>&1; } && echo present || echo MISSING)"
+  fi
+  smi=""; command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1 && smi=1
+  hw="$(nvidia_hardware 2>/dev/null | head -1)"
+  if   [[ -n "$smi" ]]; then row "NVIDIA GPU" "driver OK"
+  elif [[ -n "$hw"  ]]; then row "NVIDIA GPU" "$hw - NO DRIVER"
+  else                       row "NVIDIA GPU" "none (CPU mode)"; fi
+  row "pkg manager"  "$(detect_pkg_mgr)"
+}
+
+# The GPU libraries need a working driver, not just a card. Offer the distro's driver package when
+# the hardware is there and nvidia-smi is not - otherwise Iris silently runs on CPU.
+ensure_nvidia_driver() {
+  command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1 && return 0
+  local hw; hw="$(nvidia_hardware 2>/dev/null | head -1)"
+  [[ -n "$hw" ]] || return 1
+  if [[ "$ENV_KIND" == "wsl" ]]; then
+    warn "NVIDIA hardware is visible to WSL but nvidia-smi does not answer."
+    warn "The driver belongs on WINDOWS, never inside WSL: install the latest Windows NVIDIA driver"
+    warn "and run 'wsl --update'. Installing a Linux NVIDIA driver in WSL breaks GPU passthrough."
+    return 1
+  fi
+  warn "NVIDIA hardware detected ($hw) but nvidia-smi is not available - the driver is missing."
+  case "$(detect_pkg_mgr)" in
+    apt)     pkg_install "the NVIDIA driver" nvidia-driver ;;
+    dnf|yum) pkg_install "the NVIDIA driver" akmod-nvidia ;;
+    pacman)  pkg_install "the NVIDIA driver" nvidia nvidia-utils ;;
+    zypper)  pkg_install "the NVIDIA driver" nvidia-video-G06 ;;
+    *)       warn "install the driver from https://www.nvidia.com/download/index.aspx and re-run" ; return 1 ;;
+  esac || { warn "continuing without GPU acceleration (numpy)."; return 1; }
+  warn "a REBOOT is usually required after a driver install before nvidia-smi works."
+  command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1
+}
+
 # ── 1b. Native (no Docker) install ────────────────────────────────────────────
 # Same dependency set the image gets, installed straight onto the host: base always, GPU extras when a GPU is present.
 if [[ "$MODE" == "local" ]]; then
+  preflight local
 
   # --- Python -----------------------------------------------------------------
-  find_python() {
-    local c
-    for c in python3 python; do
-      if command -v "$c" >/dev/null 2>&1 && "$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3,11) else 1)' 2>/dev/null; then
-        command -v "$c"; return 0
-      fi
-    done
-    return 1
-  }
   PY="$(find_python || true)"
   if [[ -z "$PY" ]]; then
     # Distinguish "no python" from "python too old" - they need different packages and the second
@@ -284,7 +347,7 @@ if [[ "$MODE" == "local" ]]; then
     else
       log "macOS on Intel - no GPU acceleration available, CPU only (numpy)."
     fi
-  elif local_has_nvidia; then
+  elif local_has_nvidia || ensure_nvidia_driver; then
     log "NVIDIA GPU detected: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | paste -sd ',' -)"
     install_gpu_libs
   elif command -v rocminfo >/dev/null 2>&1 || [[ -e /dev/kfd ]]; then
@@ -370,6 +433,8 @@ install_docker() {
   esac
   return 1
 }
+
+[[ "$MODE" == "down" || "$MODE" == "logs" ]] || preflight docker
 
 if ! command -v docker >/dev/null 2>&1; then
   install_docker || true

@@ -84,8 +84,13 @@ function Install-Package {
   Log "$What is missing. This will run:"
   Write-Host ("        winget install --id $Id -e --accept-package-agreements --accept-source-agreements " + ($Extra -join ' '))
   if (-not (Ask "Install it now?")) { Warn "skipped - $What was not installed" ; return $false }
-  $args = @('install','--id',$Id,'-e','--accept-package-agreements','--accept-source-agreements','--disable-interactivity') + $Extra
-  & $wg @args
+  # NOTE: $args is an AUTOMATIC variable in PowerShell - never assign to it in a function.
+  $wgArgs = @('install','--id',$Id,'-e','--accept-package-agreements','--accept-source-agreements','--disable-interactivity') + $Extra
+  # Out-Host, not a bare call. A function returns EVERYTHING it writes to the output stream, so
+  # `& $wg @wgArgs` would prepend winget's chatter to the boolean and `if (Install-Package ...)`
+  # would see a non-empty array - i.e. TRUE - even when the install failed or was declined. That
+  # made a missing dependency look installed and the script carried on as though it were present.
+  & $wg @wgArgs 2>&1 | Out-Host
   # winget uses a wide range of exit codes; 0 is installed, -1978335189 is "already installed".
   if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
     Warn "installing $What failed (winget exit $LASTEXITCODE)"
@@ -103,6 +108,40 @@ function Test-Gpu {
   }
   & nvidia-smi -L *> $null
   return ($LASTEXITCODE -eq 0)
+}
+
+function Get-NvidiaHardware {
+  # nvidia-smi ships WITH the driver, so "nvidia-smi not found" cannot distinguish "no NVIDIA card"
+  # from "NVIDIA card, no driver". Iris reported the second as the first and quietly settled for
+  # numpy on a machine with a GPU in it. Ask Windows what the hardware actually is.
+  try {
+    $vc = Get-CimInstance Win32_VideoController -ErrorAction Stop |
+          Where-Object { $_.Name -match 'NVIDIA' -or $_.AdapterCompatibility -match 'NVIDIA' }
+    if ($vc) { return ((@($vc.Name)) -join ', ') }
+  } catch { }
+  return $null
+}
+
+function Ensure-CudaDriver {
+  # Returns $true when nvidia-smi works by the end of the call.
+  if (Test-Gpu) { return $true }
+  $hw = Get-NvidiaHardware
+  if (-not $hw) { return $false }          # genuinely no NVIDIA hardware - nothing to install
+  Warn "NVIDIA hardware detected ($hw) but nvidia-smi is not available:"
+  Warn "the GPU driver is missing or too old, so Iris would fall back to CPU (numpy)."
+  if ($NoInstall) { Warn "-NoInstall: not installing the NVIDIA driver" ; return $false }
+  # The CUDA package bundles a matching display driver, which is what nvidia-smi and the cupy
+  # wheels actually need. GeForce Experience is deliberately NOT used: it is an optional consumer
+  # app rather than a dependency, and it cannot be installed unattended.
+  if (Install-Package 'the NVIDIA CUDA driver + toolkit' 'Nvidia.CUDA') {
+    Update-SessionPath
+    if (Test-Gpu) { return $true }
+    Warn "CUDA installed, but nvidia-smi still does not answer - Windows usually needs a REBOOT after"
+    Warn "a driver install. Reboot and re-run to pick up GPU acceleration; Iris runs on CPU until then."
+    return $false
+  }
+  Warn "Continuing without GPU acceleration. Latest driver: https://www.nvidia.com/download/index.aspx"
+  return $false
 }
 
 # ── GPU wheel resolution ─────────────────────────────────────────────────────
@@ -150,19 +189,52 @@ function Find-Python {
   return $null
 }
 
+function Install-PythonDirect {
+  # winget is the happy path, but a machine that has never been updated may not have App Installer at
+  # all - and telling someone to install a package manager in order to install Python is not an
+  # answer. Fall back to python.org's own installer, run silently, for the whole machine if we are
+  # elevated and for this user if we are not.
+  if ($NoInstall) { return $false }
+  $ver = '3.12.8'
+  $arch = if ([Environment]::Is64BitOperatingSystem) { 'amd64' } else { 'win32' }
+  $url  = "https://www.python.org/ftp/python/$ver/python-$ver-$arch.exe"
+  $dest = Join-Path $env:TEMP "python-$ver-$arch.exe"
+  Log "Python is missing and winget is unavailable. This will download and run:"
+  Write-Host "        $url"
+  if (-not (Ask "Download and install Python $ver now?")) { return $false }
+  try {
+    # TLS 1.2 is not the default in Windows PowerShell 5.1, and python.org refuses anything older,
+    # so the download fails with a bare "could not create SSL/TLS secure channel" without this.
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    Log "Downloading Python $ver ..."
+    Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
+  } catch {
+    Warn "download failed: $($_.Exception.Message)"
+    return $false
+  }
+  $inst = @('/quiet','InstallLauncherAllUsers=1','PrependPath=1','Include_pip=1')
+  if (Test-Admin) { $inst += 'InstallAllUsers=1' }
+  Log "Installing Python (silent)..."
+  $p = Start-Process -FilePath $dest -ArgumentList $inst -Wait -PassThru
+  Remove-Item $dest -Force -ErrorAction SilentlyContinue
+  if ($p.ExitCode -ne 0) { Warn "the Python installer exited with $($p.ExitCode)" ; return $false }
+  Update-SessionPath
+  return $true
+}
+
 function Ensure-Python {
   $py = Find-Python
   if ($py) { return $py }
   $any = Get-Command python -ErrorAction SilentlyContinue
   if ($any) { Warn "a 'python' was found but it is either the Microsoft Store stub or older than 3.11" }
-  if (Install-Package 'Python 3.12' 'Python.Python.3.12') {
+  else      { Warn "no usable Python 3.11+ on this machine" }
+  $done = Install-Package 'Python 3.12' 'Python.Python.3.12'
+  if (-not $done) { $done = Install-PythonDirect }
+  if ($done) {
+    # The installer adds python to PATH, but this process still holds the environment block it
+    # started with, so the refresh is what makes it visible in the SAME run.
+    Update-SessionPath
     $py = Find-Python
-    if (-not $py) {
-      # The installer adds python to PATH, but a brand-new machine may still need the refresh below
-      # to see it, and py.exe (the launcher) is registered even when python.exe is not on PATH yet.
-      Update-SessionPath
-      $py = Find-Python
-    }
   }
   return $py
 }
@@ -180,7 +252,8 @@ function Ensure-Tesseract {
   # The image parser shells out to the tesseract BINARY. Without it, screenshots and photographed
   # screens fail at PARSE time rather than at setup time, which is the worst moment to find out.
   if (Get-Command tesseract -ErrorAction SilentlyContinue) {
-    Log "OCR: $((& tesseract --version 2>&1 | Select-Object -First 1))"
+    $ver = (& tesseract --version 2>&1 | Select-Object -First 1)
+    Log "OCR: $ver"
     return $true
   }
   if (Install-Package 'tesseract (OCR for screenshots)' 'UB-Mannheim.TesseractOCR') {
@@ -201,9 +274,38 @@ function Ensure-Tesseract {
   return $false
 }
 
+# ── Preflight ───────────────────────────────────────────────────────
+# Print what Iris needs and what this machine has, BEFORE doing anything. A dependency that is
+# checked silently is indistinguishable from one that is not checked at all - which is exactly how
+# "there is no check for Python" gets reported about code that does check.
+function Show-Preflight {
+  param([string]$For)
+  Log "Preflight ($For):"
+  $rows = @()
+  if ($For -eq 'local') {
+    $py = Find-Python
+    $rows += ,@('Python 3.11+', $(if ($py) { (& $py --version) 2>&1 } else { 'MISSING' }))
+    $rows += ,@('Node + npm',   $(if (Get-Command npm -ErrorAction SilentlyContinue) { (& npm --version) 2>&1 } else { 'MISSING' }))
+    $rows += ,@('tesseract',    $(if (Get-Command tesseract -ErrorAction SilentlyContinue) { 'present' } else { 'MISSING (screenshot OCR)' }))
+  } else {
+    $rows += ,@('docker',  $(if (Get-Command docker -ErrorAction SilentlyContinue) { 'present' } else { 'MISSING' }))
+    $rows += ,@('wsl',     $(if (Get-Command wsl -ErrorAction SilentlyContinue) { 'present' } else { 'MISSING' }))
+  }
+  $hw  = Get-NvidiaHardware
+  $smi = Test-Gpu
+  $gpu = if ($smi) { 'driver OK' } elseif ($hw) { "$hw - NO DRIVER" } else { 'none (CPU mode)' }
+  $rows += ,@('NVIDIA GPU', $gpu)
+  $rows += ,@('winget', $(if (Get-Command winget -ErrorAction SilentlyContinue) { 'present' } else { 'MISSING - cannot auto-install' }))
+  foreach ($r in $rows) {
+    $mark = if ("$($r[1])" -match 'MISSING|NO DRIVER') { '  !' } else { '  .' }
+    Write-Host ("{0} {1,-14} {2}" -f $mark, $r[0], $r[1])
+  }
+}
+
 # ── Native (no Docker) install ───────────────────────────────────────────────
 # Mirrors what the Docker image does, straight onto the host: base deps always, GPU deps that match THIS machine.
 if ($Mode -eq 'local') {
+  Show-Preflight 'local'
   $py = Ensure-Python
   if (-not $py) { Die "Python 3.11+ not found and could not be installed. Install it and re-run: https://www.python.org/downloads/" }
   Log "Python: $((& $py --version) 2>&1)"
@@ -236,7 +338,7 @@ if ($Mode -eq 'local') {
 
   Ensure-Tesseract | Out-Null
 
-  if (Test-Gpu) {
+  if (Ensure-CudaDriver) {
     $names = ((& nvidia-smi --query-gpu=name --format=csv,noheader 2>$null) -join ', ')
     Log "NVIDIA GPU detected: $names"
     $w = Resolve-GpuWheels
@@ -312,6 +414,8 @@ function Ensure-Wsl {
   return $true
 }
 
+if ($Mode -ne 'down' -and $Mode -ne 'logs') { Show-Preflight 'docker' }
+
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
   Ensure-Wsl | Out-Null
   Ensure-Docker | Out-Null
@@ -373,7 +477,10 @@ function Get-Backend {
 
 $useGpu = $false
 if ($Mode -eq 'cpu') { Log "CPU mode forced." }
-elseif ($Mode -eq 'gpu' -or (Test-Gpu)) {
+elseif ($Mode -eq 'gpu' -or (Test-Gpu) -or (Get-NvidiaHardware)) {
+  # No-op when nvidia-smi already works; when the card is present but the driver is not, this offers
+  # the install instead of silently choosing the CPU image.
+  Ensure-CudaDriver | Out-Null
   $names = ((& nvidia-smi --query-gpu=name --format=csv,noheader 2>$null) -join ', ')
   if (-not $names) { $names = 'NVIDIA GPU' }
   Log "NVIDIA GPU detected: $names"
