@@ -215,3 +215,35 @@ def test_deleting_a_skipped_file_clears_the_warning(c, monkeypatch) -> None:
         assert restarted.delete(f"/api/library/unattached/{row['fileName']}").status_code == 200
         case = restarted.get("/api/case").json()
         assert case["poolSkipped"] == 0 and case["poolSkippedFiles"] == []
+
+
+def test_case_still_answers_while_a_skipped_file_is_in_the_plan() -> None:
+    """GET /api/case must not 500 because a file was skipped.
+
+    `Store._plan_state(name, "skipped")` is a real state of the pool-load plan, but
+    `PoolFileProgress.state` was declared `Literal["pending","parsing","done","error"]`, so building
+    the response raised a pydantic ValidationError and the most-called endpoint in the app returned
+    500 for the whole window a skipped file sat in `pool_plan`. Seen live on a 617-source library
+    with `poolSkipped: 1`.
+
+    Driven through `_pool_files` directly rather than through a real capped load: `poolProgress` is
+    None once `pool_loading` clears, so the failing window is the load itself and asserting on it via
+    the API is a race. The state transition is what regressed, so that is what is pinned.
+
+    The value is kept distinct on purpose. "the parser failed" (error) and "this file was never read"
+    (skipped) have different fixes, and collapsing them would file evidence that is absent from
+    search behind a message about parsing.
+    """
+    st = store_mod.STORE
+    with st.lock:
+        st.pool_plan["huge.log"] = {"file": "huge.log", "size": 1 << 20, "state": "pending", "events": 0}
+        st._plan_state("huge.log", "skipped", size=1 << 20)
+    try:
+        rows = st._pool_files(None)
+        by_file = {r.file: r.state for r in rows}
+        assert by_file.get("huge.log") == "skipped", by_file
+        # It must survive serialisation too - the 500 came from pydantic, not from the dict above.
+        assert any(r.model_dump()["state"] == "skipped" for r in rows)
+    finally:
+        with st.lock:
+            st.pool_plan.pop("huge.log", None)

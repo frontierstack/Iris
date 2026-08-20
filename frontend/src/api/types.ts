@@ -154,7 +154,10 @@ export interface PoolProgress {
   files: PoolFileProgress[];
 }
 export interface PoolFileProgress {
-  file: string; size: number; state: 'pending' | 'parsing' | 'done' | 'error';
+  file: string; size: number;
+  /** 'skipped' = not loaded (no memory headroom); its events are NOT searchable. Distinct from
+   *  'error', which means the file WAS read and the parser failed. */
+  state: 'pending' | 'parsing' | 'done' | 'error' | 'skipped';
   bytesDone: number; pct: number; events: number;
 }
 

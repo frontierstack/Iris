@@ -457,7 +457,12 @@ class PoolFileProgress(BaseModel):
     per-file information in the whole payload was `currentFile`."""
     file: str
     size: int = 0
-    state: Literal["pending", "parsing", "done", "error"] = "pending"
+    # "skipped" is load-bearing: `Store._plan_state(name, "skipped")` runs when a file will not fit in
+    # memory, and its events are NOT in the pool. Leaving it out of this Literal made GET /api/case
+    # raise a ValidationError (a 500 on the most-called endpoint in the app) for the whole window a
+    # skipped file was in the plan. Never coerce it to "error" or "done": "the parser failed" and
+    # "this file was never read" have different fixes, and the analyst is told which.
+    state: Literal["pending", "parsing", "done", "error", "skipped"] = "pending"
     bytesDone: int = 0
     pct: float = 0.0
     events: int = 0

@@ -63,7 +63,12 @@ interface PoolProgress { bytesDone:number; bytesTotal:number; pct:number /*0..10
      which of 40 files were already in the pool and which had not been touched. Populated for the whole
      plan from the moment the load starts; `bytesDone`/`pct` are live for the file being parsed. */
   files:PoolFileProgress[] }
-interface PoolFileProgress { file:string; size:number; state:'pending'|'parsing'|'done'|'error';
+interface PoolFileProgress { file:string; size:number;
+  /* 'skipped' = the file was NOT loaded (no memory headroom) and its events are NOT searchable.
+     It is a distinct outcome from 'error' (parsed, parser failed) and must never be shown as 'done'
+     — a file silently absent from search is indistinguishable from a search that found nothing.
+     `Case.poolSkipped` / `LibraryFile.skipReason` carry the reason. */
+  state:'pending'|'parsing'|'done'|'error'|'skipped';
   bytesDone:number; pct:number; events:number }
 
 /* The WORKSPACE, seen through the (optional) active case.
