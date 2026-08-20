@@ -2063,7 +2063,7 @@ class Store:
         cannot help, the work is pure-Python and CPU bound behind the GIL. It degrades to the single
         worker below whenever the parser is not chunkable, the file is small, or the pool will not start.
         """
-        from .jobs import PARSE_PROGRESS, PROGRESS_EVERY_RECORDS
+        from .jobs import PARSE_PROGRESS, PROGRESS_EVERY_RECORDS, progress_step
         from .parsers import parallel as par
 
         prep = par.prepare(parser, data)
@@ -2087,11 +2087,17 @@ class Store:
         parsed: list[ParsedEvent] = []
         n = 0
         approx = 0
+        # Publish on a BYTE step as well as the record count. The record count alone never fires on a
+        # small file - at 20,000 records a 5,000-line log ticked ZERO times, so its bar read 0 % for
+        # the whole parse and then jumped to done. Whichever comes first wins; see jobs.progress_step.
+        step = progress_step(len(data))
+        next_at = step
         for pe in parser.parse_bytes(data):
             parsed.append(pe)
             n += 1
             approx += len(pe.raw) + 1
-            if n % PROGRESS_EVERY_RECORDS == 0:
+            if approx >= next_at or n % PROGRESS_EVERY_RECORDS == 0:
+                next_at = approx + step
                 PARSE_PROGRESS.advance(sid, done=min(approx, len(data)), events=n)
         return [par.normalize_batch(parsed, sid, src.file, parser.family)]
 

@@ -555,3 +555,54 @@ def test_repeated_field_strings_are_shared_within_a_batch():
     # ...and a value that really is unique per row is NOT forced into the cache forever
     urls = {id(e.fields["url"]) for e in events if "url" in e.fields}
     assert len(urls) > 100, "unique values should not be pretending to be shared"
+
+
+# --------------------------------------------------------------- the bar must actually move
+# "the parsing indicator in sources ... it's just showing as 0%". Progress was published ONLY on
+# `n % PROGRESS_EVERY_RECORDS == 0` (20,000), so a 5,000-line file never reached the modulo and
+# published NOTHING between start and done: the bar read 0 % for the whole parse and then jumped to
+# complete. A 25,000-line file ticked exactly once, at 80 %. On a library of 617 mostly-small files
+# that is every file. Bytes are what `pct` is computed from, so the cadence steps in bytes too.
+#
+# Driven through a fresh Store like its neighbours above, at the SHIPPED cadence: nothing here turns
+# PROGRESS_EVERY_RECORDS down, because the whole point is that the record count alone never fires.
+def _mid_parse_pcts(monkeypatch, rows: int) -> list[float]:
+    data = _csv(rows)
+    seen: list[float] = []
+    real = PARSE_PROGRESS.advance
+
+    def _advance(key, **kw):  # type: ignore[no-untyped-def]
+        real(key, **kw)
+        row = PARSE_PROGRESS.get(key)
+        if row and row["bytesTotal"] and row["phase"] != "merging" and 0 < row["pct"] < 100:
+            seen.append(row["pct"])
+
+    monkeypatch.setattr(PARSE_PROGRESS, "advance", _advance)
+    st = Store()
+    st.pending = False
+    with st.bulk_load():
+        st.add_file(f"bar{rows}.csv", data, background_ok=False, sid=f"bar{rows}")
+    return seen
+
+
+@pytest.mark.parametrize("rows", [5_000, 25_000])
+def test_a_small_file_publishes_real_progress_not_just_zero(rows, monkeypatch) -> None:
+    pcts = _mid_parse_pcts(monkeypatch, rows)
+    assert len(pcts) >= 5, (
+        f"{rows} rows published only {len(pcts)} mid-parse update(s) {pcts}: the bar sits at 0 % for "
+        f"the whole parse. Progress must not depend on a record count alone.")
+    # It has to MOVE, not merely exist: a run of identical values is the same blank bar.
+    assert len(set(pcts)) >= 5, f"progress did not advance: {pcts}"
+    assert max(pcts) > 50.0, f"progress never passed halfway before completion: {pcts}"
+    assert pcts == sorted(pcts), f"progress went backwards: {pcts}"
+
+
+def test_the_publish_cadence_scales_with_the_file() -> None:
+    """~100 publishes whatever the size, with a floor so a small file still moves and a big one does
+    not take the tracker lock per record."""
+    from app.jobs import progress_step
+
+    assert progress_step(400 * 1024) == 32 * 1024, "a small file needs the floor, not total//100"
+    for size in (5 << 20, 50 << 20, 1024 << 20):
+        publishes = size // progress_step(size)
+        assert 50 <= publishes <= 150, f"{size >> 20} MB would publish {publishes} times"

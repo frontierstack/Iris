@@ -86,6 +86,11 @@ def raw_events(sid: str, filename: str, family: str, data: bytes, prefix: str,
     ts_cache: dict[str, str] = {}
     lead = leading_ts
     every = max(1, int(jobs.PROGRESS_EVERY_RECORDS))   # read once per call, so a test can turn it down
+    # ...and a BYTE step as well, because a record count alone never fires on a small file: at
+    # 20,000 records a 5,000-line log published nothing at all and its bar read 0 % start to
+    # finish. Whichever comes first wins. See jobs.progress_step.
+    step = jobs.progress_step(len(data))
+    next_at = step
     for line in text.splitlines():
         done += len(line) + 1
         if not line.strip():
@@ -101,7 +106,8 @@ def raw_events(sid: str, filename: str, family: str, data: bytes, prefix: str,
         n += 1
         # the raw phase is fast but not instant on a gigabyte, and a progress bar that only ever reads
         # 0% or 100% is the same "is it hung?" question this whole change exists to answer
-        if progress is not None and not len(out) % every:
+        if progress is not None and (done >= next_at or not len(out) % every):
+            next_at = done + step
             progress(min(done, len(data)), len(out))
     return out
 

@@ -67,6 +67,22 @@ def _iso(ts: float) -> str:
 PROGRESS_EVERY_RECORDS = 20_000
 
 
+def progress_step(total: int) -> int:
+    """Bytes of source log between two progress publishes, for a file of `total` bytes.
+
+    A RECORD count alone cannot drive a progress bar. At 20,000 records a 5,000-line file never
+    reaches the modulo and publishes NOTHING between "start" and "done": the bar reads 0 % for the
+    whole parse and then jumps to complete. A 25,000-line file ticks exactly once, at 80 %. On a
+    library of 617 mostly-small files that is every file, which is what "it's just showing 0%" was.
+
+    Bytes are also what `pct` is computed from, so stepping in bytes makes the tick cadence and the
+    number on screen the same quantity. ~100 publishes per file whatever its size, with a 32 KB floor
+    so a tiny file still moves and a big one is not publishing per record (each publish takes the
+    tracker lock and credits throughput).
+    """
+    return max(32 * 1024, int(total) // 100)
+
+
 @dataclass
 class ParseProgress:
     key: str                  # source id
