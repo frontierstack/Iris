@@ -24,7 +24,7 @@ so a container run and a local `uvicorn` run share the same evidence.
 
 # Scripts
 
-Three scripts, each with one job — plus the escape hatch:
+Four scripts, each with one job — plus the escape hatch:
 
 | Script | Job |
 |---|---|
@@ -517,7 +517,9 @@ Full contract: `docs/API_CONTRACT.md`.
 - **Docker not running** — the setup scripts start Docker Desktop for you; otherwise start it and re-run.
 - **Container keeps restarting / segfaults during a big load (Windows)** — run `.\wsl.ps1`, apply the settings, and
   `wsl --shutdown` when you can afford to stop your containers.
-- **Wipe everything** — Settings → Data → *Clear all data*. `docker compose down -v` does not: the evidence is a
-  bind mount at `./backend/data`, not a volume.
+- **Wipe everything** — Settings → Data → *Clear all data* empties the workspace but leaves Iris installed.
+  `docker compose down -v` does **not** wipe it either: the evidence is a bind mount at `./backend/data`, not a
+  volume. To remove the install as well, see [`uninstall.*`](#uninstall--removing-iris) — and note that it too
+  keeps your data unless you pass `--purge-data` / `-PurgeData`.
 - **Sources table looks empty after upload** — files parse in the background; the state pill shows PARSING then
   READY / REVIEW / MAP / ERROR (hover ERROR for the reason).
