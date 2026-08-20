@@ -3080,37 +3080,161 @@ mark.hl {
 .tl__day-rule { flex: 1; height: 1px; background: var(--border); }
 /* Room to breathe. Entries were 8px apart with a hairline between them, which reads as a table of
    rows rather than a chronology — and a curated timeline is the thing the analyst reads most slowly. */
-.tl__body { padding: 11px 14px 12px 8px; min-width: 0; }
+.tl__body { padding: 0 8px 0 0; min-width: 0; }
 .tl__item { transition: background 90ms linear; }
 .tl__item:hover { background: var(--hover); }
 .tl__row {
   display: flex;
-  /* top, not centre: the message may run to two lines and the timestamp must stay on the first */
   align-items: flex-start;
-  gap: 9px;
+  gap: 4px;
   min-width: 0;
 }
 .tl__ts { flex: 0 0 auto; font-size: var(--fs-sm); white-space: nowrap; color: var(--text-3);
   font-variant-numeric: tabular-nums; line-height: 1.5; }
-/* The raw line is CONTEXT, not the headline: on a curated timeline the analyst's own label and note
-   are what they came back to read, and a 240-character proxy record filled the card. One line, quiet,
-   full text on hover and on the event page. */
-.tl__msg {
+/* THE ROW IS THE CLAIM, THE OPENED ENTRY IS THE EVIDENCE.
+   The row used to carry the log line, which is the wrong altitude for a chronology: what is read down
+   the page is when it happened and what the analyst concluded. So the row is one button — the whole of
+   it, so there is no small target to find — and the raw line, the parsed fields, the entities and the
+   detections live in `.tlx` underneath, one click away. */
+.tl__summary {
   flex: 1 1 auto;
   min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 4px 12px 8px;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
+}
+.tl__summary:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; border-radius: var(--radius-sm); }
+.tl__chev {
+  flex: 0 0 auto;
+  color: var(--muted-3);
+  transform: rotate(-90deg);            /* the glyph points down; closed points at the row */
+  transition: transform 120ms ease, color 120ms linear;
+}
+.tl__chev--open { transform: rotate(0deg); color: var(--text-4); }
+/* The pace of the sequence, and only within a day — "+19h" across a date heading restates the heading. */
+.tl__gap {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--muted-3);
+  font-variant-numeric: tabular-nums;
+}
+.tl__title {
+  flex: 1 1 auto;
+  min-width: 0;
   line-height: 1.5;
-  font-size: var(--fs-sm);
-  color: var(--text-3);
+  font-size: var(--fs-base);
+  color: var(--text-2);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.tl__msg:hover { color: var(--text-2); }
-.tl__msg:hover { text-decoration: underline; }
+.tl__noteglyph { color: var(--muted-2); margin-right: 7px; vertical-align: -2px; }
+/* No note yet, so the row falls back to the log's own words — and says so by looking like a log line
+   rather than like a sentence someone wrote. */
+.tl__title--log { font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--text-3); }
+.tl__summary:hover .tl__title { color: var(--text-bright); }
+/* The clock, the chips and the file name keep their size whatever the title does — the title is the
+   only thing that may give up room, because it is the only thing an ellipsis does not destroy. */
+.tl__summary > .tag, .tl__summary > .sev { flex: 0 0 auto; }
 .tl__src { flex: 0 0 auto; max-width: 140px; font-size: var(--fs-sm); line-height: 1.5; }
-/* The label chips and the row's buttons sit on the first line whatever the message does. */
-.tl__row > .tag, .tl__row > .sev, .tl__row > .btn { flex: 0 0 auto; margin-top: 0; }
+/* Dimmed, never hover-hidden: a control that only exists on hover is unreachable by touch. */
+.tl__x { align-self: center; margin: 0 2px; opacity: 0.5; transition: opacity var(--t-fast); }
+.tl__item:hover .tl__x, .tl__x:focus-visible { opacity: 1; }
+.tl__item--open { border-color: var(--border-strong); }
+
+/* ── the opened entry ── */
+.tlx {
+  border-top: 1px solid var(--border);
+  padding: 13px 6px 15px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+}
+/* Identity as labelled chips, not one dot-separated sentence — the event id above all, because that is
+   what every note, indicator and report citation has to quote. */
+.tlx__facts { display: flex; flex-wrap: wrap; gap: 6px; }
+.tlx__fact {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 3px 9px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  background: var(--panel-inset);
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+.tlx__fact i {
+  font-style: normal;
+  font-size: var(--fs-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+  flex: 0 0 auto;
+}
+.tlx__fact b { font-weight: 600; color: var(--text-bright); }
+.tlx__fact--file span {
+  display: inline-block;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+.tlx__sec { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.tlx__eyebrow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--fs-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+.tlx__hint { text-transform: none; letter-spacing: 0; color: var(--muted-3); }
+/* The line as the log recorded it. Capped, because one JSON record can be thousands of characters and
+   an entry is not a file viewer; `.raw` already scrolls and wraps. */
+.tlx__raw { margin: 0; max-height: 240px; font-size: var(--fs-sm); line-height: 1.65; }
+.tlx__norm { display: flex; gap: 8px; align-items: baseline; font-size: var(--fs-sm); color: var(--text-3); min-width: 0; }
+.tlx__norm i {
+  font-style: normal;
+  font-size: var(--fs-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+  flex: 0 0 auto;
+}
+.tlx__norm span { min-width: 0; word-break: break-word; }
+/* The shared grid is padded for a full page; inside an entry it is already inside a panel. */
+.fields-grid--tight { padding: 0; gap: 9px 22px; }
+.tlx__empty { font-size: var(--fs-base); color: var(--muted-2); line-height: 1.55; }
+.tlx__labels { display: flex; flex-wrap: wrap; gap: 6px; }
+.tlx__dets { display: flex; flex-direction: column; gap: 10px; }
+.tlx__acts { display: flex; flex-wrap: wrap; gap: 8px; }
+.tlx__more { align-self: flex-start; }
+/* Curation is never lost to a reload: an entry whose line is not loaded is KEPT and explained. */
+.tlx__gone {
+  border-left: 2px solid var(--warn);
+  padding: 4px 0 4px 11px;
+  font-size: var(--fs-base);
+  color: var(--text-3);
+  line-height: 1.55;
+}
+@media (max-width: 720px) {
+  .fields-grid--tight { grid-template-columns: 1fr; }
+  .tl__src, .tl__gap { display: none; }
+}
+
 .tl__note {
   margin: 8px 0 0 2px;
   font-size: var(--fs-base);

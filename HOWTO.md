@@ -406,9 +406,20 @@ Press `/` to focus. Examples:
 The Cases page is a card grid (a filter/sort toolbar appears above three cases). Name and analyst are edited
 inline. Deleting a case moves it to the trash (last 5 kept) — **Recently deleted** restores it.
 
-Inside a case: the **timeline** (the curated events in time order, labels and notes edited in place, add from a
-source or from Search), **notes** (markdown, paste screenshots), **indicators**, its **sources**, and the report
-export (Markdown / JSON / STIX 2.1 / PDF).
+Inside a case: the **timeline**, **notes** (markdown, paste screenshots), **indicators**, its **sources**, and the
+report export (Markdown / JSON / STIX 2.1 / PDF).
+
+**The timeline** is the curated events in time order, grouped under sticky date headings, with the gap since the
+previous entry (`+3m 12s`) so the pace of the sequence is visible. Each row leads with **your** sentence — the
+first line of the note — and shows the clock, severity and labels; an entry you have not written up yet falls back
+to the log's own message, in mono, so it is clear whose words those are.
+
+**Click any row to open it.** The log line is in there, not on the row: the event id to cite, the full UTC
+timestamp, the file and host and user, your note and labels with their editor, then the **raw line exactly as the
+log recorded it**, the fields parsed out of it, the entities it mentions and the detections it fired — plus a
+button through to the full event page. Several entries can be open at once, so two moments can be compared side by
+side. Add lines from a file in this case or from Search; the header line says how many events, what window they
+span and how many are annotated.
 
 ### 4. Anomalies and rules
 The anomaly list and the rule catalogue, each with a text filter and chips that carry their own counts. A rule has
