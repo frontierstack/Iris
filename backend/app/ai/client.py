@@ -380,8 +380,11 @@ class LLMClient:
         tool call arguments as JSON … column 315" mid-investigation and ended the run with a message
         telling them to change model.
 
-        Exactly one retry. A model that cannot emit valid JSON for this call will not learn to on the
-        third attempt, and a run that silently re-asks a provider forever is worse than a clear failure.
+        Exactly one retry, and it is taken at temperature 0: the retry exists to get a CLEANER sample
+        of the same call, and sampling is what produced the unescaped quote. A model that cannot emit
+        valid JSON for this call will not learn to on the third attempt, and a run that silently
+        re-asks a provider forever is worse than a clear failure — past this the investigator loop
+        takes over, tells the model its call never ran and asks for a smaller one (prompts.ARG_TOO_BIG).
         """
         try:
             async for item in self._stream_once(messages, tools, max_tokens, temperature, tool_choice):
@@ -389,7 +392,7 @@ class LLMClient:
             return
         except BadToolArguments:
             pass
-        async for item in self._stream_once(messages, tools, max_tokens, temperature, tool_choice):
+        async for item in self._stream_once(messages, tools, max_tokens, 0.0, tool_choice):
             yield item
 
     async def _stream_once(self, messages: list[dict[str, Any]], tools: Optional[list[dict[str, Any]]] = None,

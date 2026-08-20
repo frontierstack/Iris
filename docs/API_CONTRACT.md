@@ -1142,6 +1142,19 @@ running as it was) and the reason goes back to the model. AI-authored rules carr
   only `text` deltas meant a provider that streams no prose deltas (legal — `client.stream_chat` always yields
   the assembled `message`) produced an EMPTY report after a full-length run, which is exactly the "it ran for
   ages and gave me no answer" complaint. The report the model wrote was in the message the whole time.
+- **Malformed tool arguments cost the call, never the run.** A small local model writing a long call fails in
+  two places: Iris's own parse of `function.arguments`, and the gateway's (llama.cpp answers HTTP 500 "Failed to
+  parse tool call arguments as JSON"). Both were seen live on the same investigation — `build_case_graph` cut off
+  at char 3313, `add_note` at char 2308 — and both are the argument text RUNNING OUT OF TOKENS, not a model that
+  cannot write JSON. Three layers, in order: `IRIS_AI_MAX_TOOL_TOKENS` (default 4096, was 1400) so a full call
+  fits; `ai/argrepair.repair_arguments`, a mechanical repair (escape raw control characters and bare quotes inside
+  a string, drop a trailing comma, and for a truncated blob discard the incomplete trailing record and close the
+  JSON) whose every repair is streamed as a `warning`, recorded in the transcript and returned to the model as
+  `argumentsRepaired` on the tool result — a repaired write that landed nine of ten links must never look like
+  ten; and, when the PROVIDER refuses the turn, `prompts.ARG_TOO_BIG` telling the model its call never ran and
+  asking for a smaller one, up to `investigator.MAX_ARG_FAILURES` (3) times before the run fails. An unsalvageable
+  blob is refused with advice that names the truncation, because "send valid JSON" makes a model re-send the same
+  oversized call.
 - **The context ceiling COMPACTS instead of stopping.** Reaching it folds the middle of the transcript into one
   running brief — the objective verbatim, the tool calls already made and what they returned, every event id seen
   (citations are load-bearing: a claim whose citation was compacted away would become uncited and the citation

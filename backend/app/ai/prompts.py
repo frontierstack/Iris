@@ -213,6 +213,17 @@ DOCUMENT_CHECK = (
     "— the objective was a plain question, or the evidence is too thin to stand behind — write nothing "
     "and say so in one line. Never invent a finding in order to have something to record.")
 
+# Injected when the PROVIDER itself refused the model's tool call because the arguments it wrote were
+# not parsable JSON (llama.cpp-style gateways answer HTTP 500 "Failed to parse tool call arguments as
+# JSON"). Nothing of that turn reaches the transcript, so without this the model has no idea why its
+# call vanished and writes the same oversized call again. Measured cause on the analyst's runs: the
+# argument text was CUT OFF at the token limit, ~2.3-3.3 kB in, on build_case_graph and add_note.
+ARG_TOO_BIG = (
+    "YOUR LAST TOOL CALL DID NOT RUN — the provider could not parse the arguments you wrote as JSON, "
+    "usually because the call was too long to finish in one reply. Nothing was written and nothing was "
+    "read. Send the call again SMALLER: split a long `links`, `eventIds` or note into several calls, "
+    "keep `why`/`text` short, and make sure every quote and newline inside a string is escaped.")
+
 WRAP_UP = ("Your budget for this investigation is spent. Stop calling tools and write your final report "
            "now from what you have already established, citing the event ids you actually saw. State "
            "plainly what you did not get to.")

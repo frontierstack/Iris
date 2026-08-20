@@ -71,9 +71,11 @@ import orjson
 
 from ..config import get_settings
 from . import compaction, continuation, runs
-from .client import AIError, LLMClient, absorb_text_calls, has_tool_call_syntax, parse_text_tool_calls
+from .argrepair import repair_arguments
+from .client import (AIError, BadToolArguments, LLMClient, absorb_text_calls, has_tool_call_syntax,
+                     parse_text_tool_calls)
 from .history import HISTORY
-from .prompts import (CHECK_IN, DOCUMENT_CHECK, INVESTIGATOR_SYSTEM, WRAP_UP,
+from .prompts import (ARG_TOO_BIG, CHECK_IN, DOCUMENT_CHECK, INVESTIGATOR_SYSTEM, WRAP_UP,
                       investigator_user_prompt)
 from .tools import (REGISTRY, RunContext, ToolError, tool_budget_seconds, tool_schemas,
                     unverified_citations)
@@ -111,6 +113,12 @@ MAX_CHECK_INS = 3
 # reported: "didn't interact with the case at all when it should, that include everything in the
 # case from the timeline to iocs".
 DOCUMENT_MIN_CALLS = 3
+# How many turns a run may lose to the PROVIDER refusing the model's own tool-call arguments before
+# the run fails. The client already re-sends such a turn once (client.stream_chat); this is the next
+# layer — the model is TOLD its call did not run and asked for a smaller one, which is the only thing
+# that actually changes the outcome, since the failure is a call too long to finish in one reply.
+# Bounded because a model that cannot write a parsable call will not learn to on the tenth attempt.
+MAX_ARG_FAILURES = 3
 
 
 def _env_int(name: str, default: int, cap: int) -> int:
@@ -144,6 +152,42 @@ def limits(max_steps: Optional[int] = None, max_seconds: Optional[int] = None) -
             # a FIFTH bound, per CALL rather than per run: without it one tool could eat the whole
             # wall clock with nothing able to interrupt it. See `_watch`.
             "maxToolSeconds": tool_budget_seconds()}
+
+
+def tool_turn_tokens() -> int:
+    """How many tokens ONE model turn may write, arguments included. `IRIS_AI_MAX_TOOL_TOKENS`.
+
+    It was 1400, and that is where the analyst's runs kept dying: `build_case_graph` may draw up to
+    MAX_GRAPH_LINKS (40) links, each with `why` prose and citations, and `add_note` writes a whole
+    write-up. Two live failures, one hitting Iris's parser and one the gateway's own:
+
+        build_case_graph — could not parse the arguments you sent (unexpected end of data:
+                           line 1 column 3314 (char 3313))
+        add_note         — … (unexpected end of data: line 1 column 2308 (char 2308))
+
+    Both are ARGUMENT TEXT RUNNING OUT OF TOKENS, not a model that cannot write JSON — ~3.3 kB is
+    about what 1400 tokens buys once the turn has also written prose. The default is 4096 so a full
+    batch of links fits; the repair pass in `ai/argrepair.py` is the second line of defence, not the
+    first. Raise it further for a model that writes long notes; every provider still enforces its own
+    ceiling, and a turn that is cut off anyway is now reported as cut off.
+    """
+    return _env_int("IRIS_AI_MAX_TOOL_TOKENS", 4096, 32_768)
+
+
+def _bad_args_message(exc: Exception, finish: str) -> str:
+    """The refusal a model gets when even the repair pass could not salvage its arguments.
+
+    It names TRUNCATION when that is what happened, because "send valid JSON" is unactionable advice
+    for a reply that was cut off — the model would send the same oversized call again.
+    """
+    low = str(exc).lower()
+    cut = finish == "length" or "unexpected end" in low or "eof" in low or "unterminated" in low
+    if cut:
+        return ("your arguments were CUT OFF before they finished (" + str(exc) + "). The reply hit "
+                "its token limit — this call was too big to write in one turn. Send the SAME call "
+                "with fewer items (split a large `links` / `eventIds` / note into several calls) and "
+                "keep prose short.")
+    return f"could not parse the arguments you sent ({exc}). Send valid JSON."
 
 
 def _est_tokens(messages: list[dict[str, Any]]) -> int:
@@ -507,6 +551,7 @@ async def investigate(store: Any, objective: str, run_id: str,
     tool_calls = 0
     compactions = 0
     check_ins = 0            # scope nudges sent (see CHECK_IN_EVERY)
+    arg_failures = 0         # turns the provider refused for unparsable tool arguments
     next_check_in = CHECK_IN_EVERY
     documented = False       # the "you wrote nothing to the case" prompt has been sent once
     text_mode = False        # the provider is not doing native tool calling; we parsed the text form
@@ -592,18 +637,38 @@ async def investigate(store: Any, objective: str, run_id: str,
             yield {"type": "step", "step": step, "elapsedSec": round(elapsed(), 1)}
             buf: list[str] = []
             final_msg: dict[str, Any] = {}
-            async for item in client.stream_chat(messages, tools=tools, max_tokens=1400, temperature=0.1):
-                # Checked INSIDE the token loop, not only between steps: a plain question streams prose
-                # and never calls a tool, so a stop that was only checked at the two old checkpoints
-                # could not interrupt it at all — which is what "there is no way to stop it" meant.
-                if runs.stop_requested(run_id):
-                    break
-                if item["type"] == "text":
-                    buf.append(item["text"])
-                    HISTORY.append_text(run_id, item["text"])
-                    yield {"type": "delta", "text": item["text"], "step": step}
-                elif item["type"] == "message":
-                    final_msg = item["message"]
+            finish = ""
+            try:
+                async for item in client.stream_chat(messages, tools=tools, max_tokens=tool_turn_tokens(),
+                                                     temperature=0.1):
+                    # Checked INSIDE the token loop, not only between steps: a plain question streams
+                    # prose and never calls a tool, so a stop that was only checked at the two old
+                    # checkpoints could not interrupt it at all — which is what "there is no way to
+                    # stop it" meant.
+                    if runs.stop_requested(run_id):
+                        break
+                    if item["type"] == "text":
+                        buf.append(item["text"])
+                        HISTORY.append_text(run_id, item["text"])
+                        yield {"type": "delta", "text": item["text"], "step": step}
+                    elif item["type"] == "message":
+                        final_msg = item["message"]
+                        finish = str(item.get("finish") or "")
+            except BadToolArguments as exc:
+                # The provider rejected what the MODEL wrote, so this turn does not exist: no prose was
+                # streamed, no call was made, and the transcript is unchanged. Ending a 27-call
+                # investigation here — which is what used to happen — throws away every finding for a
+                # sampling accident. Tell the model instead, and let it send a smaller call.
+                arg_failures += 1
+                if arg_failures > MAX_ARG_FAILURES:
+                    raise
+                note = (f"the provider could not parse the tool-call arguments the model wrote "
+                        f"(attempt {arg_failures} of {MAX_ARG_FAILURES}); nothing ran. Asked it to "
+                        f"send a smaller call. Provider said: {str(exc)[:200]}")
+                HISTORY.append(run_id, {"kind": "warning", "text": note})
+                yield {"type": "warning", "message": note, "ids": []}
+                messages.append({"role": "user", "content": ARG_TOO_BIG})
+                continue
             if runs.stop_requested(run_id):
                 answer = final_msg.get("content") or "".join(buf)
                 reason, state = "stopped", "stopped"
@@ -665,14 +730,25 @@ async def investigate(store: Any, objective: str, run_id: str,
                 fn = call.get("function") or {}
                 name = str(fn.get("name") or "")
                 raw_args = fn.get("arguments") or "{}"
+                # A local model writing a long call is the common failure here, and it fails in one
+                # of two ways: the reply is cut off mid-string at the token limit, or a quote/newline
+                # inside a long string was never escaped. Both used to refuse the whole call, which
+                # cost the run a turn and the analyst the write. Try strict JSON, then the mechanical
+                # repair in ai/argrepair.py — and if the repair DROPPED anything, say so loudly:
+                # a write that quietly lands nine of ten links is the silent-omission bug.
+                repairs: list[str] = []
+                parse_err = ""
                 try:
                     args = orjson.loads(raw_args) if raw_args.strip() else {}
                     if not isinstance(args, dict):
                         raise ValueError("arguments were not a JSON object")
                 except (orjson.JSONDecodeError, ValueError) as exc:
-                    args, parse_err = {}, f"could not parse the arguments you sent ({exc}). Send valid JSON."
-                else:
-                    parse_err = ""
+                    fixed, repairs = repair_arguments(raw_args)
+                    if fixed is None:
+                        args, repairs = {}, []
+                        parse_err = _bad_args_message(exc, finish)
+                    else:
+                        args = fixed
                 tool_calls += 1
                 call_id = str(call.get("id") or f"{run_id}-c{tool_calls}")
                 writes = bool(getattr(REGISTRY.get(name), "writes", False))
@@ -683,6 +759,12 @@ async def investigate(store: Any, objective: str, run_id: str,
                 # first null-id card and the rest span forever. The persisted transcript already used
                 # the stamped id; the stream now uses the same one, so live and reloaded agree.
                 yield {"type": "tool_call", "id": call_id, "name": name, "arguments": args, "step": step}
+                if repairs:
+                    note = (f"the model's arguments for {name} were not valid JSON and were repaired "
+                            f"before the call: {'; '.join(repairs)}. Check what this "
+                            f"{'wrote to the case' if writes else 'returned'}.")
+                    HISTORY.append(run_id, {"kind": "warning", "text": note})
+                    yield {"type": "warning", "message": note, "ids": []}
                 t0 = time.perf_counter()
                 if parse_err:
                     ok, result = False, parse_err
@@ -690,6 +772,9 @@ async def investigate(store: Any, objective: str, run_id: str,
                     ok, result = await _run_tool(name, args, ctx)
                 took = int((time.perf_counter() - t0) * 1000)
                 payload = result if ok else {"error": result}
+                if repairs and isinstance(payload, dict):
+                    # the model has to know what it actually sent, or it cannot re-send what was lost
+                    payload = {**payload, "argumentsRepaired": repairs}
                 body = _clip(orjson.dumps(payload).decode())
                 messages.append({"role": "tool", "tool_call_id": call.get("id"), "name": name, "content": body})
                 summary = _summarize(name, ok, result)
@@ -713,8 +798,8 @@ async def investigate(store: Any, objective: str, run_id: str,
             messages.append({"role": "user", "content": WRAP_UP})
             buf = []
             wrap_msg: dict[str, Any] = {}
-            async for item in client.stream_chat(messages, tools=None, max_tokens=1400, temperature=0.1,
-                                                 tool_choice="none"):
+            async for item in client.stream_chat(messages, tools=None, max_tokens=tool_turn_tokens(),
+                                                 temperature=0.1, tool_choice="none"):
                 if runs.stop_requested(run_id):
                     break
                 if item["type"] == "text":
