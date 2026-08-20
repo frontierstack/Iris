@@ -16,6 +16,8 @@ trialled on the sampled lines and loses the file if the MAJORITY of the records 
 """
 from __future__ import annotations
 
+import pytest
+
 from app.parsers.cloudtrail import CloudTrailParser
 from app.parsers.evtx import EvtxParser
 from app.parsers.jsonl import JsonlParser
@@ -186,3 +188,70 @@ def test_a_silent_parser_is_not_a_failing_one():
     assert trial_error_ratio(CloudTrailParser(), lines) is None
     fp = fingerprint("cloudtrail_20260811.json", truncated)
     assert isinstance(fp.parser, CloudTrailParser), fp.scores
+
+
+# --------------------------------------------------------------------------- OOXML mislabelling
+# Reported from a second machine, verbatim:
+#     KeyError: "There is no item named '[Content_Types].xml' in the archive"
+# An .xlsx/.docx is a ZIP with a very particular layout. `registry.binary_hint` routed on the
+# EXTENSION alone, so a plain .zip or an .ods that someone renamed .xlsx was handed to openpyxl,
+# which failed with a message about the ZIP's internals: it names a library the analyst never chose,
+# does not say which file failed, and reads like a bug in Iris.
+def _zip_bytes(entries: dict) -> bytes:
+    import io as _io
+    import zipfile
+    buf = _io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for name, content in entries.items():
+            z.writestr(name, content)
+    return buf.getvalue()
+
+
+REAL_XLSX = {"[Content_Types].xml": "<Types/>", "xl/workbook.xml": "<workbook/>"}
+REAL_DOCX = {"[Content_Types].xml": "<Types/>", "word/document.xml": "<document/>"}
+PLAIN_ZIP = {"notes.txt": "hello", "logs/a.csv": "a,b\n1,2\n"}
+ODS_FILE = {"mimetype": "application/vnd.oasis.opendocument.spreadsheet", "content.xml": "<x/>"}
+
+
+def test_only_real_ooxml_is_routed_to_the_office_parsers() -> None:
+    """A zip that is not an Office file must NOT reach openpyxl/python-docx.
+
+    Falling through is the useful outcome: `archives.py` expands a plain zip and parses what is
+    inside, which is what the analyst wanted from a file full of logs.
+    """
+    from app.parsers.registry import binary_hint
+    from app.parsers.docx import DocxParser
+    from app.parsers.xlsx import XlsxParser
+
+    assert isinstance(binary_hint("real.xlsx", _zip_bytes(REAL_XLSX)), XlsxParser)
+    assert isinstance(binary_hint("real.docx", _zip_bytes(REAL_DOCX)), DocxParser)
+    assert binary_hint("logs.xlsx", _zip_bytes(PLAIN_ZIP)) is None, "a plain zip must fall through to the archive handler"
+    assert binary_hint("sheet.xlsx", _zip_bytes(ODS_FILE)) is None, "an .ods must fall through, not go to openpyxl"
+    # Named like Office but not a zip at all: claimed on purpose, so the parser can explain the
+    # mismatch by name rather than leaving a mislabelled binary parsed as "plain text".
+    assert isinstance(binary_hint("fake.xlsx", b"just some text"), XlsxParser)
+
+
+@pytest.mark.parametrize(
+    "label, data, parser_name, must_mention",
+    [
+        ("plain zip as xlsx", _zip_bytes(PLAIN_ZIP), "xlsx", ["ZIP archive", ".zip"]),
+        ("ods as xlsx", _zip_bytes(ODS_FILE), "xlsx", ["OpenDocument", "Excel workbook"]),
+        ("plain zip as docx", _zip_bytes(PLAIN_ZIP), "docx", ["ZIP archive", ".zip"]),
+        ("xlsx as docx", _zip_bytes(REAL_XLSX), "docx", ["Excel workbook", "Word document"]),
+        ("not a zip at all", b"plain text pretending", "xlsx", ["not a ZIP container"]),
+    ],
+)
+def test_an_office_parser_says_what_the_file_actually_is(label, data, parser_name, must_mention) -> None:
+    """The failure must name the file's real type and the way forward - never the zip's internals."""
+    from app.parsers.docx import DocxParser
+    from app.parsers.xlsx import XlsxParser
+
+    parser = XlsxParser() if parser_name == "xlsx" else DocxParser()
+    with pytest.raises(Exception) as ei:
+        list(parser.parse_bytes(data))
+    msg = str(ei.value)
+    assert "[Content_Types].xml" not in msg, f"{label}: leaked the library's internal error: {msg}"
+    assert "KeyError" not in msg, f"{label}: leaked a raw exception type: {msg}"
+    for fragment in must_mention:
+        assert fragment in msg, f"{label}: message does not mention {fragment!r}: {msg}"

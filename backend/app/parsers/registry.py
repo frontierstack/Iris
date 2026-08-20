@@ -104,12 +104,22 @@ def binary_hint(filename: str, data: bytes) -> Optional[BaseParser]:
     lower = filename.lower()
     if head.startswith(b"%PDF") or lower.endswith(".pdf"):
         return PdfParser()
-    if is_ooxml(data) or lower.endswith((".xlsx", ".xlsm", ".docx", ".docm")):
+    # The EXTENSION alone used to be enough to send a file to openpyxl/python-docx, so a plain .zip or
+    # an .ods renamed .xlsx reached a library that reported it as
+    #   KeyError: "There is no item named '[Content_Types].xml' in the archive"
+    # Require the CONTENT to be OOXML. A zip that is not gets nothing here and falls through to the
+    # archive handler, which expands it and parses what is inside -- the useful outcome, not an error.
+    if is_ooxml(data):
         if lower.endswith((".docx", ".docm")) or b"word/" in data[:4096]:
             return DocxParser()
         if lower.endswith((".xlsx", ".xlsm")) or b"xl/" in data[:4096]:
             return XlsxParser()
         return None  # other OOXML (pptx): fall through to strings
+    if lower.endswith((".xlsx", ".xlsm", ".docx", ".docm")) and not data[:4].startswith(b"PK"):
+        # Named like an Office file, not a zip at all. Claim it so the parser can explain the
+        # mismatch by name; falling through would parse a mislabelled binary as "plain text" and
+        # leave a source sitting in MAP with no hint of what went wrong.
+        return DocxParser() if lower.endswith((".docx", ".docm")) else XlsxParser()
     if lower.endswith(".xls") and head.startswith(XLS_MAGIC):
         return XlsxParser()
     # SQLite is identified by its magic ONLY: a ".db" that is not a SQLite file (Thumbs.db, Berkeley DB…)

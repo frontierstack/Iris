@@ -5,7 +5,7 @@ import io
 from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator, Optional
 
-from .base import BaseParser, ParsedEvent, clean
+from .base import BaseParser, ParsedEvent, clean, ooxml_error
 from .tabular import ColumnRoles, looks_like_header
 
 XLS_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"  # OLE2 compound document
@@ -57,7 +57,14 @@ class XlsxParser(BaseParser):
             import openpyxl
         except Exception as exc:
             raise RuntimeError(f"openpyxl not installed: {exc}")
-        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        try:
+            wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        except Exception as exc:
+            # openpyxl reports a zip that is not a workbook as
+            #   KeyError: "There is no item named '[Content_Types].xml' in the archive"
+            # which names an internal of a library the analyst never chose and reads like a bug in
+            # Iris. Say what the file actually is instead.
+            raise ooxml_error(data, "xlsx", exc) from exc
         try:
             for ws in wb.worksheets:
                 yield from self._sheet(ws.title, ws.iter_rows(values_only=True))

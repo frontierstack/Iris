@@ -4,7 +4,7 @@ from __future__ import annotations
 import io
 from typing import Iterable, Iterator
 
-from .base import BaseParser, ParsedEvent
+from .base import BaseParser, ParsedEvent, ooxml_error
 from .tabular import line_event
 
 
@@ -37,7 +37,12 @@ class DocxParser(BaseParser):
             import docx
         except Exception as exc:
             raise RuntimeError(f"python-docx not installed: {exc}")
-        doc = docx.Document(io.BytesIO(data))
+        try:
+            doc = docx.Document(io.BytesIO(data))
+        except Exception as exc:
+            # Same trap as the Excel parser: a zip that is not a Word document surfaces as a message
+            # about [Content_Types].xml rather than about the file.
+            raise ooxml_error(data, "docx", exc) from exc
         n = 0
         for para in doc.paragraphs:
             for line in (para.text or "").splitlines():
