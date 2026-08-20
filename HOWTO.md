@@ -159,6 +159,8 @@ including ones that have nothing to do with Iris. That is why `-Restart` is opt-
 .\uninstall.ps1 -DryRun        # print what would go and stop
 ```
 
+`local` and `all` also take the named form `-Mode local`, matching `start.ps1`.
+
 ```bash
 ./uninstall.sh                 # Docker install
 ./uninstall.sh local | all     # local install, or both
