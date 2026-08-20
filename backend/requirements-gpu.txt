@@ -1,0 +1,15 @@
+# Optional GPU acceleration — CUDA 12.x wheel set (the DOCKER GPU image's base is
+# nvidia/cuda:12.4.1-runtime, see Dockerfile ARG BASE_IMAGE, so CUDA 12 is always right there).
+#
+# torch is deliberately NOT listed here. It must be installed in a SEPARATE pip command with
+# `--index-url` (see Dockerfile ARG GPU_TORCH_INDEX), never with `--extra-index-url` in this file:
+# an extra index only ADDS to PyPI, so pip happily resolves the newest torch from PyPI instead, which
+# depends on nvidia-*-cu13 packages. Those shadow the CUDA 12 headers that cupy's [ctk] extra provides
+# and cupy then dies at first JIT with `cannot open source file "cuda_fp16.h"` — the app falls back to
+# numpy while still reporting active: cuda via the torch probe. Keep the two CUDA majors in agreement.
+#
+# For a NATIVE install do NOT use this file directly — run `setup.ps1 -Mode local` / `./setup.sh local`,
+# which detect the host CUDA version and install a matching cupy + torch pair.
+
+cupy-cuda12x[ctk]>=13.0   # [ctk] bundles CUDA headers/NVRTC so kernels JIT-compile on the slim runtime image
+nvidia-ml-py>=12.560      # pynvml: GPU utilisation/memory/temp/power for the metrics sampler

@@ -1,0 +1,337 @@
+/* ═══════ SOURCES · raw log viewer ═══════
+   Full-height drawer showing the original upload line by line: find (server-side), prev/next paging,
+   load-more / infinite scroll, monospace pre-wrap body that scrolls inside its own container. */
+
+/* the small "view raw" affordance inside a Sources row's file cell */
+.rawlog-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.rawlog-cell > .ellipsis {
+  min-width: 0;
+}
+.rawlog-open {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted-3);
+  cursor: pointer;
+  border-radius: var(--radius-sm, 3px);
+  opacity: 0;
+  transition: opacity var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+.table__row:hover .rawlog-open,
+.rawlog-open:focus-visible {
+  opacity: 1;
+}
+.rawlog-open:hover {
+  color: var(--accent);
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+}
+
+/* viewer */
+.rawlog {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: 10px;
+}
+.rawlog__bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.rawlog__find {
+  flex: 1 1 200px;
+  min-width: 160px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 8px 0 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--muted-2);
+  transition: border-color var(--t-fast), box-shadow var(--t-fast);
+}
+.rawlog__find:focus-within {
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+.rawlog__find input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  outline: none;
+  box-shadow: none;
+  padding: 0;
+  background: transparent;
+  color: var(--text-bright);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+.rawlog__find input:focus-visible {
+  box-shadow: none;
+}
+.rawlog__status {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--muted-3);
+  white-space: nowrap;
+}
+.rawlog__pager {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+.rawlog__range {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-4);
+  white-space: nowrap;
+  min-width: 96px;
+  text-align: center;
+}
+.rawlog__body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  background: var(--surface-1, var(--panel));
+  outline: none;
+}
+.rawlog__body:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--accent-border);
+}
+.rawlog__pre {
+  margin: 0;
+  padding: 6px 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.rawlog__line {
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
+}
+.rawlog__line:hover {
+  background: var(--accent-bg);
+}
+.rawlog__n {
+  flex: none;
+  width: 64px;
+  padding: 0 10px 0 6px;
+  border: 0;
+  background: transparent;
+  color: var(--muted-3);
+  font: inherit;
+  text-align: right;
+  cursor: pointer;
+  user-select: none;
+  position: sticky;
+  left: 0;
+  transition: color var(--t-fast);
+}
+.rawlog__n:hover {
+  color: var(--accent);
+}
+.rawlog__text {
+  flex: 1;
+  min-width: 0;
+  padding-right: 12px;
+}
+.rawlog__text mark.hl {
+  background: var(--accent-bg);
+  color: var(--accent);
+  outline: 1px solid var(--accent-border);
+}
+.rawlog__foot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 10px;
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-sm);
+  color: var(--muted-2);
+}
+.rawlog__empty {
+  padding: 24px;
+  text-align: center;
+  font-size: var(--fs-md);
+  color: var(--muted);
+}
+
+/* binary / not line-addressable */
+.rawlog--binary {
+  flex: 0 0 auto;
+}
+.rawlog__hint {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text-2);
+  font-size: var(--fs-md);
+  line-height: 1.5;
+}
+.rawlog__hint > svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--warn);
+}
+.rawlog__hint-title {
+  font-weight: 600;
+  color: var(--text-bright);
+  margin-bottom: 2px;
+}
+.rawlog__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ═══════ Detached window (FloatingWindow.tsx) ═══════
+   Not a modal: no overlay, and the page keeps working underneath — that is the whole reason to detach
+   the raw log rather than open it in the drawer. z-index sits above the drawer (41) so a detached
+   window is never trapped behind one. */
+.floatwin {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  min-width: 380px;
+  min-height: 240px;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 18px 48px rgb(0 0 0 / 45%), 0 0 0 1px rgb(255 255 255 / 3%) inset;
+  overflow: hidden;
+}
+/* while dragging, the body must not eat the pointer or select text under the cursor */
+.floatwin--dragging { user-select: none; }
+.floatwin--dragging .floatwin__body { pointer-events: none; }
+
+.floatwin__head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+  cursor: move;
+  touch-action: none;
+}
+.floatwin__ident { flex: 1; min-width: 0; }
+.floatwin__title {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  color: var(--text-bright);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.floatwin__sub {
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--muted-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.floatwin__actions { display: flex; align-items: center; gap: 6px; }
+.floatwin__body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 12px 14px 14px;
+  overflow: auto;
+}
+
+/* Resize handles: 6px edges, 12px corners. Big enough to hit, invisible until you are on them. */
+.floatwin__edge, .floatwin__corner { position: absolute; touch-action: none; }
+.floatwin__edge--n { top: -3px; left: 12px; right: 12px; height: 8px; cursor: ns-resize; }
+.floatwin__edge--s { bottom: -3px; left: 12px; right: 12px; height: 8px; cursor: ns-resize; }
+.floatwin__edge--w { left: -3px; top: 12px; bottom: 12px; width: 8px; cursor: ew-resize; }
+.floatwin__edge--e { right: -3px; top: 12px; bottom: 12px; width: 8px; cursor: ew-resize; }
+.floatwin__corner { width: 14px; height: 14px; }
+.floatwin__corner--nw { top: -3px; left: -3px; cursor: nwse-resize; }
+.floatwin__corner--ne { top: -3px; right: -3px; cursor: nesw-resize; }
+.floatwin__corner--sw { bottom: -3px; left: -3px; cursor: nesw-resize; }
+.floatwin__corner--se { bottom: -3px; right: -3px; cursor: nwse-resize; }
+/* the only handle that is DRAWN: a corner hint, so "this can be resized" is discoverable */
+.floatwin__grip {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 10px;
+  height: 10px;
+  pointer-events: none;
+  background:
+    linear-gradient(135deg, transparent 0 45%, var(--border-hover) 45% 55%, transparent 55%),
+    linear-gradient(135deg, transparent 0 70%, var(--border-hover) 70% 80%, transparent 80%);
+}
+
+/* ── Structured sources: the RECORDS are the readable form ────────────────────
+   EVTX / SQLite / XLSX / PDF / mail archives have no lines to page through. The viewer used to say
+   "not line-addressable" and stop, on a file Iris had parsed perfectly — so it lists the parsed records
+   instead, with the same filter-and-page shape as the line viewer. */
+.rawlog__note {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-inset);
+  font-size: var(--fs-base);
+  color: var(--muted);
+}
+.records { display: flex; flex-direction: column; }
+.records__row {
+  display: grid;
+  grid-template-columns: 52px 168px 1fr;
+  gap: 10px;
+  align-items: baseline;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border-2);
+  cursor: pointer;
+  min-width: 0;
+}
+.records__row:last-child { border-bottom: none; }
+.records__row:hover { background: var(--hover); }
+.records__n {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xxs);
+  color: var(--muted-3);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.records__ts { font-size: var(--fs-xs); white-space: nowrap; }
+.records__msg {
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.rawlog__pager { display: flex; justify-content: center; padding-top: 8px; }

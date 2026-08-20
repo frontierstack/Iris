@@ -1,0 +1,361 @@
+/* ═══════ CASES LIST ═══════
+   The case list is a responsive card grid instead of a 9-column table: identity first,
+   the two numbers that matter next, everything else on one quiet meta line. */
+
+.cases__list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 16px;
+  margin-top: 16px;
+  align-items: stretch;
+}
+.cases__list--single {
+  grid-template-columns: 1fr;
+}
+
+.case-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+  padding: 18px 20px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  cursor: pointer;
+  /* the lift on hover is 1px and shadow-only: a card that jumps is noise on a page of twenty */
+  transition: border-color 0.12s ease, background 0.12s ease, box-shadow 0.12s ease, transform 0.12s ease;
+}
+.case-card:hover {
+  border-color: var(--border-hover);
+  background: var(--panel-2);
+  box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
+}
+.case-card:focus-visible {
+  outline: none;
+  border-color: var(--accent-border);
+  box-shadow: var(--glow);
+}
+.case-card--active {
+  border-color: var(--accent-border);
+  background: color-mix(in srgb, var(--accent) 5%, var(--panel));
+}
+/* quiet left rule marks the active case without shouting */
+.case-card--active::before {
+  content: '';
+  position: absolute;
+  inset: 10px auto 10px 0;
+  width: 2px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+}
+.case-card--editing {
+  cursor: default;
+}
+
+.case-card__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+.case-card__ident {
+  flex: 1;
+  min-width: 0;
+}
+.case-card__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.case-card__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-2xl);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-bright);
+}
+.case-card__uid {
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-xs);
+  color: var(--muted-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── the three counts, as chips ──
+   Three stat blocks with uppercase labels made every card shout the same four words. A chip row says
+   the same numbers in a line, and leaves the case NAME as the only thing with weight. */
+.case-card__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.case-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--panel-inset);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.case-chip b {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--text-bright);
+}
+.case-chip--quiet { color: var(--muted-2); background: transparent; }
+/* Authored, not extracted — the same distinction the graph draws with a dashed ring. */
+.case-chip--accent { color: var(--accent); border-color: var(--accent-border); }
+.case-graph { display: flex; flex-direction: column; gap: 8px; }
+.case-graph__chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.case-card--active .case-chip { border-color: color-mix(in srgb, var(--accent) 22%, var(--border)); }
+
+.case-card__stats {
+  display: flex;
+  gap: 22px;
+  flex-wrap: wrap;
+}
+.case-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.case-stat__v {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--fs-stat);
+  line-height: 1.1;
+  color: var(--text-brightest);
+  font-variant-numeric: tabular-nums;
+}
+.case-stat__k {
+  font-size: var(--fs-xxs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+
+.case-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  font-size: var(--fs-xs);
+  color: var(--text-4);
+}
+.case-card__meta b {
+  font-weight: 500;
+  color: var(--text-3);
+}
+.case-card__sep {
+  color: var(--muted-3);
+}
+
+.case-card__actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-2);
+  /* Dimmed, never hidden: a control that appears only on hover is unreachable by touch and invisible
+     to anyone scanning the page — and "why can I not delete a case" is the bug that produces. */
+  opacity: 0.72;
+  transition: opacity var(--t-fast);
+}
+.case-card:hover .case-card__actions,
+.case-card:focus-within .case-card__actions,
+.case-card--active .case-card__actions { opacity: 1; }
+.case-card__spacer {
+  flex: 1;
+}
+
+.case-card__edit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+.case-card__edit input {
+  width: 100%;
+  padding: 4px 8px;
+  font-size: var(--fs-lg);
+}
+
+/* ── delete confirmation body ── */
+.case-del__list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-md);
+  background: var(--danger-bg);
+  font-size: var(--fs-base);
+}
+/* One line per thing, not a two-column grid: grid cells copy out of the page with NO whitespace
+   between them, so the summary pasted into a message read "0uploaded source files0parsed events". */
+.case-del__row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 0;
+  line-height: 1.5;
+}
+.case-del__list--empty { color: var(--text-3); line-height: 1.5; }
+.case-del__n {
+  flex: 0 0 auto;
+  min-width: 52px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--text-brightest);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.case-del__l {
+  color: var(--text-3);
+}
+.case-del__prompt {
+  display: block;
+  margin-bottom: 6px;
+  font-size: var(--fs-md);
+  color: var(--text-2);
+}
+.case-del__prompt code {
+  font-size: var(--fs-md);
+  color: var(--text-brightest);
+}
+.case-del__input {
+  width: 100%;
+}
+
+@media (max-width: 900px) {
+  .cases__list {
+    grid-template-columns: 1fr;
+  }
+  .case-card__stats {
+    gap: 18px;
+  }
+}
+
+/* ── Consistent box rhythm ────────────────────────────────────────────────────
+   Every panel on Cases (the new-case form, the cards, and the case DETAIL sections)
+   shares one padding scale so nothing reads as floating or cramped next to its neighbour. */
+.cases .cases__new {
+  padding: 14px 16px;
+  border-radius: var(--radius-lg);
+  gap: 14px;
+  margin-top: 14px;
+}
+.case-card__actions {
+  gap: 8px;
+  padding-top: 10px;
+}
+
+/* ── Case DETAIL: section headings sit with the box they describe ──────────────
+   .sec__hint is right-aligned globally (margin-left:auto), which on a full-width
+   detail section threw the hint to the far edge and left a wide empty gap between
+   the title and its own description. Here the hint follows the title instead. */
+.case-detail .sec {
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.case-detail .sec__hint {
+  margin-left: 0;
+  text-align: left;
+}
+.case-detail .sec__actions {
+  margin-left: auto;
+}
+/* even spacing between the detail's stacked sections */
+.case-detail > section {
+  margin-top: 26px;
+}
+.case-detail > section:first-of-type {
+  margin-top: 0;
+}
+/* the notes feed gets a little breathing room of its own so the next section is not
+   crowded against the last entry; the 26px section margin then starts from there */
+.case-detail .case-notes {
+  margin-bottom: 0;
+  padding-bottom: 14px;
+}
+/* the IOC panel's kind filter (only rendered when there is more than one kind) shares
+   the section's left edge and its 10px heading rhythm */
+.case-detail .ioc-head {
+  margin-bottom: 10px;
+}
+
+/* ── Toolbar: find a case, order the list ─────────────────────────────────────
+   Only rendered above 3 cases. Below that a filter is furniture; above it, scrolling a grid of
+   twenty cards to find one by name is the actual cost of the page. */
+.cases__toolbar {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+.cases__search {
+  position: relative;
+  flex: 1 1 260px;
+  min-width: 200px;
+  max-width: 420px;
+}
+.cases__search input {
+  width: 100%;
+  padding-left: 30px;
+  padding-right: 26px;
+}
+.cases__search-icon {
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted-3);
+  pointer-events: none;
+}
+.cases__search-x {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 0 4px;
+  background: transparent;
+  color: var(--muted-2);
+  font-size: var(--fs-lg);
+  line-height: 1;
+  cursor: pointer;
+}
+.cases__search-x:hover { color: var(--text-bright); }
+.cases__sort {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.cases__sort .field__label { margin: 0; }
+.cases__count {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--muted-3);
+  padding-bottom: 6px;
+}

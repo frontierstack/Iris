@@ -1,0 +1,369 @@
+/* Base: reset, typography, density scale, scrollbars, focus, motion */
+
+:root {
+  --font-ui: 'Space Grotesk', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* spacing scale (8px base) */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --s-1: 4px;
+  --s-2: 6px;
+  --s-3: 8px;
+  --s-4: 10px;
+  --s-5: 12px;
+  --s-6: 14px;
+  --s-7: 16px;
+  --s-8: 18px;
+  --s-9: 22px;
+  --s-10: 26px;
+
+  /* type scale (comfortable) */
+  --fs-xxs: 10px;
+  --fs-xs: 10.5px;
+  --fs-sm: 11px;
+  --fs-md: 11.5px;
+  --fs-base: 12px;
+  --fs-lg: 12.5px;
+  --fs-xl: 13px;
+  --fs-2xl: 13.5px;
+  --fs-3xl: 14px;
+  --fs-4xl: 15px;
+  --fs-stat: 20px;
+  --fs-title: 24px;
+
+  --row-pad-y: 10px;
+  --row-pad-x: 14px;
+  --page-pad: 26px;
+  --panel-pad: 18px;
+  --sidebar-w: 232px;
+  --rail-w: 60px;
+  --header-h: 52px;
+
+  --t-fast: 150ms cubic-bezier(0.2, 0.7, 0.3, 1);
+  --t-med: 200ms cubic-bezier(0.2, 0.7, 0.3, 1);
+  --t-slow: 320ms cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+
+:root[data-density='compact'] {
+  --fs-xxs: 9.5px;
+  --fs-xs: 10px;
+  --fs-sm: 10.5px;
+  --fs-md: 11px;
+  --fs-base: 11.5px;
+  --fs-lg: 12px;
+  --fs-xl: 12.5px;
+  --fs-2xl: 13px;
+  --fs-3xl: 13px;
+  --fs-4xl: 14px;
+  --fs-stat: 18px;
+  --fs-title: 21px;
+  --row-pad-y: 7px;
+  --row-pad-x: 12px;
+  --page-pad: 18px;
+  --panel-pad: 14px;
+  --header-h: 46px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+html {
+  background: var(--bg);
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xl);
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  min-width: 1100px;
+  overflow-x: auto;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+  transition: color var(--t-fast);
+}
+a:hover {
+  color: var(--accent-hover);
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+input,
+select,
+textarea {
+  background: var(--panel-deep);
+  border: 1px solid var(--border-strong);
+  color: var(--text-bright);
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  outline: none;
+  transition: border-color var(--t-fast), box-shadow var(--t-fast), background var(--t-fast);
+  min-width: 0;
+}
+input::placeholder,
+textarea::placeholder {
+  color: var(--muted-3);
+}
+input:hover,
+select:hover,
+textarea:hover {
+  border-color: var(--border-hover);
+}
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+input[type='range'] {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  accent-color: var(--accent);
+}
+input[type='radio'],
+input[type='checkbox'] {
+  accent-color: var(--accent);
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  padding: 0;
+}
+select {
+  appearance: none;
+  padding-right: 26px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 13px) 55%, calc(100% - 9px) 55%;
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
+}
+select option {
+  background: var(--panel);
+  color: var(--text);
+}
+
+::selection {
+  background: var(--accent-glow);
+}
+
+*:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+button:focus-visible,
+[role='button']:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 0;
+  box-shadow: 0 0 0 4px var(--accent-glow);
+}
+
+/* scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scroll-thumb) var(--scroll-track);
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border-radius: 6px;
+  border: 2px solid var(--scroll-track);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scroll-thumb-hover);
+}
+::-webkit-scrollbar-track {
+  background: var(--scroll-track);
+}
+::-webkit-scrollbar-corner {
+  background: var(--scroll-track);
+}
+
+@keyframes pulseDot {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes slideInRight {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+@keyframes slideUp {
+  from {
+    transform: translateY(8px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+@keyframes shimmer {
+  0% {
+    background-position: -400px 0;
+  }
+  100% {
+    background-position: 400px 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* utility */
+.mono {
+  font-family: var(--font-mono);
+}
+.muted {
+  color: var(--muted);
+}
+.dim {
+  color: var(--muted-2);
+}
+.ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pretty {
+  text-wrap: pretty;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+}
+.sev-critical {
+  color: var(--sev-critical);
+}
+.sev-high {
+  color: var(--sev-high);
+}
+.sev-medium {
+  color: var(--sev-medium);
+}
+.sev-low {
+  color: var(--sev-low);
+}
+.sev-info {
+  color: var(--sev-info);
+}
+.bg-sev-critical {
+  background: var(--sev-critical);
+}
+.bg-sev-high {
+  background: var(--sev-high);
+}
+.bg-sev-medium {
+  background: var(--sev-medium);
+}
+.bg-sev-low {
+  background: var(--sev-low);
+}
+.bg-sev-info {
+  background: var(--sev-info);
+}
+
+@keyframes nodeEnter {
+  from { transform: scale(0.2); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+@keyframes dashFlow {
+  to { stroke-dashoffset: -24; }
+}
+@keyframes popIn {
+  from { transform: scale(0.96) translateY(4px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+
+/* ───── Font choices (Settings → Appearance) ─────
+   The face is an attribute on :root, exactly like the theme, so switching costs one attribute write
+   and no re-render. Every family is bundled via @fontsource — Iris makes no network request at
+   runtime, so a font can never be a way for a page to phone home. Each stack keeps real fallbacks so
+   a missing bundle degrades to the system UI face rather than to Times New Roman. */
+:root[data-font='inter']         { --font-ui: 'Inter', 'Helvetica Neue', Helvetica, Arial, sans-serif; }
+:root[data-font='ibm-plex-sans'] { --font-ui: 'IBM Plex Sans', 'Helvetica Neue', Helvetica, Arial, sans-serif; }
+:root[data-font='source-sans']   { --font-ui: 'Source Sans 3', 'Helvetica Neue', Helvetica, Arial, sans-serif; }
+:root[data-font='system']        { --font-ui: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+
+:root[data-mono='ibm-plex-mono']   { --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+:root[data-mono='source-code-pro'] { --font-mono: 'Source Code Pro', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+:root[data-mono='system']          { --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Courier New', monospace; }

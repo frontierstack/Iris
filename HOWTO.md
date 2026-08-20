@@ -1,0 +1,476 @@
+# Iris — HOWTO
+
+## Access
+| What | Where |
+|---|---|
+| App (UI) | http://localhost:8000 |
+| API base | http://localhost:8000/api |
+| Health check | http://localhost:8000/api/health |
+| Interactive API docs (Swagger) | http://localhost:8000/docs |
+| MCP endpoint | http://localhost:8000/api/mcp (off by default) |
+| From another machine on your LAN | **not by default** — see [Security](#security) |
+
+**Iris listens on loopback only.** The published port is `127.0.0.1:8000`, so the app is reachable from the
+machine it runs on and nowhere else. To reach it from your LAN, set `IRIS_BIND_HOST=0.0.0.0` **and** protect the
+instance: turn on **Settings → Security** (a password and a PIN, asked for on a login page) for people, and set
+`IRIS_AUTH_TOKEN` for scripts and MCP clients, which cannot sign in. Without either, every endpoint — including
+the one that wipes the workspace — is open to whoever can reach the port. See [Security](#security).
+
+Everything runs in ONE container named `iris`: the FastAPI API under `/api` and the built React SPA at `/`. There
+is no second service to start. Data lives in `./backend/data` on the host, bind-mounted to `/data` in the container,
+so a container run and a local `uvicorn` run share the same evidence.
+
+---
+
+# Scripts
+
+Three scripts, each with one job — plus the escape hatch:
+
+| Script | Job |
+|---|---|
+| `setup.ps1` / `setup.sh` | **First run.** Environment + Docker checks, GPU passthrough probe, per-host GPU wheel resolution, image build. |
+| `start.ps1` / `start.sh` | **Every day.** Bring the app up (or stop / restart / logs / status), wait for `/api/health`, open the browser. |
+| `wsl.ps1` | **Windows only.** Report and apply the WSL 2 settings Iris wants. |
+| `docker compose` | The escape hatch if you would rather not use any of them. |
+
+One script per platform, no wrappers: the `start.cmd` / `setup.cmd` double-click launchers are gone. On Windows,
+right-click a `.ps1` → **Run with PowerShell** does the same thing, and running it from a terminal is what you want
+anyway — these scripts print progress you are meant to read.
+
+> Editing a `.ps1`? They are saved as **UTF-8 with a BOM** on purpose. PowerShell 5.1 decodes a BOM-less file as
+> cp1252, and a UTF-8 em dash inside a double-quoted string ends in byte `0x94` — a curly quote that silently
+> terminates the string and produces parse errors pages away from the real line.
+
+## `start.*` — the everyday launcher
+
+```powershell
+.\start.ps1                      # Docker: bring the whole app up (the GPU image if one was built)
+.\start.ps1 -Mode local          # no Docker: build frontend/dist if missing, run uvicorn on this machine
+.\start.ps1 -Mode stop           # stop the container
+.\start.ps1 -Mode restart        # stop, then start
+.\start.ps1 -Mode logs           # follow the container logs (Ctrl+C to exit)
+.\start.ps1 -Mode status         # is it up, what is it doing, how big is the pool
+.\start.ps1 -Build               # force an image rebuild before starting
+.\start.ps1 -NoBrowser           # don't open the app when it is ready
+.\start.ps1 -SkipWslCheck        # don't look at .wslconfig at all
+.\start.ps1 -Port 8080           # serve on another port
+```
+
+```bash
+./start.sh                       # start everything
+./start.sh local                 # no Docker: uvicorn on this machine
+./start.sh stop | restart | logs | status
+./start.sh --build   | -b        # force an image rebuild first
+./start.sh --no-browser | -n     # don't open the app
+./start.sh --port=8080           # serve on another port  (or IRIS_PORT=8080)
+./start.sh --help    | -h        # print the usage header
+```
+
+| PowerShell | bash | Meaning |
+|---|---|---|
+| `-Mode docker` (default) | `docker` (default) | Start the container. |
+| `-Mode local` | `local` | No Docker: builds `frontend/dist` if missing, then runs uvicorn on the host. |
+| `-Mode stop` | `stop` | Stop the container. |
+| `-Mode restart` | `restart` | Stop, then start. |
+| `-Mode logs` | `logs` | Follow container logs. |
+| `-Mode status` | `status` | Up/down, pool size, whether it is still loading. |
+| `-Build` | `--build`, `-b` | Rebuild the image first. Otherwise it builds only when no `iris:*` image exists. |
+| `-NoBrowser` | `--no-browser`, `-n` | Don't open the browser. |
+| `-Port <n>` | `--port=<n>`, `$IRIS_PORT` | Port to serve/probe. |
+| `-SkipWslCheck` | *(n/a — Windows only)* | Skip the `.wslconfig` drift check. |
+
+**What the output means.** Each long operation prints a numbered step, a live spinner with elapsed time and *what
+it is waiting for* (build phase, `parsing library 12/34 files, 61% of bytes`), then a result line with how long it
+took. When the output is redirected to a file or a CI log the spinner is replaced by a plain progress line every
+10 s — `\r` does not collapse in a log file. The closing summary reports the version, the compute backend, the pool
+size, whether the library is still loading, and any files that were **skipped** (those are not in search — Sources
+says which and why).
+
+Starting is not instant on a large library: the API answers in seconds, but parsing a few hundred MB of logs back
+into the pool takes minutes, and the entity graph is restored from cache or rebuilt after that. The spinner says
+which of those is happening.
+
+## `setup.*` — first run
+
+```powershell
+.\setup.ps1                # auto-detect: GPU + Docker passthrough, then build & start
+.\setup.ps1 -Mode gpu      # force the CUDA image
+.\setup.ps1 -Mode cpu      # force the CPU image
+.\setup.ps1 -Mode local    # no Docker: install Python/Node deps onto this machine
+.\setup.ps1 -Mode down     # stop & remove the container
+.\setup.ps1 -Mode logs     # follow logs
+```
+
+```bash
+./setup.sh                 # auto-detect (default)
+./setup.sh gpu | cpu       # force an image
+./setup.sh local           # no Docker: install onto this machine
+./setup.sh down            # stop & remove
+./setup.sh logs            # follow logs
+```
+
+`setup.sh` detects native Linux, WSL2, macOS and Git-Bash-on-Windows; on Git Bash it delegates to `setup.ps1` with
+the same mode. It starts Docker Desktop if it is not running, checks that Docker can *actually* see the GPU (not
+just that one exists), and builds `iris:cuda` (nvidia/cuda base + cupy) or `iris:cpu` (python:3.12-slim).
+
+**`local` mode** installs the same dependency set onto the host instead of building an image, resolving GPU wheels
+per machine: it reads the driver's CUDA version out of `nvidia-smi` — matching both spellings, `CUDA Version:`
+(older) and `CUDA UMD Version:` (580+ drivers) — and picks `cupy-cuda11x`/`12x`/`13x` plus the matching torch index
+(`cu118`…`cu128`), torch's ROCm build on AMD, torch/MPS on Apple Silicon, or numpy alone when there is no GPU.
+`IRIS_CUPY` and `IRIS_TORCH_INDEX` override the guess.
+
+On Windows, `setup.ps1` also checks `.wslconfig` and offers to apply the Iris settings before it builds.
+
+## `wsl.ps1` — WSL 2 tuning (Windows)
+
+```powershell
+.\wsl.ps1                  # report only: what is set, what Iris wants, and why
+.\wsl.ps1 -Apply           # write the settings (backs the file up first)
+.\wsl.ps1 -Apply -Restart  # ...and run `wsl --shutdown` so they take effect — STOPS EVERY CONTAINER
+.\wsl.ps1 -Quiet           # only speak up when something has drifted
+```
+
+Docker Desktop runs Iris inside a WSL 2 VM, and Iris is memory-heavy: a 300 MB library becomes several GB of parsed
+events built by six worker processes. On an untuned VM that has produced SIGSEGVs inside plain Python and stdlib
+code with 12 GB free — page faults the VM could not back, not bugs in the code. What it sets:
+
+| Setting | Why |
+|---|---|
+| `kernelCommandLine = transparent_hugepage=never sysctl.vm.compaction_proactiveness=0` | THP + background compaction under allocation pressure is the failure mode. Iris allocates millions of small objects and gains nothing from huge pages. |
+| `[experimental] autoMemoryReclaim = disabled` | WSL's reclaim walks the guest page cache constantly for no benefit on a workload holding a multi-GB pool. |
+| `memory` / `swap` | Only filled in when **missing** — a deliberate value is never overwritten. |
+
+The changes need `wsl --shutdown` (or a reboot) to take effect, which stops every container you are running,
+including ones that have nothing to do with Iris. That is why `-Restart` is opt-in and never automatic.
+
+> The setting an earlier version wrote, `sysctl.vm.compact_memory=0`, is a **no-op** — `compact_memory` is a
+> write-only trigger, not a tunable. If your `.wslconfig` still has it, `wsl.ps1` will report the drift.
+
+## Plain `docker compose`
+
+```bash
+docker compose up -d --build                                                   # CPU
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build   # CUDA
+docker compose down                                                            # stop
+docker compose logs -f                                                         # logs
+docker restart iris                                                            # restart (the pool is re-parsed from /data)
+docker compose down -v                                                         # stop AND remove volumes
+```
+
+Build args: `BASE_IMAGE`, `WITH_GPU`, `GPU_REQUIREMENTS`, `GPU_TORCH_INDEX` — the GPU overlay fills them from
+`IRIS_GPU_BASE_IMAGE`, `IRIS_GPU_REQUIREMENTS` and `IRIS_GPU_TORCH_INDEX`, which the setup scripts export after
+reading your driver.
+
+---
+
+# Environment variables
+
+Copy `.env.example` → `.env` for the common ones. **They only seed the FIRST start** (before `settings.json`
+exists); after that the Settings page is the source of truth. `IRIS_ENV_OVERRIDES=1` forces env to win on every
+start. Docker compose does **not** support inline comments in `.env` — keep comments on their own lines.
+
+### Everyday
+| Variable | Default | What it does |
+|---|---|---|
+| `IRIS_DATA_DIR` | `backend/data` (`/data` in Docker) | Where cases, library, settings, rules and caches live. |
+| `IRIS_DATA_HOST_DIR` | `./backend/data` | Host path bind-mounted to `/data` by compose. |
+| `IRIS_PORT` | `8000` | Port used by `start.sh` (PowerShell: `-Port`). |
+| `IRIS_COMPUTE_MODE` | `auto` | `auto` \| `cuda` \| `cpu`. |
+| `IRIS_ENV_OVERRIDES` | unset | `1` makes env win over saved settings on every start. |
+
+### AI assistant
+| Variable | Default | What it does |
+|---|---|---|
+| `IRIS_AI_PROVIDER` / `IRIS_AI_MODEL` | — | `openai` \| `none`; model name. |
+| `IRIS_AI_BASE_URL` | — | OpenAI-compatible endpoint (e.g. `http://host.docker.internal:11434/v1`). |
+| `IRIS_AI_API_KEY` | — | Seeds the key; masked everywhere after that. |
+| `IRIS_CA_BUNDLE` | auto (`/data/ca.pem`) | CA bundle for TLS-inspecting proxies. |
+| `IRIS_AI_MAX_STEPS` | 40 (cap 120) | Tool-calling steps per investigation. |
+| `IRIS_AI_MAX_SECONDS` | 600 (cap 900) | Wall clock per run. |
+| `IRIS_AI_MAX_CONTEXT_TOKENS` | 60 000 | Estimated context ceiling; triggers compaction, not a stop. |
+| `IRIS_AI_MAX_COMPACTIONS` | 6 (cap 20) | How many times a run may compact its transcript. |
+| `IRIS_AI_TOOL_SECONDS` | 90 (cap 600) | Wall clock ONE tool call gets. Past it (plus 5 s grace) a read is abandoned and reported to the model as a ToolError naming the narrower call; a write is always awaited. Also how long a stop can take to land inside a tool that never checks it. |
+| `IRIS_AI_DERIVED_WAIT` | 60 (cap 600) | How long a graph / timeline / detection-roll-up tool waits for its background build before refusing with its progress. Keep it below `IRIS_AI_TOOL_SECONDS` so that refusal wins. |
+
+### MCP server
+| Variable | Default | What it does |
+|---|---|---|
+| `IRIS_MCP_ENABLED` | off | Expose `/api/mcp` at all. |
+| `IRIS_MCP_ALLOW_WRITES` | off | Separate switch: a read cannot change a case, a write can. |
+| `IRIS_MCP_TOKEN` | — | **Required.** `Authorization: Bearer <token>`. Enabling the server without one makes it answer `503` to everything — see [Security](#security). |
+
+### Security
+| Variable | Default | What it does |
+|---|---|---|
+| `IRIS_BIND_HOST` | `127.0.0.1` | Host interface the port binds to (compose publish address, and `--host` for `start.* local`). `0.0.0.0` exposes Iris to the network — set `IRIS_AUTH_TOKEN` at the same time. |
+| `IRIS_AUTH_TOKEN` | unset (no gate) | A shared secret for the whole API. Send it as `Authorization: Bearer <token>` or `X-Iris-Token: <token>`, or open the UI once at `http://<host>:<port>/?token=<token>` and the browser keeps it in an HttpOnly, SameSite=strict cookie. `/api/health` stays open (healthchecks, `start.*`); `/api/mcp` is exempt because it carries its own mandatory token. |
+| `IRIS_CORS_ORIGINS` | `http://localhost:<port>`, `http://127.0.0.1:<port>`, `http://localhost:5173`, `http://127.0.0.1:5173` | Comma-separated origins allowed to read a cross-origin response. `*` is refused — on an API with no authentication the wildcard lets every page you visit read your whole evidence pool. The SPA is same-origin and needs no entry; this list exists for `npm run dev`. |
+| `IRIS_ALLOWED_HOSTS` | unset | Extra DNS names Iris answers to. By default it answers to `localhost` and to **IP addresses**, and refuses any other name: a DNS name that resolves to this machine is how a rebinding attack reaches a local tool. Set this to your reverse proxy's hostname. |
+
+**What protects Iris, and what does not.** There is no user model, on purpose — one analyst, one machine, one
+evidence pool. What actually stands between the evidence and a hostile web page:
+
+* **CORS is an allowlist, never `*`.** A page on another origin cannot read any response.
+* **A cross-site write is refused** (`403`). CORS only stops the response being *read*; it does not stop the
+  request being *sent*, and `POST /api/admin/clear-all` accepts an empty body, so a plain HTML `<form>` on any
+  page would otherwise wipe the workspace without the attacker ever seeing the reply. Requests carrying a
+  foreign `Origin` (or `Sec-Fetch-Site: cross-site`) are rejected before they reach a handler, as are
+  form-encoded and `text/plain` bodies on `/api` — the two body shapes a browser can post cross-site with no
+  preflight. curl, the MCP stdio bridge, Cursor and Claude Code send no `Origin` and are unaffected.
+* **The `Host` header is validated**, which is what stops DNS rebinding.
+* **Settings → Security: a password and a PIN.** Both are required, both are asked for on one login page, and
+  both are stored as salted PBKDF2-SHA256 hashes in `auth.json` in the data dir — never in `settings.json`, and
+  never returned by any endpoint. The session is an HttpOnly, SameSite=strict cookie that lasts 12 hours and
+  lives in memory on the server, so restarting Iris signs everyone out. Repeated failures are throttled per
+  client (5 tries, then 30 s doubling to 15 min) because a short PIN is otherwise guessable. Forgotten both?
+  `docker exec iris rm /data/auth.json` and the login is gone — this control assumes you own the disk.
+  It keeps a person at the keyboard, and a page open in your browser, out of the pool; it is **not** encryption
+  of the evidence, and a PIN stored next to the password is not a second factor in the phone-app sense.
+* **`IRIS_AUTH_TOKEN`** is the same gate for clients that cannot sign in — curl, scripts, the MCP stdio bridge.
+  Set it as well as (not instead of) the login when the port is reachable from anywhere else.
+
+Loopback binding is **not** a defence against a malicious web page: a browser running on this machine reaches
+`http://localhost:8000` whatever the bind address is. It defends against the network, and nothing else.
+
+Two things to know about what is on disk: `settings.json` in the data dir holds `ai.apiKey` and `mcp.token`
+**in the clear** (they are masked in the API and the UI, never in the file) — that is normal for a credential
+store, but the data dir is the bind mount you back up and copy around. And AI conversation transcripts in
+`ai/history.json` quote log lines verbatim, so they are evidence: `clear all data` deletes them for that reason.
+
+### Performance and limits (rarely needed)
+| Variable | Default | What it does |
+|---|---|---|
+| `IRIS_POOL_MAX_MB` | **unset — unlimited** | Megabytes of **source log** the pool may load at startup. There is no cap by default: a file that was uploaded as evidence and is not in search is worse than a slow Iris, because nothing about a search tells you it was answered over part of the corpus. Set it (a shared box, a small VM) and anything over the cap stays in the library, listed by name, loadable one file at a time. Not a RAM figure — parsed events cost several times the source bytes. |
+| `IRIS_AUTO_ENRICH` | `1` (on) | Seeds `settings.ingest.autoEnrich` on first run. `0` = a log lands as raw searchable lines and phase 2 (timestamps, fields, entities, detections) never starts on its own — see *Two-phase ingest* below. Like every `IRIS_*` variable it only seeds settings the first time; after that Settings wins. |
+| `IRIS_PARSE_WORKERS` | `cpu_count − 2`, max 6 | Parallel parse workers. `1` disables parallel parsing. |
+| `IRIS_PARSE_MIN_MB` | 32 | File size above which parallel parsing kicks in. |
+| `IRIS_PARSE_CHUNK_MB` | 4 | Byte-range chunk size per worker, in MB. |
+| `IRIS_GRAPH_WORKERS` | `min(6, cpu_count − 1)` | Entity-extraction workers. `1` disables parallel graph building. |
+| `IRIS_GRAPH_PARALLEL_MIN` | 50 000 | Events below which the graph is built in-process. |
+| `IRIS_GRAPH_CHUNK` | 25 000 | Events per graph chunk. |
+| `IRIS_GRAPH_CACHE` | `1` | `0` disables persisting the built graph to `cache/graph-<scope>.pkl`. |
+| `IRIS_GRAPH_AUTOBUILD` | `1` | The entity graph starts building on its own once the workspace settles, instead of waiting for you to open the Graph screen. `0` disables it. |
+| `IRIS_GRAPH_AUTOBUILD_QUIET` | `20` | Seconds of no change before that automatic build starts. It never runs while sources are loading or enriching. |
+| `IRIS_INDEX_CACHE` | `1` | `0` disables persisting the packed search index to `cache/search-index.iris`. With it on, a restart reads the index back in seconds instead of re-packing every event (165 s on an 11 M-event pool, during which every search is slow). |
+| `IRIS_POOL_CACHE` | `1` | `0` disables the parsed-pool cache (`cache/pool/`). With it on, a restart restores parsed, already-interpreted events instead of re-reading and re-enriching every staged file. Costs disk (roughly the size of the parsed events); `Clear all data` deletes it. |
+| `IRIS_GRAPH_TIMING` | unset | Log a per-phase breakdown of each graph build. |
+| `IRIS_GRAPH_SYNC_MAX` / `IRIS_ANALYSIS_SYNC_MAX` / `IRIS_ANOMALY_SYNC_MAX` | 20 000 | Event count above which these are built in the background instead of on the request. |
+| `IRIS_GPU_INDEX_MAX` | auto (≤ 50 % of free VRAM) | Bytes of search index allowed on the GPU. `0` keeps it on numpy. |
+| `IRIS_CUPY` / `IRIS_TORCH_INDEX` | auto per driver | Override the GPU wheels `setup.* local` picks. |
+
+---
+
+# Using the app
+
+The left sidebar is a slim icon rail — hover to expand, pin it with the button at the bottom.
+
+**A case is optional.** Search, detections, the entity graph and event detail read the whole ingested pool and work
+with no case at all. A case adds curation: a timeline, notes, indicators, accepted graph links and the report.
+
+### 1. Sources
+Drop files on the drop zone or click **Choose files**. Everything lands in the workspace, parsed and searchable at
+once; filing a log into a case is a separate step on the row afterwards.
+
+Supported: text logs (nginx/syslog/plaintext), `.evtx` and EVTX XML, JSON/JSONL/CloudTrail/k8s audit, CSV/TSV/
+pipe-delimited, SQLite databases, `.eml`/`.mbox`/`.msg`, PDF, XLSX/XLS, DOCX, images via OCR, memory/binary dumps
+(strings + IOC extraction), and `zip`/`tar`/`gz`/`bz2`/`xz`/`7z` archives (nested to depth 3). Unknown layouts land
+in state **MAP** — click the row to edit the field mapping or press **Suggest with AI**.
+
+* Filter by name/parser and by state; per-source size and a combined total.
+* **Live parse progress**, and a warning naming any file that is **not** in the pool — a file absent from search is
+  indistinguishable from a search that found nothing.
+* Click a row to open the **raw log viewer** (numbered pages, server-side line filter). Structured and binary
+  sources show their parsed records instead of bytes. **Detach** turns it into a floating window you can drag and
+  resize anywhere; the choice is remembered.
+* The last column is **Delete** — it removes the events from the workspace *and* the file from disk. There is no
+  trash for sources; the confirm says so.
+
+**Two-phase ingest.** A text log is searchable the moment it is uploaded, but nothing about it is *understood* yet.
+Phase 1 lands the raw lines; phase 2 — the real parser plus timestamps, severity, fields, entities and detections —
+runs afterwards on one background worker, because that second half is 83–89 % of the cost of ingesting a log and it
+is paid whether the file yields useful fields or none. Each row carries an **enrich** chip:
+
+| chip | what it means |
+|---|---|
+| `raw` | in the pool and searchable as text — **no timestamps, no severities, no fields, no entities, no detections**. This source is invisible to the timeline, the entity graph and the anomaly list. |
+| `queued` | waiting for the worker. |
+| `enriching` | being parsed right now. |
+| `enriched` | done. Also the starting state of anything with no raw form (EVTX, SQLite, PDF, XLSX, OCR, mail) — those parse fully on upload. |
+| `skipped` | you declined phase 2. It stays raw on purpose and raises no warning. |
+| `error` | phase 2 failed; the message is on the row. The raw lines are still in the pool — nothing was lost — and **Enrich now** retries it. |
+
+Per row: **Enrich now** (queues it immediately, even with auto-enrich off) and **Skip** (leaves it raw). A source
+being enriched right now cannot be skipped — the parse is already running and will replace its events when it
+lands. While anything is still `raw`, `queued` or `enriching`, a workspace banner says so and Timeline, Graph and
+Anomalies mark themselves incomplete: those screens are answering over part of the corpus, and an empty graph that
+really means "not enriched yet" would be a lie about the evidence. **Settings → Compute → Two-phase ingest** turns the automatic
+behaviour off if you want raw text and nothing else.
+
+### 2. Search
+Press `/` to focus. Examples:
+`user:svc_deploy AND src_ip:45.83.140.22` · `sev:critical` · `source:aws.cloudtrail NOT errorCode:AccessDenied` ·
+`"bulk export"` · `host:bastion*` · `entity:"10.0.0.1"` (exact) · `path:C\:\Windows` (escaped colon)
+
+* **Columns are configurable** — built-ins plus any parsed field (status codes, `src_ip`, `EventID`), remembered
+  per browser. The message column shows the **raw line** by default; normalized `msg` is available as its own column.
+* **Every value is a filter**: `+` narrows to it, `−` excludes it. Same on the fields rail.
+* Above 2 000 events the search runs through a vectorized index — on the GPU when CUDA is active. The status line
+  under the filters shows the hit count, the engine badge and `index warming N %` while it builds.
+
+### 3. Cases
+The Cases page is a card grid (a filter/sort toolbar appears above three cases). Name and analyst are edited
+inline. Deleting a case moves it to the trash (last 5 kept) — **Recently deleted** restores it.
+
+Inside a case: the **timeline** (the curated events in time order, labels and notes edited in place, add from a
+source or from Search), **notes** (markdown, paste screenshots), **indicators**, its **sources**, and the report
+export (Markdown / JSON / STIX 2.1 / PDF).
+
+### 4. Anomalies and rules
+The anomaly list and the rule catalogue, each with a text filter and chips that carry their own counts. A rule has
+four separate pieces: an analyst-editable **description** (prose, matches nothing), a read-only **trigger** (what
+the engine actually evaluates), its **mechanism**, and **params** — every constant in the condition, editable and
+validated. Custom rules are a raw regex or a list of typed conditions with an optional threshold.
+
+### 5. Entity graph
+Live force layout on a canvas. Drag nodes (toggle *Pin after drag*), drag empty space to pan, wheel to zoom,
+double-click / `⌂` / `0` fits, arrows pan (Shift = faster), `+`/`−` zoom.
+
+* **Nothing is selected at first** — pick the logs to graph. A graph over every source at once is a hairball.
+  The selection persists until you clear it.
+* **Search** filters the whole graph, not just what is drawn, and keeps each match's direct neighbours.
+* **min link events** = relationship *strength*: hides links supported by fewer than N events, then any node left
+  with no links.
+* **min connections** = how *connected* an entity is: hides nodes with fewer than N links in the graph being
+  shown. A different question — an IP seen once, attached to one busy host, survives any link-event threshold but
+  not this one. The hint line says how many nodes it hid.
+* *seen with* (co-occurrence) is hidden by default: it is true of nearly every pair in a busy log.
+* Click a node for its facts and linked entities; **Search** on a node opens exactly that entity's events.
+
+### 6. AI assistant
+Open the panel, type an objective in your own words ("trace every event involving this IP and build me a case").
+The agent uses Iris's own tools and streams each step. Everything it writes is listed as it happens and
+**Revert all** takes the whole run back off the case. Indicators, notes and graph links it creates must cite real
+event ids or the call is refused. Conversations persist server-side — closing the tab does not stop the run, and
+**Stop** halts it on the server.
+
+### 7. Settings
+**Appearance** (5 themes + density) · **Compute** (GPU list, live utilization / VRAM / temp / power / CPU / RSS /
+parse throughput sampled every 2 s with 2–30 min charts, mode auto / CUDA / CPU, *Re-check now*, and
+**Two-phase ingest** — the auto-enrich toggle, which schedules *when* the expensive parse runs, not whether
+it runs) · **AI assistant**
+(enable, model, key, *Test connection*; Advanced → base URL, TLS verification, custom CA bundle) · **MCP server**
+(below) · **Data** (**Clear all data**, behind a type-the-phrase confirm — it wipes cases, trash, library, the pool,
+jobs and AI conversations; rules and settings are kept, and the panel says so).
+
+---
+
+# Let Cursor / Claude Code use Iris (MCP)
+Settings → **MCP server** (collapsible, off by default) turns Iris into an MCP server at
+`http://localhost:8000/api/mcp`, offering the same tools the built-in assistant uses. Paste the config it shows
+into `~/.cursor/mcp.json` (or `.cursor/mcp.json` in a project), or run the `claude mcp add` command it prints.
+Writes are a separate switch and an optional bearer token gates the endpoint — the generated token is shown in the
+clear exactly once. Full guide, including the stdio bridge for clients without HTTP transport: **`docs/MCP.md`**.
+
+# Run without Docker (dev mode)
+```bash
+cd backend  && pip install -r requirements.txt && uvicorn app.main:app --reload --port 8000
+cd frontend && npm install --ignore-scripts && npm run dev   # UI at http://localhost:5173 (proxies /api → :8000)
+# optional GPU: pip install -r backend/requirements-gpu.txt   (needs a CUDA 12.x driver)
+```
+Tests: `cd backend && python -m pytest -q` · Frontend build/type-check: `cd frontend && npm run build`
+
+# Handy API calls (curl)
+```bash
+curl localhost:8000/api/health
+curl -F "files=@/path/to/access.log" -F "files=@/path/to/x.evtx" localhost:8000/api/sources
+curl "localhost:8000/api/events?q=user:svc_deploy&sev=critical,high&limit=50"
+curl "localhost:8000/api/graph?limit=200&minCount=3&minDegree=2"      # link strength + how connected
+curl "localhost:8000/api/graph?limit=200&q=10.0.0.1"                  # searches the WHOLE graph
+curl localhost:8000/api/anomalies
+curl localhost:8000/api/timeline
+curl localhost:8000/api/library                                        # every staged file: parser, state, events
+curl localhost:8000/api/report
+curl -o report.md "localhost:8000/api/report/export?format=md"        # md | json | stix | pdf
+curl localhost:8000/api/compute
+curl -X POST localhost:8000/api/compute/recheck
+curl "localhost:8000/api/compute/metrics?window=150"                  # live GPU/process/throughput samples (2 s)
+curl localhost:8000/api/parsers                                        # supported file types + availability (OCR etc.)
+curl -X POST localhost:8000/api/sources/<id>/mapping/suggest          # AI/heuristic field-mapping suggestion
+curl -X POST -H 'content-type: application/json' -d '{"resetSettings":false}' localhost:8000/api/admin/clear-all
+```
+```bash
+# two-phase ingest: enrich one source now / decline it, and see what is outstanding
+curl -X POST localhost:8000/api/sources/<sid>/enrich
+curl -X POST localhost:8000/api/sources/<sid>/enrich/skip
+curl -s localhost:8000/api/case | python -c "import json,sys; print(json.load(sys.stdin)['enrichment'])"
+curl -X PUT -H 'content-type: application/json' -d '{"ingest":{"autoEnrich":false}}' localhost:8000/api/settings
+```
+Full contract: `docs/API_CONTRACT.md`.
+
+# Troubleshooting
+- **A timeline entry says "event not in the pool"** — the log line it points at is not loaded right now
+  (its source was deleted, or the file has not finished parsing). The entry itself is never discarded: it
+  keeps your labels and note, and it re-points itself at the line as soon as that line is back, even if the
+  event id changed.
+- **The app updated but the screen looks the same** — your browser is holding the old page. Hard-refresh
+  once: **Ctrl+Shift+R** (Windows/Linux) or **Cmd+Shift+R** (macOS). Iris now serves `index.html` with
+  `Cache-Control: no-store` and its hashed assets as immutable, so this should only ever be needed once,
+  for a copy your browser cached before that header existed. To check what the server is actually
+  sending: `curl -s -D- -o /dev/null http://localhost:8000/ | grep -i cache` (use `-D-`, not `-I` — the
+  page route answers HEAD with 405).
+- **The app is slow right after starting** — it is re-parsing the library into the pool, and the entity graph is
+  restored or rebuilt after that. `./start.sh status` (or the Sources page) says how many files are left. Derived
+  builds are deliberately paused until the load finishes.
+- **A file is missing from search** — Sources names it and why. `budget`/`unreadable` mean it was never parsed
+  (raise `IRIS_POOL_MAX_MB`, or load that one file anyway from the library list); `parse-error` means it *was*
+  parsed and the parser failed; `not-parsed` is an archive only expanded on attach.
+- **A file is searchable but has no timestamp, fields or detections** — it is still `raw`: phase 2 has not run.
+  The Sources row says so; press **Enrich now**, or turn `Auto-enrich` back on. Nothing is lost either way — the
+  raw lines are in the pool and stay there.
+- **Nothing is enriching and the queue never moves** — the pool is probably still loading (enrichment yields to it
+  by design), or auto-enrich is off and nothing has been asked for. `GET /api/case` → `enrichment` says which:
+  `pending` is work in flight, `outstanding` is how much of the corpus is not interpreted yet.
+- **A `.db-wal` / `-shm` / `-journal` file is refused** — those are SQLite siblings, not databases. Iris opens a
+  database `immutable=1`, which never replays a WAL, so uncheckpointed rows are missing; on a live browser profile
+  that is the newest activity. Check the database in first.
+- **AI Test connection fails with `CERTIFICATE_VERIFY_FAILED … self-signed certificate`** — a corporate proxy or
+  antivirus is re-signing HTTPS. Export its root CA as PEM into the data dir; Iris picks it up automatically:
+  `docker cp corp-root.pem iris:/data/ca.pem` (or set `IRIS_CA_BUNDLE`, or type the path in Settings → AI →
+  Advanced → *Custom CA bundle*). The Settings field must name a file **inside the data dir** — a bare name or a
+  relative path is taken as relative to it, and anything outside is ignored (it is settable over the API, and an
+  arbitrary path there is a way to ask the server which files exist). `IRIS_CA_BUNDLE` is not restricted: whoever
+  starts the process can already read the disk. Last resort: turn off *Verify TLS certificates* (insecure). On Windows, export
+  from `certmgr.msc` → Trusted Root → Export → Base-64 X.509 (.CER) → rename to `.pem`.
+- **Something is filling `%TEMP%`** — almost certainly `%TEMP%\wsl-crashes`. When a process inside the
+  WSL VM segfaults, WSL writes a CORE DUMP of it there, and a dump of Iris is the size of the pool it
+  was holding: four of them in one afternoon came to **146 GB**, one of them 116.5 GB. Worse than the
+  disk: that dump contains your log contents in plaintext, in a temp directory. `.wslconfig` now
+  carries `maxCrashDumpCount=0` (applied by `wsl.ps1 -Apply`), which stops them being written; delete
+  any existing ones from `%TEMP%\wsl-crashes`. Raise the count only while diagnosing a crash, and
+  clear the folder afterwards.
+- **Docker is eating my C: drive** — two separate things, and the first hides the second.
+  `./start.sh --build` (or `.\start.ps1 -Build`) now removes the image each build replaces and trims
+  the build cache to 10 GB, so the space is freed *inside* Docker automatically. But Docker's virtual
+  disk on Windows (`%LOCALAPPDATA%\Docker\wsl\disk\docker_data.vhdx`) never shrinks: it grew to
+  63 GB here while holding 27 GB. Make it sparse once, with Docker Desktop closed, and freed blocks
+  come back to Windows from then on:
+  `wsl --terminate docker-desktop` then `wsl --manage docker-desktop --set-sparse true` (WSL 2.3+).
+  Verify with `fsutil sparse queryflag "%LOCALAPPDATA%\Docker\wsl\disk\docker_data.vhdx"`.
+  Iris's own data is NOT in there — it lives in the bind-mounted data dir, where `cache/` holds the
+  saved graph, the parsed pool and the search index. Deleting `cache/` is always safe (it costs one
+  rebuild), and `Clear all data` removes it along with everything else.
+- **Settings → Compute says CPU but I have an NVIDIA GPU** — run
+  `docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi`. If that fails: Windows → Docker
+  Desktop must use the WSL 2 backend + a current Windows driver (`wsl --update`); Linux → install the NVIDIA
+  Container Toolkit, `sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker`. Then
+  re-run setup in `gpu` mode — the CPU image never has cupy installed.
+- **Port 8000 in use** — `.\start.ps1 -Port 8080` / `./start.sh --port=8080`, or change the left side of
+  `ports: "8000:8000"` in `docker-compose.yml`. On Windows, `localhost:8000` can also be squatted by another WSL
+  relay while `127.0.0.1:8000` works — try the explicit IP before assuming Iris is down.
+- **Docker not running** — the setup scripts start Docker Desktop for you; otherwise start it and re-run.
+- **Container keeps restarting / segfaults during a big load (Windows)** — run `.\wsl.ps1`, apply the settings, and
+  `wsl --shutdown` when you can afford to stop your containers.
+- **Wipe everything** — Settings → Data → *Clear all data*. `docker compose down -v` does not: the evidence is a
+  bind mount at `./backend/data`, not a volume.
+- **Sources table looks empty after upload** — files parse in the background; the state pill shows PARSING then
+  READY / REVIEW / MAP / ERROR (hover ERROR for the reason).

@@ -1,0 +1,737 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="crossorigin" />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<style>
+  html, body { margin:0; padding:0; background:#0a0b0a; }
+  * { box-sizing: border-box; }
+  a { color:#6ee787; text-decoration:none; }
+  a:hover { color:#a6f5b4; }
+  ::-webkit-scrollbar { width:10px; height:10px; }
+  ::-webkit-scrollbar-thumb { background:#232823; border-radius:0; }
+  ::-webkit-scrollbar-track { background:#0d0f0d; }
+  @keyframes pulseDot { 0%,100% { opacity:.35 } 50% { opacity:1 } }
+</style>
+</helmet>
+
+<div style="display:flex; min-height:100vh; background:#0a0b0a; color:#d6dcd4; font-family:'Space Grotesk', Helvetica, sans-serif; font-size:13px;">
+
+  <aside style="width:232px; flex:0 0 232px; background:#0c0e0c; border-right:1px solid #1c211c; display:flex; flex-direction:column; position:sticky; top:0; height:100vh;">
+    <div style="padding:20px 18px 16px; border-bottom:1px solid #1c211c;">
+      <div style="display:flex; align-items:center; gap:8px;">
+        <div style="width:9px; height:9px; background:#6ee787; border-radius:50%; animation:pulseDot 2.4s ease-in-out infinite;"></div>
+        <div style="font-family:'JetBrains Mono',monospace; font-size:12px; letter-spacing:.18em; color:#6ee787; font-weight:700;">LEDGER</div>
+      </div>
+      <div style="margin-top:4px; font-size:11px; color:#5c665b; letter-spacing:.04em;">log correlation workbench</div>
+    </div>
+
+    <div style="padding:14px 18px; border-bottom:1px solid #1c211c;">
+      <div style="font-size:10px; letter-spacing:.16em; color:#5c665b; text-transform:uppercase;">Active case</div>
+      <div style="margin-top:6px; font-family:'JetBrains Mono',monospace; font-size:12px; color:#9fa89d;">{{ caseId }}</div>
+      <div style="margin-top:3px; font-size:14px; font-weight:600; color:#e6ece4; line-height:1.25; text-wrap:pretty;">{{ caseName }}</div>
+      <div style="margin-top:10px; display:flex; gap:6px; flex-wrap:wrap;">
+        <span style="font-family:'JetBrains Mono',monospace; font-size:10px; padding:3px 6px; background:#161a16; border:1px solid #242a24; color:#8d968b;">7 sources</span>
+        <span style="font-family:'JetBrains Mono',monospace; font-size:10px; padding:3px 6px; background:#161a16; border:1px solid #242a24; color:#8d968b;">1.42M events</span>
+      </div>
+    </div>
+
+    <nav style="padding:10px 10px; display:flex; flex-direction:column; gap:2px;">
+      <sc-for list="{{ navItems }}" as="n" hint-placeholder-count="6">
+        <div onClick="{{ n.go }}" style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:9px 10px; cursor:pointer; border-left:2px solid {{ n.bar }}; background:{{ n.bg }}; color:{{ n.fg }};" style-hover="background:#141814;">
+          <span style="font-size:12.5px; font-weight:500;">{{ n.label }}</span>
+          <span style="font-family:'JetBrains Mono',monospace; font-size:10px; color:#4e574d;">{{ n.tag }}</span>
+        </div>
+      </sc-for>
+    </nav>
+
+    <div style="margin-top:auto; padding:14px 18px; border-top:1px solid #1c211c; display:flex; align-items:center; gap:9px;">
+      <div style="width:24px; height:24px; background:#1b2a1e; border:1px solid #2c4130; color:#6ee787; font-family:'JetBrains Mono',monospace; font-size:10px; display:flex; align-items:center; justify-content:center;">{{ analystInitials }}</div>
+      <div>
+        <div style="font-size:12px; color:#c3cbc1;">{{ analystName }}</div>
+        <div style="font-size:10px; color:#5c665b;">Tier 2 · IR</div>
+      </div>
+    </div>
+  </aside>
+
+  <main style="flex:1; min-width:0; display:flex; flex-direction:column;">
+
+    <header style="height:52px; flex:0 0 52px; border-bottom:1px solid #1c211c; display:flex; align-items:center; gap:14px; padding:0 22px; background:#0c0e0c; position:sticky; top:0; z-index:5;">
+      <div style="font-size:13px; font-weight:600; color:#e6ece4;">{{ screenTitle }}</div>
+      <div style="font-size:11.5px; color:#5c665b;">{{ screenSub }}</div>
+      <div style="margin-left:auto; display:flex; align-items:center; gap:10px;">
+        <div style="font-family:'JetBrains Mono',monospace; font-size:10.5px; color:#5c665b;">UTC · {{ pinnedCount }} pinned</div>
+        <div style="padding:6px 12px; border:1px solid #2c4130; background:#132015; color:#6ee787; font-size:11.5px; font-weight:600; cursor:pointer;" style-hover="background:#183020;" onClick="{{ goReport }}">Export findings</div>
+      </div>
+    </header>
+
+    <div style="flex:1; min-width:0;">
+
+      <!-- ══ INGEST ══ -->
+      <sc-if value="{{ isIngest }}" hint-placeholder-val="{{ true }}">
+        <div style="padding:26px 26px 60px; display:flex; flex-direction:column; gap:22px;">
+
+          <div style="display:grid; grid-template-columns:1.55fr 1fr; gap:18px;">
+            <div style="border:1px dashed #2b332b; background:#0e110e; padding:30px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; min-height:190px;">
+              <div style="width:34px; height:34px; border:1px solid #3a463a; display:flex; align-items:center; justify-content:center; color:#6ee787; font-family:'JetBrains Mono',monospace;">+</div>
+              <div style="font-size:14px; font-weight:600; color:#dfe6dd;">Drop anything into the case</div>
+              <div style="font-size:12px; color:#6b756a; text-align:center; max-width:420px; line-height:1.5; text-wrap:pretty;">Syslog, EVTX, JSON lines, access logs, CloudTrail exports, k8s streams, firewall dumps, or raw unknown text. The parser fingerprints each file and proposes a field mapping you can correct.</div>
+              <div style="margin-top:6px; display:flex; gap:8px;">
+                <div style="padding:7px 14px; background:#6ee787; color:#08110a; font-size:12px; font-weight:700; cursor:pointer;">Choose files</div>
+                <div style="padding:7px 14px; border:1px solid #2b332b; color:#a6afa4; font-size:12px; cursor:pointer;" style-hover="border-color:#3d4a3d;">Connect a stream</div>
+              </div>
+            </div>
+
+            <div style="border:1px solid #1c211c; background:#0e110e; padding:18px;">
+              <div style="font-size:10px; letter-spacing:.16em; color:#5c665b; text-transform:uppercase;">Case posture</div>
+              <div style="margin-top:14px; display:flex; flex-direction:column; gap:12px;">
+                <sc-for list="{{ posture }}" as="p" hint-placeholder-count="4">
+                  <div>
+                    <div style="display:flex; justify-content:space-between; align-items:baseline;">
+                      <span style="font-size:12px; color:#b7bfb5;">{{ p.label }}</span>
+                      <span style="font-family:'JetBrains Mono',monospace; font-size:12px; color:{{ p.color }}; font-weight:700;">{{ p.value }}</span>
+                    </div>
+                    <div style="margin-top:5px; height:3px; background:#1a1f1a;">
+                      <div style="height:3px; width:{{ p.pct }}; background:{{ p.color }};"></div>
+                    </div>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <div style="display:flex; align-items:baseline; gap:10px; margin-bottom:10px;">
+              <div style="font-size:12px; font-weight:600; color:#dfe6dd; letter-spacing:.02em;">Sources in case</div>
+              <div style="font-size:11px; color:#5c665b;">parser confidence shown per file · click a row to review mapping</div>
+            </div>
+            <div style="border:1px solid #1c211c;">
+              <div style="display:grid; grid-template-columns:1.7fr 1fr .9fr 1.3fr .8fr .6fr; gap:12px; padding:9px 14px; background:#101310; border-bottom:1px solid #1c211c; font-family:'JetBrains Mono',monospace; font-size:10px; letter-spacing:.12em; color:#5c665b; text-transform:uppercase;">
+                <div>File</div><div>Detected parser</div><div>Events</div><div>Time range</div><div>Mapping</div><div>State</div>
+              </div>
+              <sc-for list="{{ sources }}" as="s" hint-placeholder-count="7">
+                <div style="display:grid; grid-template-columns:1.7fr 1fr .9fr 1.3fr .8fr .6fr; gap:12px; padding:11px 14px; border-bottom:1px solid #161a16; align-items:center; cursor:pointer;" style-hover="background:#101410;">
+                  <div style="font-family:'JetBrains Mono',monospace; font-size:11.5px; color:#dfe6dd; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ s.file }}</div>
+                  <div style="font-size:11.5px; color:#9fa89d;">{{ s.parser }}</div>
+                  <div style="font-family:'JetBrains Mono',monospace; font-size:11.5px; color:#9fa89d;">{{ s.events }}</div>
+                  <div style="font-family:'JetBrains Mono',monospace; font-size:11px; color:#6b756a;">{{ s.range }}</div>
+                  <div style="display:flex; align-items:center; gap:7px;">
+                    <div style="width:52px; height:3px; background:#1a1f1a;"><div style="height:3px; width:{{ s.pct }}; background:{{ s.color }};"></div></div>
+                    <span style="font-family:'JetBrains Mono',monospace; font-size:10.5px; color:{{ s.color }};">{{ s.conf }}</span>
+                  </div>
+                  <div style="font-family:'JetBrains Mono',monospace; font-size:10px; color:{{ s.color }}; letter-spacing:.08em;">{{ s.state }}</div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:18px;">
+            <div style="border:1px solid #1c211c; background:#0e110e; padding:18px;">
+              <div style="font-size:10px; letter-spacing:.16em; color:#5c665b; text-transform:uppercase;">Unknown format · needs your call</div>
+              <div style="margin-top:12px; font-family:'JetBrains Mono',monospace; font-size:11px; color:#8d968b; background:#0a0c0a; border:1px solid #1a1f1a; padding:12px; line-height:1.7; overflow:auto;">2026-08-11T03:18:33Z|fw-edge-2|DENY|10.22.4.19:51882|45.83.140.22:8443|tcp|len=1420</div>
+              <div style="margin-top:12px; font-size:12px; color:#9fa89d; line-height:1.55;">Pipe-delimited, 7 fields. Ledger guessed <span style="color:#6ee787;">timestamp · host · action · src · dst · proto · bytes</span> at 82% confidence.</div>
+              <div style="margin-top:12px; display:flex; gap:8px;">
+                <div style="padding:6px 12px; background:#6ee787; color:#08110a; font-size:11.5px; font-weight:700; cursor:pointer;">Accept mapping</div>
+                <div style="padding:6px 12px; border:1px solid #2b332b; color:#a6afa4; font-size:11.5px; cursor:pointer;">Edit fields</div>
+              </div>
+            </div>
+
+            <div style="border:1px solid #1c211c; background:#0e110e; padding:18px;">
+              <div style="font-size:10px; letter-spacing:.16em; color:#5c665b; text-transform:uppercase;">Normalization queue</div>
+              <div style="margin-top:12px; display:flex; flex-direction:column; gap:9px;">
+                <sc-for list="{{ queue }}" as="q" hint-placeholder-count="4">
+                  <div style="display:flex; align-items:center; gap:10px;">
+                    <span style="font-family:'JetBrains Mono',monospace; font-size:10px; color:{{ q.color }};">{{ q.mark }}</span>
+                    <span style="font-size:12px; color:#b7bfb5; flex:1;">{{ q.label }}</span>
+                    <span style="font-family:'JetBrains Mono',monospace; font-size:11px; color:#6b756a;">{{ q.detail }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ══ SEARCH ══ -->
+      <sc-if value="{{ isSearch }}" hint-placeholder-val="{{ true }}">
+        <div style="padding:20px 26px 60px;">
+          <div style="display:flex; gap:10px; align-items:center;">
+            <div style="flex:1; display:flex; align-items:center; gap:9px; border:1px solid #2b332b; background:#0e110e; padding:0 12px; height:40px;">
+              <span style="font-family:'JetBrains Mono',monospace; font-size:12px; color:#6ee787;">&gt;</span>
+              <input value="{{ query }}" onChange="{{ onQuery }}" placeholder="user:svc_deploy AND src_ip:45.83.140.22" style="flex:1; background:transparent; border:0; outline:none; color:#dfe6dd; font-family:'JetBrains Mono',monospace; font-size:12.5px;" />
+              <span style="font-family:'JetBrains Mono',monospace; font-size:10.5px; color:#4e574d;">{{ resultCount }} hits</span>
+            </div>
+            <div style="padding:0 14px; height:40px; display:flex; align-items:center; border:1px solid #2b332b; color:#a6afa4; font-size:12px; cursor:pointer;" style-hover="border-color:#3d4a3d;">Last 24h</div>
+            <div style="padding:0 14px; height:40px; display:flex; align-items:center; background:#132015; border:1px solid #2c4130; color:#6ee787; font-size:12px; font-weight:600; cursor:pointer;">Save as detection</div>
+          </div>
+
+          <div style="margin-top:12px; display:flex; gap:7px; flex-wrap:wrap; align-items:center;">
+            <span style="font-family:'JetBrains Mono',monospace; font-size:10px; letter-spacing:.12em; color:#4e574d; text-transform:uppercase; margin-right:3px;">Source</span>
+            <sc-for list="{{ sourceChips }}" as="c" hint-placeholder-count="6">
+              <div onClick="{{ c.toggle }}" style="padding:5px 10px; font-size:11.5px; cursor:pointer; border:1px solid {{ c.border }}; background:{{ c.bg }}; color:{{ c.fg }};">{{ c.label }}</div>
+            </sc-for>
+          </div>
+
+          <div style="margin-top:16px; border:1px solid #1c211c;">
+            <div style="display:grid; grid-template-columns:150px 108px 96px 110px 1fr 74px; gap:12px; padding:9px 14px; background:#101310; border-bottom:1px solid #1c211c; font-family:'JetBrains Mono',monospace; font-size:10px; letter-spacing:.12em; color:#5c665b; text-transform:uppercase;">
+              <div>Timestamp</div><div>Source</div><div>Host</div><div>Principal</div><div>Message</div><div>Sev</div>
+            </div>
+            <sc-for list="{{ rows }}" as="e" hint-placeholder-count="12">
+              <div onClick="{{ e.open }}" style="display:grid; grid-template-columns:150px 108px 96px 110px 1fr 74px; gap:12px; padding:10px 14px; border-bottom:1px solid #161a16; align-items:center; cursor:pointer; background:{{ e.rowBg }};" style-hover="background:#101410;">
+                <div style="font-family:'JetBrains Mono',monospace; font-size:11.5px; color:#8d968b;">{{ e.ts }}</div>
+                <div style="font-family:'JetBrains Mono',monospace; font-size:10.5px; color:#6b756a;">{{ e.source }}</div>
+                <div style="font-family:'JetBrains Mono',monospace; font-size:11px; color:#9fa89d;">{{ e.host }}</div>
+                <div style="font-family:'JetBrains Mono',monospace; font-size:11px; color:#9fa89d;">{{ e.user }}</div>
+                <div style="font-family:'JetBrains Mono',monospace; font-size:11.5px; color:#dfe6dd; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ e.msg }}</div>
+                <div style="display:flex; align-items:center; gap:6px;">
+                  <div style="width:3px; height:12px; background:{{ e.color }};"></div>
+                  <span style="font-family:'JetBrains Mono',monospace; font-size:10px; color:{{ e.color }}; letter-spacing:.06em;">{{ e.sev }}</span>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+          <div style="margin-top:10px; font-size:11.5px; color:#5c665b;">Rows are normalized across every parser — the same fields whether the line came from EVTX XML or an nginx string.</div>
+        </div>
+      </sc-if>
+
+      <!-- ══ TIMELINE ══ -->
+      <sc-if value="{{ isTimeline }}" hint-placeholder-val="{{ true }}">
+        <div style="padding:24px 26px 60px;">
+          <div style="display:flex; gap:10px; margin-bottom:20px;">
+            <sc-for list="{{ clusterStats }}" as="k" hint-placeholder-count="4">
+              <div style="flex:1; border:1px solid #1c211c; background:#0e110e; padding:14px 16px;">
+                <div style="font-family:'JetBrains Mono',monospace; font-size:20px; color:{{ k.color }}; font-weight:700;">{{ k.value }}</div>
+                <div style="margin-top:3px; font-size:11.5px; color:#6b756a;">{{ k.label }}</div>
+              </div>
+            </sc-for>
+          </div>
+
+          <div style="display:flex; flex-direction:column;">
+            <sc-for list="{{ clusters }}" as="c" hint-placeholder-count="4">
+              <div style="display:grid; grid-template-columns:118px 1fr; gap:0;">
+                <div style="padding:0 16px 0 0; text-align:right;">
+                  <div style="font-family:'JetBrains Mono',monospace; font-size:12px; color:#dfe6dd;">{{ c.start }}</div>
+                  <div style="font-family:'JetBrains Mono',monospace; font-size:10.5px; color:#4e574d;">{{ c.span }}</div>
+                </div>
+                <div style="border-left:1px solid #232823; padding:0 0 26px 22px; position:relative;">
+                  <div style="position:absolute; left:-5px; top:4px; width:9px; height:9px; background:{{ c.color }}; border-radius:50%;"></div>
+                  <div style="display:flex; align-items:center; gap:9px;">
+                    <div style="font-size:14px; font-weight:600; color:#e6ece4;">{{ c.title }}</div>
+                    <div style="font-family:'JetBrains Mono',monospace; font-size:10px; padding:2px 6px; border:1px solid {{ c.color }}; color:{{ c.color }};">{{ c.tag }}</div>
+                    <div style="font-family:'JetBrains Mono',monospace; font-size:10.5px; color:#4e574d;">{{ c.count }} events · {{ c.srcs }}</div>
+                  </div>
+                  <div style="margin-top:4px; font-size:12px; color:#8d968b; line-height:1.55; max-width:760px; text-wrap:pretty;">{{ c.why }}</div>
+                  <div style="margin-top:11px; border:1px solid #1c211c; background:#0e110e;">
+                    <sc-for list="{{ c.events }}" as="e" hint-placeholder-count="3">
+                      <div onClick="{{ e.open }}" style="display:grid; grid-template-columns:78px 104px 1fr 96px; gap:12px; padding:8px 13px; border-bottom:1px solid #161a16; align-items:center; cursor:pointer;" style-hover="background:#101410;">
+                        <div style="font-family:'JetBrains Mono',monospace; font-size:11px; color:#6b756a;">{{ e.clock }}</div>
+                        <div style="font-family:'JetBrains Mono',monospace; font-size:10.5px; color:#5c665b;">{{ e.source }}</div>
+                        <div style="font-family:'JetBrains Mono',monospace; font-size:11.5px; color:#cfd6cd; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ e.msg }}</div>
+                        <div style="font-family:'JetBrains Mono',monospace; font-size:10px; color:{{ e.color }}; text-align:right;">{{ e.sev }}</div>
+                      </div>
+                    </sc-for>
+                  </div>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ══ GRAPH ══ -->
+      <sc-if value="{{ isGraph }}" hint-placeholder-val="{{ true }}">
+        <div style="padding:24px 26px 60px; display:grid; grid-template-columns:1fr 300px; gap:18px; align-items:start;">
+          <div style="border:1px solid #1c211c; background:#0d0f0d; position:relative; height:560px; overflow:hidden;">
+            <div style="position:absolute; inset:0; background-image:radial-gradient(#171c17 1px, transparent 1px); background-size:26px 26px;"></div>
+            <svg viewBox="0 0 900 560" preserveAspectRatio="none" style="position:absolute; inset:0; width:100%; height:100%;">
+              <sc-for list="{{ edges }}" as="g" hint-placeholder-count="8">
+                <line x1="{{ g.x1 }}" y1="{{ g.y1 }}" x2="{{ g.x2 }}" y2="{{ g.y2 }}" stroke="{{ g.stroke }}" stroke-width="{{ g.w }}"></line>
+              </sc-for>
+            </svg>
+            <sc-for list="{{ nodes }}" as="n" hint-placeholder-count="7">
+              <div onClick="{{ n.select }}" style="position:absolute; left:{{ n.left }}; top:{{ n.top }}; transform:translate(-50%,-50%); display:flex; flex-direction:column; align-items:center; gap:6px; cursor:pointer;">
+                <div style="width:{{ n.size }}; height:{{ n.size }}; border-radius:50%; background:{{ n.fill }}; border:1px solid {{ n.ring }};"></div>
+                <div style="font-family:'JetBrains Mono',monospace; font-size:11px; color:{{ n.label }}; white-space:nowrap; background:#0d0f0dcc; padding:1px 5px;">{{ n.name }}</div>
+                <div style="font-family:'JetBrains Mono',monospace; font-size:9.5px; color:#4e574d; white-space:nowrap;">{{ n.kind }}</div>
+              </div>
+            </sc-for>
+            <div style="position:absolute; left:14px; bottom:12px; display:flex; gap:14px; font-family:'JetBrains Mono',monospace; font-size:10px; color:#5c665b;">
+              <span>edge weight = shared events</span><span>ring = severity of linked events</span>
+            </div>
+          </div>
+
+          <div style="display:flex; flex-direction:column; gap:14px;">
+            <div style="border:1px solid #1c211c; background:#0e110e; padding:16px;">
+              <div style="font-size:10px; letter-spacing:.16em; color:#5c665b; text-transform:uppercase;">Selected entity</div>
+              <div style="margin-top:8px; font-family:'JetBrains Mono',monospace; font-size:15px; color:#6ee787; font-weight:700;">{{ selEntity.name }}</div>
+              <div style="margin-top:2px; font-size:11.5px; color:#6b756a;">{{ selEntity.kind }} · first seen {{ selEntity.first }}</div>
+              <div style="margin-top:14px; display:flex; flex-direction:column; gap:9px;">
+                <sc-for list="{{ selEntity.facts }}" as="f" hint-placeholder-count="4">
+                  <div style="display:flex; justify-content:space-between; gap:10px;">
+                    <span style="font-size:11.5px; color:#6b756a;">{{ f.k }}</span>
+                    <span style="font-family:'JetBrains Mono',monospace; font-size:11.5px; color:#cfd6cd; text-align:right;">{{ f.v }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+
+            <div style="border:1px solid #1c211c; background:#0e110e; padding:16px;">
+              <div style="font-size:10px; letter-spacing:.16em; color:#5c665b; text-transform:uppercase;">Linked entities</div>
+              <div style="margin-top:12px; display:flex; flex-direction:column; gap:10px;">
+                <sc-for list="{{ selEntity.links }}" as="l" hint-placeholder-count="4">
+                  <div onClick="{{ l.select }}" style="cursor:pointer;" style-hover="opacity:.75;">
+                    <div style="display:flex; justify-content:space-between; align-items:baseline;">
+                      <span style="font-family:'JetBrains Mono',monospace; font-size:11.5px; color:#cfd6cd;">{{ l.name }}</span>
+                      <span style="font-family:'JetBrains Mono',monospace; font-size:10.5px; color:#6ee787;">{{ l.n }}</span>
+                    </div>
+                    <div style="margin-top:3px; font-size:11px; color:#6b756a;">{{ l.via }}</div>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ══ DETAIL ══ -->
+      <sc-if value="{{ isDetail }}" hint-placeholder-val="{{ true }}">
+        <div style="padding:24px 26px 60px; display:grid; grid-template-columns:1fr 340px; gap:18px; align-items:start;">
+          <div style="display:flex; flex-direction:column; gap:16px;">
+            <div style="border:1px solid #1c211c; background:#0e110e;">
+              <div style="padding:16px 18px; border-bottom:1px solid #1c211c; display:flex; align-items:center; gap:12px;">
+                <div style="width:3px; height:34px; background:{{ sel.color }};"></div>
+                <div style="flex:1;">
+                  <div style="font-size:15px; font-weight:600; color:#e6ece4;">{{ sel.title }}</div>
+                  <div style="margin-top:2px; font-family:'JetBrains Mono',monospace; font-size:11px; color:#6b756a;">{{ sel.ts }} · {{ sel.source }} · {{ sel.file }}</div>
+                </div>
+                <div onClick="{{ togglePin }}" style="padding:6px 12px; border:1px solid {{ pinBorder }}; background:{{ pinBg }}; color:{{ pinFg }}; font-size:11.5px; font-weight:600; cursor:pointer;">{{ pinLabel }}</div>
+              </div>
+              <div style="padding:16px 18px; display:grid; grid-template-columns:1fr 1fr; gap:14px 26px;">
+                <sc-for list="{{ sel.fields }}" as="f" hint-placeholder-count="8">
+                  <div style="display:flex; justify-content:space-between; gap:12px; border-bottom:1px solid #161a16; padding-bottom:7px;">
+                    <span style="font-family:'JetBrains Mono',monospace; font-size:10.5px; color:#5c665b; letter-spacing:.06em;">{{ f.k }}</span>
+                    <span style="font-family:'JetBrains Mono',monospace; font-size:11.5px; color:#dfe6dd; text-align:right;">{{ f.v }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+
+            <div>
+              <div style="font-size:10px; letter-spacing:.16em; color:#5c665b; text-transform:uppercase; margin-bottom:9px;">Raw line</div>
+              <div style="border:1px solid #1c211c; background:#0a0c0a; padding:14px; font-family:'JetBrains Mono',monospace; font-size:11.5px; color:#9fa89d; line-height:1.75; overflow:auto; white-space:pre-wrap; word-break:break-all;">{{ sel.raw }}</div>
+            </div>
+
+            <div>
+              <div style="display:flex; align-items:baseline; gap:10px; margin-bottom:9px;">
+                <div style="font-size:10px; letter-spacing:.16em; color:#5c665b; text-transform:uppercase;">Correlated events</div>
+                <div style="font-size:11px; color:#4e574d;">why Ledger tied each one to this event</div>
+              </div>
+              <div style="border:1px solid #1c211c;">
+                <sc-for list="{{ sel.correlations }}" as="c" hint-placeholder-count="5">
+                  <div onClick="{{ c.open }}" style="display:grid; grid-template-columns:76px 1fr 190px; gap:12px; padding:11px 14px; border-bottom:1px solid #161a16; align-items:center; cursor:pointer;" style-hover="background:#101410;">
+                    <div style="font-family:'JetBrains Mono',monospace; font-size:11px; color:{{ c.color }};">{{ c.clock }}</div>
+                    <div style="font-family:'JetBrains Mono',monospace; font-size:11.5px; color:#cfd6cd; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ c.msg }}</div>
+                    <div style="font-size:11px; color:#6b756a; text-align:right;">{{ c.reason }}</div>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+
+          <div style="display:flex; flex-direction:column; gap:14px;">
+            <div style="border:1px solid #1c211c; background:#0e110e; padding:16px;">
+              <div style="font-size:10px; letter-spacing:.16em; color:#5c665b; text-transform:uppercase;">Detections fired</div>
+              <div style="margin-top:12px; display:flex; flex-direction:column; gap:12px;">
+                <sc-for list="{{ sel.detections }}" as="d" hint-placeholder-count="2">
+                  <div style="border-left:2px solid {{ d.color }}; padding-left:11px;">
+                    <div style="font-size:12.5px; color:#dfe6dd; font-weight:600;">{{ d.name }}</div>
+                    <div style="margin-top:3px; font-family:'JetBrains Mono',monospace; font-size:10.5px; color:#6b756a;">{{ d.id }} · {{ d.level }}</div>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+            <div style="border:1px solid #1c211c; background:#0e110e; padding:16px;">
+              <div style="font-size:10px; letter-spacing:.16em; color:#5c665b; text-transform:uppercase;">Entities in this event</div>
+              <div style="margin-top:12px; display:flex; flex-wrap:wrap; gap:6px;">
+                <sc-for list="{{ sel.entities }}" as="t" hint-placeholder-count="4">
+                  <div onClick="{{ t.select }}" style="font-family:'JetBrains Mono',monospace; font-size:11px; padding:4px 8px; background:#151915; border:1px solid #262d26; color:#a6afa4; cursor:pointer;" style-hover="border-color:#3d4a3d; color:#dfe6dd;">{{ t.name }}</div>
+                </sc-for>
+              </div>
+            </div>
+            <div style="border:1px solid #1c211c; background:#0e110e; padding:16px;">
+              <div style="font-size:10px; letter-spacing:.16em; color:#5c665b; text-transform:uppercase;">Frequency baseline</div>
+              <div style="margin-top:10px; font-size:12px; color:#9fa89d; line-height:1.6; text-wrap:pretty;">{{ sel.baseline }}</div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ══ REPORT ══ -->
+      <sc-if value="{{ isReport }}" hint-placeholder-val="{{ true }}">
+        <div style="padding:26px 26px 70px; max-width:960px;">
+          <div style="border:1px solid #1c211c; background:#0e110e; padding:26px 28px;">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:20px;">
+              <div>
+                <div style="font-family:'JetBrains Mono',monospace; font-size:11px; color:#6ee787; letter-spacing:.14em;">{{ caseId }}</div>
+                <div style="margin-top:6px; font-size:24px; font-weight:700; color:#eef3ec; line-height:1.2; text-wrap:pretty;">{{ caseName }}</div>
+                <div style="margin-top:6px; font-size:12px; color:#6b756a;">Compiled by {{ analystName }} · 11 Aug 2026 · draft 3</div>
+              </div>
+              <div style="text-align:right;">
+                <div style="font-family:'JetBrains Mono',monospace; font-size:10px; color:#5c665b; letter-spacing:.14em;">SEVERITY</div>
+                <div style="font-family:'JetBrains Mono',monospace; font-size:18px; color:#ff6b5e; font-weight:700;">CRITICAL</div>
+              </div>
+            </div>
+
+            <div style="margin-top:24px; font-size:10px; letter-spacing:.16em; color:#5c665b; text-transform:uppercase;">Summary</div>
+            <p style="margin:9px 0 0; font-size:13.5px; color:#c3cbc1; line-height:1.7; text-wrap:pretty;">{{ summary }}</p>
+
+            <div style="margin-top:26px; font-size:10px; letter-spacing:.16em; color:#5c665b; text-transform:uppercase;">Findings</div>
+            <div style="margin-top:11px; display:flex; flex-direction:column; gap:11px;">
+              <sc-for list="{{ findings }}" as="f" hint-placeholder-count="3">
+                <div style="border:1px solid #1c211c; background:#0b0d0b; padding:15px 17px;">
+                  <div style="display:flex; align-items:center; gap:10px;">
+                    <div style="font-family:'JetBrains Mono',monospace; font-size:10px; padding:2px 6px; background:{{ f.chipBg }}; color:{{ f.color }};">{{ f.level }}</div>
+                    <div style="font-size:13.5px; font-weight:600; color:#e6ece4;">{{ f.title }}</div>
+                    <div style="margin-left:auto; font-family:'JetBrains Mono',monospace; font-size:10.5px; color:#4e574d;">{{ f.evidence }}</div>
+                  </div>
+                  <div style="margin-top:7px; font-size:12.5px; color:#9fa89d; line-height:1.6; text-wrap:pretty;">{{ f.body }}</div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="margin-top:26px; font-size:10px; letter-spacing:.16em; color:#5c665b; text-transform:uppercase;">Pinned evidence · {{ pinnedCount }}</div>
+            <div style="margin-top:11px; border:1px solid #1c211c;">
+              <sc-for list="{{ pinnedRows }}" as="p" hint-placeholder-count="4">
+                <div style="display:grid; grid-template-columns:150px 108px 1fr; gap:12px; padding:10px 14px; border-bottom:1px solid #161a16; align-items:center;">
+                  <div style="font-family:'JetBrains Mono',monospace; font-size:11px; color:#8d968b;">{{ p.ts }}</div>
+                  <div style="font-family:'JetBrains Mono',monospace; font-size:10.5px; color:#5c665b;">{{ p.source }}</div>
+                  <div style="font-family:'JetBrains Mono',monospace; font-size:11.5px; color:#cfd6cd; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ p.msg }}</div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="margin-top:26px; font-size:10px; letter-spacing:.16em; color:#5c665b; text-transform:uppercase;">Indicators</div>
+            <div style="margin-top:11px; display:flex; flex-wrap:wrap; gap:7px;">
+              <sc-for list="{{ iocs }}" as="i" hint-placeholder-count="5">
+                <div style="font-family:'JetBrains Mono',monospace; font-size:11px; padding:5px 9px; background:#151915; border:1px solid #262d26; color:#c3cbc1;">{{ i.v }}</div>
+              </sc-for>
+            </div>
+
+            <div style="margin-top:28px; display:flex; gap:9px;">
+              <div style="padding:9px 16px; background:#6ee787; color:#08110a; font-size:12.5px; font-weight:700; cursor:pointer;">Export PDF</div>
+              <div style="padding:9px 16px; border:1px solid #2b332b; color:#a6afa4; font-size:12.5px; cursor:pointer;" style-hover="border-color:#3d4a3d;">Export STIX bundle</div>
+              <div style="padding:9px 16px; border:1px solid #2b332b; color:#a6afa4; font-size:12.5px; cursor:pointer;" style-hover="border-color:#3d4a3d;">Push to ticket</div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+    </div>
+  </main>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;caseName&quot;:{&quot;editor&quot;:&quot;text&quot;,&quot;default&quot;:&quot;Suspected credential stuffing → data egress&quot;,&quot;tsType&quot;:&quot;string&quot;},&quot;analystName&quot;:{&quot;editor&quot;:&quot;text&quot;,&quot;default&quot;:&quot;D. Ferreira&quot;,&quot;tsType&quot;:&quot;string&quot;}}">
+const SEV = { critical:'#ff6b5e', high:'#ffa657', medium:'#e3c96e', low:'#6f7a6d', info:'#5c8f6a' };
+
+const EVENTS = [
+  { id:'e01', ts:'2026-08-11 03:09:41', clock:'03:09:41', source:'nginx.access', host:'edge-lb-01', user:'—', msg:'POST /api/v2/login 401 — 214 attempts in 90s from 45.83.140.22', sev:'high', file:'edge-lb-01_access.log',
+    raw:'45.83.140.22 - - [11/Aug/2026:03:09:41 +0000] "POST /api/v2/login HTTP/2.0" 401 173 "-" "python-requests/2.31.0" rt=0.014',
+    fields:[['src_ip','45.83.140.22'],['http.method','POST'],['http.path','/api/v2/login'],['http.status','401'],['user_agent','python-requests/2.31.0'],['bytes','173'],['geo.country','MD'],['asn','AS200557']],
+    entities:['45.83.140.22','edge-lb-01'],
+    detections:[['Credential stuffing — burst of 401s','SIGMA-WEB-0042','high']],
+    baseline:'edge-lb-01 averages 3 failed logins/hour. This window is 214 in 90 seconds — 4,200× baseline.' },
+
+  { id:'e02', ts:'2026-08-11 03:14:47', clock:'03:14:47', source:'nginx.access', host:'edge-lb-01', user:'svc_deploy', msg:'POST /api/v2/login 200 — first success from 45.83.140.22', sev:'critical', file:'edge-lb-01_access.log',
+    raw:'45.83.140.22 - svc_deploy [11/Aug/2026:03:14:47 +0000] "POST /api/v2/login HTTP/2.0" 200 1284 "-" "python-requests/2.31.0" rt=0.211',
+    fields:[['src_ip','45.83.140.22'],['user.name','svc_deploy'],['http.status','200'],['session.id','9f21c4ae'],['mfa','not_presented'],['rt','0.211s'],['geo.country','MD'],['asn','AS200557']],
+    entities:['45.83.140.22','svc_deploy','edge-lb-01'],
+    detections:[['Successful auth after failure burst','SIGMA-AUTH-0111','critical'],['Service account interactive login','SIGMA-AUTH-0203','high']],
+    baseline:'svc_deploy has never authenticated from outside AS14618 in 180 days of history.' },
+
+  { id:'e03', ts:'2026-08-11 03:15:10', clock:'03:15:10', source:'aws.cloudtrail', host:'us-east-1', user:'svc_deploy', msg:'ConsoleLogin Success — MFA not used', sev:'critical', file:'cloudtrail_20260811.json',
+    raw:'{"eventTime":"2026-08-11T03:15:10Z","eventName":"ConsoleLogin","sourceIPAddress":"45.83.140.22","userIdentity":{"userName":"svc_deploy","type":"IAMUser"},"additionalEventData":{"MFAUsed":"No"},"responseElements":{"ConsoleLogin":"Success"}}',
+    fields:[['eventName','ConsoleLogin'],['sourceIPAddress','45.83.140.22'],['userIdentity.type','IAMUser'],['MFAUsed','No'],['region','us-east-1'],['errorCode','—'],['recipientAccountId','4471…9082'],['result','Success']],
+    entities:['45.83.140.22','svc_deploy'],
+    detections:[['Console login without MFA','SIGMA-AWS-0007','critical']],
+    baseline:'0 prior ConsoleLogin events for svc_deploy — this account is API-only by policy.' },
+
+  { id:'e04', ts:'2026-08-11 03:16:02', clock:'03:16:02', source:'aws.cloudtrail', host:'us-east-1', user:'svc_deploy', msg:'CreateAccessKey — new long-lived key AKIA…7QMX', sev:'critical', file:'cloudtrail_20260811.json',
+    raw:'{"eventTime":"2026-08-11T03:16:02Z","eventName":"CreateAccessKey","sourceIPAddress":"45.83.140.22","userIdentity":{"userName":"svc_deploy"},"responseElements":{"accessKey":{"accessKeyId":"AKIA4YV2XN31LR8Q7QMX","status":"Active"}}}',
+    fields:[['eventName','CreateAccessKey'],['accessKeyId','AKIA…7QMX'],['status','Active'],['sourceIPAddress','45.83.140.22'],['region','us-east-1'],['target.user','svc_deploy'],['persistence','yes'],['result','Success']],
+    entities:['45.83.140.22','svc_deploy'],
+    detections:[['Persistence — access key created from new IP','SIGMA-AWS-0031','critical']],
+    baseline:'Last CreateAccessKey for this principal: 2025-11-04, from the CI runner range.' },
+
+  { id:'e05', ts:'2026-08-11 03:18:33', clock:'03:18:33', source:'firewall.edge', host:'fw-edge-2', user:'—', msg:'ALLOW 10.22.4.19:51882 → 45.83.140.22:8443 tcp', sev:'high', file:'fw-edge-2.pipe.log',
+    raw:'2026-08-11T03:18:33Z|fw-edge-2|ALLOW|10.22.4.19:51882|45.83.140.22:8443|tcp|len=1420',
+    fields:[['action','ALLOW'],['src','10.22.4.19'],['dst','45.83.140.22'],['dst_port','8443'],['proto','tcp'],['bytes','1420'],['rule','egress-any-https'],['iface','outside'],],
+    entities:['45.83.140.22','10.22.4.19'],
+    detections:[['Outbound to known-bad IP','SIGMA-NET-0019','high']],
+    baseline:'10.22.4.19 has no prior egress outside the corporate CIDR.' },
+
+  { id:'e06', ts:'2026-08-11 03:21:04', clock:'03:21:04', source:'windows.evtx', host:'WIN-FS01', user:'svc_deploy', msg:'4624 — logon type 3 (network) from 10.22.4.19', sev:'high', file:'WIN-FS01_Security.evtx',
+    raw:'<Event><System><EventID>4624</EventID><Computer>WIN-FS01</Computer><TimeCreated SystemTime="2026-08-11T03:21:04.117Z"/></System><EventData><Data Name="TargetUserName">svc_deploy</Data><Data Name="LogonType">3</Data><Data Name="IpAddress">10.22.4.19</Data></EventData></Event>',
+    fields:[['EventID','4624'],['LogonType','3 (network)'],['TargetUserName','svc_deploy'],['IpAddress','10.22.4.19'],['AuthPackage','NTLM'],['Computer','WIN-FS01'],['LogonProcess','NtLmSsp'],['result','Success']],
+    entities:['svc_deploy','WIN-FS01','10.22.4.19'],
+    detections:[['NTLM logon to file server from jump host','SIGMA-WIN-0088','medium']],
+    baseline:'NTLM is deprecated in this domain — 6 such logons in 90 days, all incident-related.' },
+
+  { id:'e07', ts:'2026-08-11 03:21:09', clock:'03:21:09', source:'windows.evtx', host:'WIN-FS01', user:'svc_deploy', msg:'4672 — special privileges assigned to new logon', sev:'high', file:'WIN-FS01_Security.evtx',
+    raw:'<Event><System><EventID>4672</EventID><Computer>WIN-FS01</Computer></System><EventData><Data Name="SubjectUserName">svc_deploy</Data><Data Name="PrivilegeList">SeDebugPrivilege SeBackupPrivilege SeTakeOwnershipPrivilege</Data></EventData></Event>',
+    fields:[['EventID','4672'],['SubjectUserName','svc_deploy'],['SeDebugPrivilege','granted'],['SeBackupPrivilege','granted'],['SeTakeOwnership','granted'],['Computer','WIN-FS01'],['LogonId','0x4f2a91'],['result','Success']],
+    entities:['svc_deploy','WIN-FS01'],
+    detections:[['Sensitive privilege assignment','SIGMA-WIN-0091','high']],
+    baseline:'SeBackupPrivilege grants to svc_deploy: 0 in the trailing 90 days.' },
+
+  { id:'e08', ts:'2026-08-11 03:22:41', clock:'03:22:41', source:'syslog', host:'bastion-1', user:'root', msg:'sshd: Accepted publickey for root from 10.22.4.19 port 44120', sev:'high', file:'bastion-1_syslog',
+    raw:'Aug 11 03:22:41 bastion-1 sshd[20418]: Accepted publickey for root from 10.22.4.19 port 44120 ssh2: RSA SHA256:8mQ2…kL1p',
+    fields:[['program','sshd'],['pid','20418'],['user','root'],['src_ip','10.22.4.19'],['port','44120'],['method','publickey'],['key.fp','SHA256:8mQ2…kL1p'],['result','Accepted']],
+    entities:['root','bastion-1','10.22.4.19'],
+    detections:[['Direct root SSH','SIGMA-LNX-0012','high']],
+    baseline:'Root SSH is policy-blocked; the key fingerprint is not in the managed key inventory.' },
+
+  { id:'e09', ts:'2026-08-11 03:24:00', clock:'03:24:00', source:'k8s.audit', host:'prod-cluster', user:'svc_deploy', msg:'pods/exec into payments-api-7c9d — /bin/sh', sev:'critical', file:'k8s_audit_20260811.jsonl',
+    raw:'{"kind":"Event","verb":"create","objectRef":{"resource":"pods","subresource":"exec","namespace":"payments","name":"payments-api-7c9d"},"user":{"username":"svc_deploy"},"requestURI":"/api/v1/namespaces/payments/pods/payments-api-7c9d/exec?command=/bin/sh"}',
+    fields:[['verb','create'],['resource','pods/exec'],['namespace','payments'],['pod','payments-api-7c9d'],['command','/bin/sh'],['user','svc_deploy'],['responseStatus','101'],['stage','ResponseComplete']],
+    entities:['svc_deploy','payments-api'],
+    detections:[['Interactive exec into production pod','SIGMA-K8S-0004','critical']],
+    baseline:'No pods/exec calls against the payments namespace in the last 30 days.' },
+
+  { id:'e10', ts:'2026-08-11 03:27:15', clock:'03:27:15', source:'app.jsonl', host:'payments-api', user:'svc_deploy', msg:'bulk export completed — 41,208 customer records to /tmp/x.tar.gz', sev:'critical', file:'payments-api_app.jsonl',
+    raw:'{"ts":"2026-08-11T03:27:15Z","level":"info","svc":"payments-api","event":"export.complete","rows":41208,"dest":"/tmp/x.tar.gz","actor":"svc_deploy","duration_ms":48210}',
+    fields:[['event','export.complete'],['rows','41,208'],['dest','/tmp/x.tar.gz'],['actor','svc_deploy'],['duration','48.2s'],['svc','payments-api'],['level','info'],['pii','yes']],
+    entities:['svc_deploy','payments-api'],
+    detections:[['Mass data export','SIGMA-APP-0055','critical']],
+    baseline:'Largest legitimate export in 90 days: 1,140 rows. This is 36× the prior maximum.' },
+
+  { id:'e11', ts:'2026-08-11 03:29:50', clock:'03:29:50', source:'firewall.edge', host:'fw-edge-2', user:'—', msg:'ALLOW 10.22.4.19 → 45.83.140.22:8443 — 2.14 GB over 11m', sev:'critical', file:'fw-edge-2.pipe.log',
+    raw:'2026-08-11T03:29:50Z|fw-edge-2|ALLOW|10.22.4.19:51993|45.83.140.22:8443|tcp|len=2297851904',
+    fields:[['action','ALLOW'],['src','10.22.4.19'],['dst','45.83.140.22'],['dst_port','8443'],['bytes','2.14 GB'],['duration','11m02s'],['rule','egress-any-https'],['direction','outbound']],
+    entities:['45.83.140.22','10.22.4.19'],
+    detections:[['Large outbound transfer to new destination','SIGMA-NET-0022','critical']],
+    baseline:'p99 outbound flow for this host is 8 MB. This flow is 267× that.' },
+
+  { id:'e12', ts:'2026-08-11 03:31:08', clock:'03:31:08', source:'syslog', host:'bastion-1', user:'root', msg:'shell history file truncated — /root/.bash_history size 0', sev:'high', file:'bastion-1_syslog',
+    raw:'Aug 11 03:31:08 bastion-1 audit[0]: PATH name="/root/.bash_history" inode=2621451 mode=0600 op=truncate',
+    fields:[['op','truncate'],['path','/root/.bash_history'],['inode','2621451'],['mode','0600'],['host','bastion-1'],['user','root'],['tactic','defense evasion'],['result','ok']],
+    entities:['root','bastion-1'],
+    detections:[['Anti-forensics — history cleared','SIGMA-LNX-0030','high']],
+    baseline:'History truncation has never been observed on this host.' },
+
+  { id:'e13', ts:'2026-08-11 02:41:12', clock:'02:41:12', source:'k8s.audit', host:'prod-cluster', user:'ci-runner', msg:'deployments/payments-api scaled 4 → 6', sev:'info', file:'k8s_audit_20260811.jsonl',
+    raw:'{"kind":"Event","verb":"patch","objectRef":{"resource":"deployments","name":"payments-api"},"user":{"username":"ci-runner"}}',
+    fields:[['verb','patch'],['resource','deployments'],['name','payments-api'],['user','ci-runner'],['replicas','4 → 6'],['namespace','payments'],['responseStatus','200'],['stage','ResponseComplete']],
+    entities:['payments-api'], detections:[], baseline:'Routine — autoscaler patches occur ~40×/day.' },
+
+  { id:'e14', ts:'2026-08-11 03:02:55', clock:'03:02:55', source:'syslog', host:'bastion-1', user:'—', msg:'CRON session opened for user backup', sev:'low', file:'bastion-1_syslog',
+    raw:'Aug 11 03:02:55 bastion-1 CRON[19882]: pam_unix(cron:session): session opened for user backup by (uid=0)',
+    fields:[['program','CRON'],['pid','19882'],['user','backup'],['uid','0'],['host','bastion-1'],['pam','cron:session'],['result','opened'],['schedule','0 3 * * *']],
+    entities:['bastion-1'], detections:[], baseline:'Nightly job — 1 occurrence per day for 400 days.' },
+
+  { id:'e15', ts:'2026-08-11 03:35:22', clock:'03:35:22', source:'aws.cloudtrail', host:'us-east-1', user:'svc_deploy', msg:'DeleteTrail attempted — AccessDenied', sev:'high', file:'cloudtrail_20260811.json',
+    raw:'{"eventTime":"2026-08-11T03:35:22Z","eventName":"DeleteTrail","errorCode":"AccessDenied","sourceIPAddress":"45.83.140.22","userIdentity":{"userName":"svc_deploy"}}',
+    fields:[['eventName','DeleteTrail'],['errorCode','AccessDenied'],['sourceIPAddress','45.83.140.22'],['user','svc_deploy'],['region','us-east-1'],['trailName','org-audit-trail'],['tactic','defense evasion'],['result','Denied']],
+    entities:['45.83.140.22','svc_deploy'],
+    detections:[['Attempt to disable audit logging','SIGMA-AWS-0044','high']],
+    baseline:'First DeleteTrail attempt ever recorded in this account.' }
+];
+
+const CLUSTERS = [
+  { id:'c1', title:'Credential stuffing burst', start:'03:09:41', span:'5m 06s', tag:'FREQUENCY', color:'#ffa657', count:'214', srcs:'nginx.access',
+    why:'214 failed logins against one endpoint from a single ASN, 4,200× the hourly baseline for this host. Grouped by time proximity and shared source IP.', ids:['e01'] },
+  { id:'c2', title:'Successful auth, then persistence', start:'03:14:47', span:'1m 15s', tag:'ENTITY LINK', color:'#ff6b5e', count:'3', srcs:'nginx.access · cloudtrail',
+    why:'The 401 burst ends in a 200. Twelve seconds later the same principal appears in CloudTrail from the same IP, without MFA, and mints a long-lived access key.', ids:['e02','e03','e04'] },
+  { id:'c3', title:'Lateral movement', start:'03:18:33', span:'5m 27s', tag:'ENTITY LINK', color:'#ff6b5e', count:'4', srcs:'firewall · evtx · syslog · k8s',
+    why:'10.22.4.19 becomes the pivot: outbound C2 check-in, NTLM logon to the file server with backup privileges, root SSH to the bastion, then an interactive shell in a production pod.', ids:['e05','e06','e07','e08','e09'] },
+  { id:'c4', title:'Collection and egress', start:'03:27:15', span:'8m 07s', tag:'ANOMALY', color:'#ff6b5e', count:'4', srcs:'app.jsonl · firewall · syslog · cloudtrail',
+    why:'41,208 customer records exported, 2.14 GB pushed to the same IP that started the intrusion, then shell history truncated and an attempt to delete the CloudTrail trail.', ids:['e10','e11','e12','e15'] }
+];
+
+const ENTITIES = {
+  '45.83.140.22': { kind:'IPv4 · external', first:'03:09:41', x:120, y:150, size:34,
+    facts:[['ASN','AS200557'],['Geo','Chișinău, MD'],['Reputation','known scanner (2 feeds)'],['Events','221'],['First seen in case','03:09:41']],
+    links:[['svc_deploy','8 shared events','authenticated as, from this IP'],['10.22.4.19','2 shared events','C2 destination for this host'],['edge-lb-01','215 shared events','target of the login burst']] },
+  'svc_deploy': { kind:'IAM principal · service account', first:'03:14:47', x:400, y:120, size:40,
+    facts:[['Type','IAMUser + AD account'],['MFA','not enrolled'],['Events','9'],['Privilege','SeBackup, SeDebug granted 03:21'],['Owner','platform-eng']],
+    links:[['45.83.140.22','8 shared events','logged in from'],['WIN-FS01','2 shared events','NTLM network logon'],['payments-api','2 shared events','pod exec + export actor'],['AKIA…7QMX','1 shared event','created access key']] },
+  '10.22.4.19': { kind:'IPv4 · internal jump host', first:'03:18:33', x:400, y:400, size:32,
+    facts:[['Subnet','10.22.4.0/24 (ops)'],['Egress prior','none'],['Events','4'],['Outbound total','2.14 GB'],['Owner','unassigned']],
+    links:[['45.83.140.22','2 shared events','outbound tcp/8443'],['WIN-FS01','1 shared event','source of NTLM logon'],['bastion-1','1 shared event','source of root SSH']] },
+  'WIN-FS01': { kind:'Host · Windows file server', first:'03:21:04', x:690, y:200, size:30,
+    facts:[['OS','Windows Server 2022'],['Events','2'],['Shares','finance$, hr$'],['Logon type','3 (network, NTLM)'],['EDR','installed, no alert']],
+    links:[['svc_deploy','2 shared events','logged on as'],['10.22.4.19','1 shared event','logon source']] },
+  'payments-api': { kind:'Service · k8s deployment', first:'02:41:12', x:690, y:400, size:30,
+    facts:[['Namespace','payments'],['Events','3'],['Data class','PII / PCI'],['Export','41,208 rows at 03:27'],['Replicas','6']],
+    links:[['svc_deploy','2 shared events','exec + export actor'],['ci-runner','1 shared event','routine scale patch']] },
+  'bastion-1': { kind:'Host · Linux bastion', first:'03:02:55', x:250, y:490, size:26,
+    facts:[['OS','Ubuntu 24.04'],['Events','3'],['Root SSH','policy-blocked, succeeded'],['History','truncated 03:31'],['Auditd','enabled']],
+    links:[['root','2 shared events','session owner'],['10.22.4.19','1 shared event','SSH source']] },
+  'root': { kind:'OS account', first:'03:22:41', x:120, y:490, size:24,
+    facts:[['Hosts','bastion-1'],['Events','2'],['Key fingerprint','SHA256:8mQ2…kL1p'],['In key inventory','no'],['Last legit use','2026-06-02']],
+    links:[['bastion-1','2 shared events','logged in on'],['10.22.4.19','1 shared event','connection source']] },
+  'edge-lb-01': { kind:'Host · load balancer', first:'03:09:41', x:160, y:290, size:24,
+    facts:[['Role','public ingress'],['Events','215'],['WAF','monitor mode'],['Rate limit','not configured'],['Region','us-east-1']],
+    links:[['45.83.140.22','215 shared events','client of the burst'],['svc_deploy','1 shared event','authenticated session']] }
+};
+
+const EDGES = [
+  ['45.83.140.22','svc_deploy',2.4],['45.83.140.22','edge-lb-01',3],['45.83.140.22','10.22.4.19',2],
+  ['svc_deploy','WIN-FS01',1.6],['svc_deploy','payments-api',1.6],['svc_deploy','edge-lb-01',1],
+  ['10.22.4.19','WIN-FS01',1],['10.22.4.19','bastion-1',1],['bastion-1','root',1.6]
+];
+
+class Component extends DCLogic {
+  state = { screen:'ingest', query:'', selId:'e04', entity:'svc_deploy', filters:[], pinned:['e02','e04','e09','e10','e11'] };
+
+  go(s) { return () => this.setState({ screen:s }); }
+  open(id) { return () => this.setState({ screen:'detail', selId:id }); }
+  pick(name) { return () => this.setState({ screen:'graph', entity:name }); }
+
+  ev(id) { return EVENTS.find(e => e.id === id); }
+
+  row(e) {
+    return { ...e, color:SEV[e.sev], sev:e.sev.toUpperCase(), open:this.open(e.id),
+      rowBg: e.id === this.state.selId ? '#111611' : 'transparent' };
+  }
+
+  renderVals() {
+    const st = this.state;
+    const caseName = this.props.caseName ?? 'Suspected credential stuffing → data egress';
+    const analystName = this.props.analystName ?? 'D. Ferreira';
+    const screens = {
+      ingest:['Case & sources','7 files · 1.42M events normalized'],
+      search:['Search','normalized fields across every parser'],
+      timeline:['Unified timeline','4 correlated incidents in a 26-minute window'],
+      graph:['Entity graph','8 entities · 9 links from shared fields'],
+      detail:['Event detail','with the reasoning behind every correlation'],
+      report:['Findings','draft 3 · not yet submitted']
+    };
+    const navDef = [['ingest','Case & sources','7'],['search','Search','1.4M'],['timeline','Timeline','4'],['graph','Entity graph','8'],['detail','Event detail',''],['report','Findings','3']];
+
+    const q = st.query.trim().toLowerCase();
+    let rows = EVENTS.filter(e => {
+      if (st.filters.length && !st.filters.includes(e.source)) return false;
+      if (!q) return true;
+      return (e.msg + ' ' + e.user + ' ' + e.host + ' ' + e.source + ' ' + e.raw).toLowerCase().includes(q);
+    }).sort((a, b) => a.ts.localeCompare(b.ts));
+
+    const sel = this.ev(st.selId) || EVENTS[0];
+    const selTime = EVENTS.indexOf(sel);
+    const corr = EVENTS.filter(e => e.id !== sel.id).map(e => {
+      const shared = e.entities.filter(x => sel.entities.includes(x));
+      const near = Math.abs(EVENTS.indexOf(e) - selTime) <= 4;
+      if (!shared.length && !near) return null;
+      const reason = shared.length ? 'shares ' + shared[0] : 'within ±4 events of selection';
+      return { clock:e.clock, msg:e.msg, reason, color:SEV[e.sev], open:this.open(e.id) };
+    }).filter(Boolean).slice(0, 7);
+
+    const ent = ENTITIES[st.entity] || ENTITIES['svc_deploy'];
+    const pos = n => ENTITIES[n];
+    const pinned = st.pinned;
+    const isPinned = pinned.includes(sel.id);
+
+    return {
+      caseId:'CASE-2049', caseName, analystName, analystInitials: analystName.split(/[ .]/).filter(Boolean).map(s => s[0]).join('').slice(0,2).toUpperCase(),
+      screenTitle: screens[st.screen][0], screenSub: screens[st.screen][1],
+      pinnedCount: pinned.length, goReport: this.go('report'),
+      isIngest: st.screen === 'ingest', isSearch: st.screen === 'search', isTimeline: st.screen === 'timeline',
+      isGraph: st.screen === 'graph', isDetail: st.screen === 'detail', isReport: st.screen === 'report',
+
+      navItems: navDef.map(([k, label, tag]) => ({
+        label, tag, go:this.go(k),
+        bg: st.screen === k ? '#141914' : 'transparent',
+        fg: st.screen === k ? '#e6ece4' : '#8d968b',
+        bar: st.screen === k ? '#6ee787' : 'transparent'
+      })),
+
+      posture:[
+        { label:'Parse coverage', value:'99.2%', pct:'99%', color:'#6ee787' },
+        { label:'Unmapped fields', value:'14', pct:'22%', color:'#e3c96e' },
+        { label:'Clock skew corrected', value:'3 sources', pct:'43%', color:'#6ee787' },
+        { label:'Detections fired', value:'11', pct:'68%', color:'#ff6b5e' }
+      ],
+
+      sources:[
+        { file:'edge-lb-01_access.log', parser:'nginx combined', events:'884,102', range:'02:00 – 04:00', conf:'99%', pct:'99%', color:'#6ee787', state:'READY' },
+        { file:'WIN-FS01_Security.evtx', parser:'Windows EVTX', events:'126,884', range:'00:00 – 04:00', conf:'97%', pct:'97%', color:'#6ee787', state:'READY' },
+        { file:'cloudtrail_20260811.json', parser:'AWS CloudTrail', events:'41,209', range:'00:00 – 04:00', conf:'100%', pct:'100%', color:'#6ee787', state:'READY' },
+        { file:'k8s_audit_20260811.jsonl', parser:'k8s audit v1', events:'302,551', range:'00:00 – 04:00', conf:'96%', pct:'96%', color:'#6ee787', state:'READY' },
+        { file:'bastion-1_syslog', parser:'RFC 5424 syslog', events:'58,410', range:'00:00 – 04:00', conf:'94%', pct:'94%', color:'#6ee787', state:'READY' },
+        { file:'payments-api_app.jsonl', parser:'JSON lines (inferred)', events:'11,904', range:'02:30 – 04:00', conf:'88%', pct:'88%', color:'#e3c96e', state:'REVIEW' },
+        { file:'fw-edge-2.pipe.log', parser:'delimited (unknown)', events:'9,331', range:'00:00 – 04:00', conf:'82%', pct:'82%', color:'#ffa657', state:'MAP' }
+      ],
+
+      queue:[
+        { mark:'✓', color:'#6ee787', label:'Timestamps normalized to UTC', detail:'3 skews, max 41s' },
+        { mark:'✓', color:'#6ee787', label:'Entity extraction — IP, user, host, PID', detail:'8 entities' },
+        { mark:'◐', color:'#e3c96e', label:'Field mapping for fw-edge-2.pipe.log', detail:'awaiting review' },
+        { mark:'◐', color:'#e3c96e', label:'Sigma ruleset evaluation', detail:'611 of 740 rules' }
+      ],
+
+      query: st.query, onQuery: e => this.setState({ query: e.target.value }),
+      resultCount: rows.length, rows: rows.map(e => this.row(e)),
+      sourceChips: ['nginx.access','windows.evtx','aws.cloudtrail','k8s.audit','syslog','app.jsonl','firewall.edge'].map(s => {
+        const on = st.filters.includes(s);
+        return { label:s, bg: on ? '#132015' : '#0e110e', fg: on ? '#6ee787' : '#8d968b', border: on ? '#2c4130' : '#242a24',
+          toggle: () => this.setState(p => ({ filters: p.filters.includes(s) ? p.filters.filter(x => x !== s) : p.filters.concat(s) })) };
+      }),
+
+      clusterStats:[
+        { value:'26m', label:'intrusion window', color:'#e6ece4' },
+        { value:'4', label:'correlated incidents', color:'#ff6b5e' },
+        { value:'8', label:'entities involved', color:'#6ee787' },
+        { value:'2.14 GB', label:'egressed', color:'#ff6b5e' }
+      ],
+      clusters: CLUSTERS.map(c => ({ ...c, events: c.ids.map(id => this.row(this.ev(id))) })),
+
+      nodes: Object.keys(ENTITIES).map(name => {
+        const n = ENTITIES[name], on = name === st.entity;
+        return { name, kind:n.kind.split(' · ')[0], left:(n.x / 900 * 100) + '%', top:(n.y / 560 * 100) + '%', size:n.size + 'px',
+          fill: on ? '#6ee787' : '#1c2a1e', ring: on ? '#bdf7cb' : '#38513d',
+          label: on ? '#6ee787' : '#9fa89d', select:this.pick(name) };
+      }),
+      edges: EDGES.map(([a, b, w]) => ({ x1:pos(a).x, y1:pos(a).y, x2:pos(b).x, y2:pos(b).y, w,
+        stroke: (a === st.entity || b === st.entity) ? '#6ee787' : '#242c25' })),
+      selEntity: { name:st.entity, kind:ent.kind, first:ent.first,
+        facts: ent.facts.map(([k, v]) => ({ k, v })),
+        links: ent.links.map(([name, n, via]) => ({ name, n, via, select:this.pick(name) })) },
+
+      sel: { title: sel.msg, ts: sel.ts, source: sel.source, file: sel.file, raw: sel.raw, color: SEV[sel.sev],
+        baseline: sel.baseline,
+        fields: sel.fields.map(([k, v]) => ({ k, v })),
+        entities: sel.entities.map(name => ({ name, select:this.pick(name) })),
+        detections: sel.detections.map(([name, id, level]) => ({ name, id, level: level.toUpperCase(), color: SEV[level] })),
+        correlations: corr },
+      pinLabel: isPinned ? '✓ Pinned to case' : 'Pin to case',
+      pinBg: isPinned ? '#132015' : 'transparent',
+      pinFg: isPinned ? '#6ee787' : '#a6afa4',
+      pinBorder: isPinned ? '#2c4130' : '#2b332b',
+      togglePin: () => this.setState(p => ({ pinned: p.pinned.includes(sel.id) ? p.pinned.filter(x => x !== sel.id) : p.pinned.concat(sel.id) })),
+
+      summary:'Between 03:09 and 03:35 UTC on 11 August 2026, an external host in AS200557 ran a credential stuffing attack against the public login endpoint, succeeded against the svc_deploy service account, and used it to create a long-lived AWS access key without MFA. The same principal then moved laterally to WIN-FS01 and the production Kubernetes cluster, exported 41,208 customer records, and transferred 2.14 GB to the originating IP. Anti-forensic activity followed: shell history was truncated on bastion-1 and a CloudTrail deletion was attempted and denied. Containment actions are outstanding.',
+      findings: [
+        { level:'CRITICAL', color:'#ff6b5e', chipBg:'#2a1512', title:'svc_deploy is compromised and holds an attacker-controlled key', evidence:'4 pinned events',
+          body:'Access key AKIA…7QMX was created at 03:16:02 from 45.83.140.22 and remains Active. Revoke it, rotate the account, and enforce MFA before any other remediation.' },
+        { level:'CRITICAL', color:'#ff6b5e', chipBg:'#2a1512', title:'41,208 customer records left the environment', evidence:'2 pinned events',
+          body:'Export volume is 36× the largest legitimate export in 90 days, and the 2.14 GB outbound flow to the intrusion IP began two minutes after it completed. Treat as a confirmed breach for notification purposes.' },
+        { level:'HIGH', color:'#ffa657', chipBg:'#2a2012', title:'The public login endpoint has no rate limiting', evidence:'214 events',
+          body:'edge-lb-01 accepted 214 login attempts in 90 seconds with the WAF in monitor mode. This is the root cause of initial access.' }
+      ],
+      pinnedRows: pinned.map(id => this.ev(id)).filter(Boolean).map(e => ({ ts:e.ts, source:e.source, msg:e.msg })),
+      iocs: ['45.83.140.22','AS200557','AKIA4YV2XN31LR8Q7QMX','python-requests/2.31.0','SHA256:8mQ2…kL1p','/tmp/x.tar.gz','10.22.4.19:8443'].map(v => ({ v }))
+    };
+  }
+}
+
+</script>
+</body>
+</html>

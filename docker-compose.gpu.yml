@@ -1,0 +1,25 @@
+# Overlay applied automatically by setup.sh / setup.ps1 when an NVIDIA GPU + container toolkit is present:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+#
+# The defaults below target CUDA 12/13 hosts (a 12.4 runtime runs under both — drivers are backward compatible).
+# setup.sh / setup.ps1 read the host driver's CUDA version and export IRIS_GPU_BASE_IMAGE / IRIS_GPU_REQUIREMENTS
+# to switch a CUDA 11-only host onto the 11.8 runtime + cupy-cuda11x wheels.
+services:
+  iris:
+    build:
+      args:
+        BASE_IMAGE: ${IRIS_GPU_BASE_IMAGE:-nvidia/cuda:12.4.1-runtime-ubuntu22.04}
+        WITH_GPU: "1"
+        GPU_REQUIREMENTS: ${IRIS_GPU_REQUIREMENTS:-requirements-gpu.txt}
+        GPU_TORCH_INDEX: ${IRIS_GPU_TORCH_INDEX:-https://download.pytorch.org/whl/cu124}
+    image: iris:cuda
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

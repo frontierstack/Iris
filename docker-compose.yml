@@ -1,0 +1,46 @@
+# CPU build (default). For NVIDIA GPUs run ./setup.sh or ./setup.ps1 — they detect the GPU
+# and add docker-compose.gpu.yml automatically.
+services:
+  iris:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: python:3.12-slim
+        # Changes on every build so the SPA is never served from a cached layer — see the
+        # Dockerfile. A stale frontend is indistinguishable from a broken fix.
+        WEB_REBUILD: ${WEB_REBUILD:-now}
+        WITH_GPU: "0"
+    image: iris:cpu
+    container_name: iris
+    ports:
+      # Published to the HOST ONLY. `"8000:8000"` binds 0.0.0.0 on the host, so the whole evidence pool
+      # and every destructive endpoint were reachable from any machine on the network — Iris has no
+      # authentication. Set IRIS_BIND_HOST=0.0.0.0 to expose it deliberately, and set IRIS_AUTH_TOKEN
+      # at the same time (see HOWTO → Security).
+      #
+      # NOTE, so this is not recorded as a fix for something it does not fix: this does NOT mitigate a
+      # malicious web page. A browser on this machine reaches http://localhost:8000 whatever the bind
+      # address is. That attack is closed by the CORS allowlist and the cross-site guard in
+      # backend/app/security.py, not by this line.
+      - "${IRIS_BIND_HOST:-127.0.0.1}:8000:8000"
+    volumes:
+      # Bind-mounted to the repo's data dir so the container and a local `uvicorn` run share one case
+      # store — settings.json, cases/<id>/case.json and the uploaded files are the same files either way.
+      # Set IRIS_DATA_HOST_DIR to keep the data somewhere else (or to a named volume path).
+      - ${IRIS_DATA_HOST_DIR:-./backend/data}:/data
+    environment:
+      IRIS_COMPUTE_MODE: ${IRIS_COMPUTE_MODE:-}
+      IRIS_AI_PROVIDER: ${IRIS_AI_PROVIDER:-}
+      IRIS_AI_MODEL: ${IRIS_AI_MODEL:-}
+      IRIS_AI_BASE_URL: ${IRIS_AI_BASE_URL:-}
+      IRIS_AI_API_KEY: ${IRIS_AI_API_KEY:-}
+      IRIS_POOL_MAX_MB: ${IRIS_POOL_MAX_MB:-}
+      IRIS_MCP_ENABLED: ${IRIS_MCP_ENABLED:-}
+      IRIS_MCP_ALLOW_WRITES: ${IRIS_MCP_ALLOW_WRITES:-}
+      IRIS_MCP_TOKEN: ${IRIS_MCP_TOKEN:-}
+      # Optional shared secret for the whole API. Unset = no gate, which is safe only while the port is
+      # published to loopback (the default above). See HOWTO → Security.
+      IRIS_AUTH_TOKEN: ${IRIS_AUTH_TOKEN:-}
+      IRIS_CORS_ORIGINS: ${IRIS_CORS_ORIGINS:-}
+      IRIS_ALLOWED_HOSTS: ${IRIS_ALLOWED_HOSTS:-}
+    restart: unless-stopped

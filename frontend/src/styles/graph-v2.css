@@ -1,0 +1,516 @@
+/* ═══════ ENTITY GRAPH v2 — query bar, typed filters, typed edges, AI review, path finder ═══════
+   The canvas/side-panel skeleton (.graph, .graph__canvas, .graph__side, .node, .edge …) is still in
+   screens.css. This file adds the v2 chrome on top and restyles edges/nodes for typed data. */
+
+/* the page now stacks: query bar / filters / (canvas + side) */
+.page.graph {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.graph__body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 14px;
+  min-height: 0;
+  flex: 1;
+}
+@media (max-width: 1100px) {
+  .graph__body { grid-template-columns: 1fr; }
+}
+
+/* ── query bar ── */
+.graph__querybar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.graph__q {
+  flex: 1;
+  min-width: 260px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  border-radius: var(--radius-md);
+  color: var(--muted-2);
+  transition: border-color var(--t-fast), background var(--t-fast), box-shadow var(--t-fast);
+}
+.graph__q:hover { border-color: var(--border-hover); }
+.graph__q:focus-within {
+  border-color: var(--accent-border);
+  background: var(--panel-2);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+.graph__q input {
+  flex: 1;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  outline: none;
+  color: var(--text-bright);
+  font-family: var(--font-mono);
+  font-size: var(--fs-base);
+  padding: 0;
+  height: 100%;
+}
+.graph__q input:focus-visible { box-shadow: none; outline: none; }
+.graph__q-clear {
+  background: transparent;
+  color: var(--muted-3);
+  cursor: pointer;
+  font-size: var(--fs-lg);
+  line-height: 1;
+}
+.graph__q-clear:hover { color: var(--text-bright); }
+/* The node/link count is the graph's "how much am I looking at" — a chip, so it reads as state rather
+   than as a stray sentence in the toolbar. */
+.graph__count {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--panel-inset);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* ── filter row ── */
+.graph__filters {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+}
+.graph__filters-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--border);
+  margin: 0 6px;
+}
+.chip--type .chip__swatch {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--type-hue);
+  margin-right: 5px;
+  vertical-align: 0;
+}
+.chip--type.on {
+  border-color: color-mix(in srgb, var(--type-hue) 55%, transparent);
+  background: color-mix(in srgb, var(--type-hue) 12%, transparent);
+}
+.graph__num {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xxs);
+  color: var(--muted-3);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.graph__num input {
+  width: 58px;
+  padding: 2px 6px;
+  font-size: var(--fs-xs);
+  font-family: var(--font-mono);
+}
+.graph__hint {
+  font-size: var(--fs-xxs);
+  color: var(--muted-3);
+  font-family: var(--font-mono);
+  margin-left: -2px;
+}
+.graph__focus {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  padding: 2px 8px;
+  border: 1px solid var(--accent-border);
+  background: var(--accent-bg);
+  border-radius: var(--radius-pill);
+}
+.graph__focus b { color: var(--text-bright); font-family: var(--font-mono); font-weight: 500; }
+
+/* ── the canvas the graph is painted into ──
+   Replaces the old .graph__svg. One element, sized in CSS pixels with the backing store scaled by
+   devicePixelRatio in graphPaint.ts. Pointer events belong to the CONTAINER (.graph__canvas), which owns
+   pan/zoom/drag and does its own hit testing, so the canvas itself never takes a hit. */
+.graph__gl {
+  position: absolute;
+  inset: 0;
+  display: block;
+  pointer-events: none;
+}
+
+/* Off-screen but focusable list of the drawn nodes: a <canvas> is opaque to assistive tech and to Tab,
+   so the entities it shows are also real buttons here. Not `display:none` — that would remove them. */
+.graph__a11y {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+  list-style: none;
+}
+.graph__a11y button:focus-visible {
+  position: fixed;
+  left: 12px;
+  top: 12px;
+  width: auto;
+  height: auto;
+  clip-path: none;
+  z-index: 5;
+  background: var(--panel);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-bright);
+}
+
+/* ── typed edges ── */
+.edge { stroke: var(--edge); transition: opacity var(--t-fast); }
+.edge--on { stroke: var(--accent); }
+.edge--bad { stroke: var(--sev-high); }
+.edge--bad.edge--on { stroke: var(--sev-critical); }
+.edge--ai { stroke-dasharray: 5 4; stroke: var(--accent); }
+.edge--path { stroke: var(--accent); stroke-dasharray: none; filter: url(#g-glow-soft); }
+.edge--dim { opacity: 0.12 !important; }
+/* the arrowhead inherits the path stroke via context-stroke; Firefox < 120 falls back to accent */
+#g-arrow path { fill: var(--edge); }
+
+/* ── nodes: focus / path / in-case ── */
+.node--path .node__disc { stroke-width: 2.4; }
+.node--incase .node__label { fill: var(--text-bright); }
+.node__glyph { font-family: var(--font-mono); font-weight: 600; letter-spacing: -0.02em; pointer-events: none; }
+.node__kind { font-family: var(--font-mono); font-size: 8.5px; fill: var(--muted-2); pointer-events: none; }
+
+/* ── tooltip / legend additions ── */
+.graph__tip-type {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xxs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-right: 6px;
+}
+.graph__tip-hint {
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px solid var(--border-2);
+  font-size: var(--fs-xxs);
+  color: var(--muted-3);
+}
+.graph__legend-line--bad { background: var(--sev-high); }
+.graph__legend-line--ai { background: repeating-linear-gradient(90deg, var(--accent) 0 4px, transparent 4px 7px); }
+.graph__legend-dot--sev { background: conic-gradient(var(--sev-critical), var(--sev-high), var(--sev-medium), var(--sev-critical)); }
+
+/* ── side panel: entity ── */
+.graph__ent-glyph {
+  border: 1px solid;
+  border-radius: var(--radius-sm);
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  flex: 0 0 auto;
+}
+.graph__ent-det {
+  margin-top: 8px;
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px solid;
+  border-radius: var(--radius-pill);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xxs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.graph__ent-actions {
+  margin-top: 12px;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* ── path finder ── */
+.graph__path {
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--accent-border);
+  background: var(--accent-bg);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+}
+.graph__path-chain { line-height: 1.9; }
+.graph__path-node {
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 1px 6px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-bright);
+  cursor: pointer;
+}
+.graph__path-node:hover { border-color: var(--accent); }
+.graph__path-rel { font-family: var(--font-mono); font-size: var(--fs-xxs); color: var(--accent); }
+
+/* ── relations list ── */
+.link-item__rel {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xxs);
+  color: var(--accent);
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.link-item--proposed {
+  border: 1px dashed var(--accent-border);
+  background: var(--accent-bg);
+}
+.link-item--ai .link-item__name::after {
+  content: ' ◇';
+  color: var(--accent);
+  font-size: 0.8em;
+}
+.link-item__actions { display: flex; gap: 6px; margin-top: 6px; }
+.link-item__remove {
+  margin-left: 8px;
+  color: var(--muted-3);
+  text-decoration: underline dotted;
+  cursor: pointer;
+}
+.link-item__remove:hover { color: var(--bad); }
+button.link-item__name {
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+}
+button.link-item__name:hover { color: var(--accent); }
+
+/* ── AI review panel ── */
+.graph__ai { border-color: var(--accent-border); }
+.graph__ai-think {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--muted-2);
+  padding: 4px 0;
+}
+.graph__ai-narr {
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  margin-top: 6px;
+  max-height: 260px;
+  overflow: auto;
+}
+.graph__ai-hint { font-size: var(--fs-xs); color: var(--muted-3); margin: 2px 0 6px; }
+.graph__ai-err {
+  padding: 8px 10px;
+  border: 1px solid var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--bad);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm);
+}
+
+/* ── recent events for the selected node ── */
+.graph__tl { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+.graph__tl-row {
+  display: grid;
+  grid-template-columns: 62px 1fr;
+  gap: 8px;
+  align-items: start;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+  padding: 3px 4px;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+}
+.graph__tl-row:hover { background: var(--hover); }
+.graph__tl-msg {
+  color: var(--text-3);
+  border-left: 2px solid;
+  padding-left: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── side panel: each block reads as a card ───────────────────────────────────
+   Selected entity / relations / recent events / AI review were four stacked lists separated only by a
+   gap, so on a busy graph the panel read as one column of text. Panels, with their own padding. */
+.graph__side > .panel,
+.graph__side > .graph__panel {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+}
+.graph__side .eyebrow { color: var(--muted-2); }
+.graph__side .link-list { display: flex; flex-direction: column; gap: 4px; }
+.graph__side .link-item {
+  padding: 7px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  transition: background var(--t-fast), border-color var(--t-fast);
+}
+.graph__side .link-item:hover {
+  background: var(--panel-inset);
+  border-color: var(--border);
+}
+.graph__side .kv-list { gap: 6px; }
+
+/* the number inputs in the filter row: same height and rhythm as the chips beside them */
+.graph__num {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.graph__num input {
+  width: 68px;
+  height: 26px;
+  padding: 0 6px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  text-align: right;
+}
+.graph__focus {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-pill);
+  background: var(--accent-bg);
+  font-size: var(--fs-xs);
+  color: var(--text-2);
+}
+
+/* ── source selector ──────────────────────────────────────────────────────────
+   The graph is drawn from the log files you pick, and nothing is picked by default: every source at
+   once is a hairball, and the analyst's first question about an entity is which log it came from. */
+.graph__srcpick { position: relative; }
+.graph__srcmenu {
+  position: absolute;
+  z-index: 41;
+  top: calc(100% + 6px);
+  left: 0;
+  width: 380px;
+  max-height: 420px;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+.graph__srcmenu-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.graph__srcmenu-acts { display: flex; gap: 4px; }
+.graph__srclist { overflow-y: auto; padding: 4px; }
+.graph__srcrow {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-base);
+  cursor: pointer;
+  min-width: 0;
+}
+.graph__srcrow:hover { background: var(--panel-inset); }
+.graph__srcrow.on { color: var(--text-bright); }
+
+/* nothing picked yet: an empty canvas would read as "no entities found", which is a lie about the pool */
+.graph__pick {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  max-width: 720px;
+  margin: 40px auto;
+  padding: 22px 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  color: var(--muted);
+}
+.graph__pick svg { flex: none; width: 22px; height: 22px; color: var(--accent); margin-top: 2px; }
+.graph__pick-title { font-size: var(--fs-2xl); font-weight: 600; color: var(--text-bright); }
+.graph__pick-body { margin-top: 6px; line-height: 1.6; font-size: var(--fs-base); }
+.graph__pick-acts { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* the case-set entry sits above the file list: it is a different KIND of selection (a scope, not a file) */
+.graph__srccase {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-inset);
+}
+.graph__srccase .graph__srcrow { flex: 1; border: 1px solid transparent; background: none; text-align: left; }
+.graph__srccase .graph__srcrow.on { border-color: var(--accent-border); background: var(--accent-bg); color: var(--accent); }
+.graph__srccase .graph__srcrow:disabled { opacity: 0.5; cursor: default; }
+
+/* "entities but no relations" — a real answer that an empty canvas cannot give */
+.graph__note {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  max-width: 640px;
+  padding: 10px 14px;
+  border: 1px solid var(--warn-border, var(--border-strong));
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  font-size: var(--fs-base);
+  color: var(--muted);
+  z-index: 5;
+}
+.graph__note svg { flex: none; color: var(--warn); margin-top: 2px; }
+.graph__note b { color: var(--text-bright); }

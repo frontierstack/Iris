@@ -1,0 +1,175 @@
+/* ═══════ Rich case notes — markdown rendering, composer toolbar, image attachments ═══════ */
+
+/* ── rendered markdown ── */
+.md { font-size: var(--fs-base); color: var(--text-2); line-height: 1.6; overflow-wrap: anywhere; }
+.note__text.md { white-space: normal; }
+.md > *:first-child { margin-top: 0; }
+.md > *:last-child { margin-bottom: 0; }
+.md-p { margin: 0 0 9px; white-space: pre-wrap; }
+/* A note is a POST, not a document: headings mark sections, they do not open chapters. The step
+   between them is deliberately small — a report pasted into a note should not shout its own outline. */
+.md-h1, .md-h2, .md-h3 { color: var(--text-bright); font-weight: 600; margin: 14px 0 5px; line-height: 1.35; }
+.md-h1 { font-size: var(--fs-xl); }
+.md-h2 { font-size: var(--fs-lg); }
+.md-h3 { font-size: var(--fs-base); letter-spacing: 0.02em; }
+.md ul, .md ol { margin: 0 0 9px; padding-left: 18px; }
+.md li { margin: 2px 0; }
+.md li > ul, .md li > ol { margin: 1px 0 2px; }
+.md a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-border); }
+.md a:hover { color: var(--accent-hover); }
+.md-code {
+  font-family: var(--font-mono); font-size: var(--fs-sm);
+  padding: 1px 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--panel-inset);
+  color: var(--text-bright);
+}
+.md-pre {
+  margin: 0 0 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-inset);
+  overflow-x: auto;
+}
+.md-pre code { font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--text); white-space: pre; }
+.md-quote {
+  margin: 0 0 6px;
+  padding: 2px 0 2px 10px;
+  border-left: 2px solid var(--accent-border);
+  color: var(--text-3);
+}
+.md-hr { border: 0; border-top: 1px solid var(--border); margin: 10px 0; }
+.md-img {
+  display: block;
+  max-width: 100%;
+  /* a full-screen screenshot must not push the rest of the note off the page */
+  max-height: 420px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  margin: 6px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-inset);
+}
+.md-tablewrap { overflow-x: auto; margin: 0 0 6px; }
+.md-table { border-collapse: collapse; font-size: var(--fs-sm); min-width: 240px; }
+.md-table th, .md-table td {
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+.md-table th { color: var(--text-bright); font-weight: 600; background: var(--panel-2); }
+
+/* ── editor ── */
+.md-editor { position: relative; display: flex; flex-direction: column; gap: 4px; }
+.md-editor--drop { outline: 1px dashed var(--accent-border); outline-offset: 3px; border-radius: var(--radius-sm); }
+.md-toolbar { display: flex; align-items: center; gap: 2px; }
+.md-toolbar__sep { width: 1px; height: 14px; background: var(--border); margin: 0 4px; }
+.md-toolbar__spacer { flex: 1; }
+.md-tool {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 22px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--muted-2);
+  cursor: pointer;
+}
+.md-tool:hover { color: var(--text-bright); background: var(--hover); border-color: var(--border); }
+.md-tool__glyph { font-size: var(--fs-md); line-height: 1; }
+.md-tool__glyph--bold { font-weight: 700; }
+.md-tool__glyph--italic { font-style: italic; font-family: var(--font-mono); }
+.md-tool__glyph--code { font-family: var(--font-mono); }
+.md-modes { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius-xs); overflow: hidden; }
+.md-mode {
+  padding: 2px 8px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-size: var(--fs-xs);
+  color: var(--muted-2);
+}
+.md-mode:hover { color: var(--text-bright); }
+.md-mode.is-on { background: var(--selected); color: var(--text-bright); }
+.md-input { width: 100%; }
+.md-preview {
+  min-height: 48px;
+  padding: 6px 2px;
+  border-top: 1px solid var(--border-2);
+}
+.md-preview__empty { color: var(--muted-3); font-size: var(--fs-sm); margin: 0; }
+/* Attached-image strip under the textarea: Write mode shows the markdown token, so without this the
+   analyst has just pasted a screenshot and can see nothing but text. */
+.md-shots { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 2px; }
+.md-shot { margin: 0; width: 96px; }
+.md-shot img {
+  display: block;
+  width: 96px; height: 64px;
+  object-fit: cover;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--panel-inset);
+}
+.md-shot figcaption { font-size: var(--fs-xs); color: var(--muted-2); max-width: 96px; }
+.md-editor__busy {
+  display: flex; align-items: center; gap: 6px;
+  font-size: var(--fs-xs); color: var(--muted-2);
+}
+.md-editor__hint {
+  position: absolute; inset: auto 0 0 0;
+  padding: 3px 6px;
+  text-align: center;
+  font-size: var(--fs-xs);
+  color: var(--accent);
+  background: var(--accent-bg);
+  border-radius: var(--radius-xs);
+  pointer-events: none;
+}
+.note__edit .md-editor {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  padding: 6px 8px;
+}
+.note-dialog .md-editor {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--panel-inset);
+  padding: 6px 8px;
+}
+.note-dialog .md-input, .note__edit .md-input {
+  width: 100%; border: 0; background: transparent; box-shadow: none;
+  resize: vertical; font-size: var(--fs-base); line-height: 1.55;
+}
+
+/* ── Focus treatment for the note editor ───────────────────────────────────────
+   The container already signals focus, so the inner textarea must not ALSO draw the
+   global accent ring (outline + glow) — two nested rings around one control read as a
+   bright border box the moment you click into the post box. */
+.composer__input,
+.md-editor textarea,
+.note__edit textarea {
+  outline: none;
+  box-shadow: none;
+  border-color: transparent;
+}
+.composer__input:focus,
+.composer__input:focus-visible,
+.md-editor textarea:focus,
+.md-editor textarea:focus-visible,
+.note__edit textarea:focus,
+.note__edit textarea:focus-visible {
+  outline: none;
+  box-shadow: none;
+  border-color: transparent;
+}
+/* the surrounding box carries the focus state instead — a quiet border, no glow */
+.composer:focus-within,
+.note__edit .md-editor:focus-within {
+  border-color: var(--border-hover);
+  box-shadow: none;
+}

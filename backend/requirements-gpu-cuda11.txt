@@ -1,0 +1,7 @@
+# GPU acceleration for hosts whose NVIDIA driver only supports CUDA 11.x.
+# Selected automatically by setup.sh / setup.ps1 (they set IRIS_GPU_REQUIREMENTS + IRIS_GPU_BASE_IMAGE
+# + IRIS_GPU_TORCH_INDEX); pairs with a nvidia/cuda:11.8.0-runtime base image and the cu118 torch index.
+# torch is installed separately by the Dockerfile — see the note in requirements-gpu.txt.
+
+cupy-cuda11x>=13.0        # no [ctk] extra on the 11.x line; the 11.8 runtime image ships the headers
+nvidia-ml-py>=12.560
