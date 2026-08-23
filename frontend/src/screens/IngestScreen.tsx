@@ -29,21 +29,31 @@ function confColor(c: number): string {
    and pushed back with PATCH /api/jobs/{id} so other tabs can render it too. */
 const JOB_POLL_ACTIVE = 1000;
 const JOB_POLL_IDLE = 20_000;
-const JOB_RECENT_MS = 5 * 60_000;   // a finished job stays on screen this long — a refresh right after it lands still shows the result
+// A job that SUCCEEDED clears itself: the file is parsed and it is in the Sources table below with its
+// parser, state and event count, so the transfer row has nothing left to say. This mirrors the
+// server's own jobs.READY_RETAIN_SEC (20 s) — the row must not linger here after the server has
+// dropped it, or a refresh would make finished transfers reappear and then vanish.
+const JOB_DONE_MS = 20_000;
+// A FAILURE is the one thing on this panel restated nowhere else in a form the analyst can act on,
+// so it stays until it is dismissed. Never auto-clear an error: that is silent loss of the report
+// that evidence did not make it into the pool.
+const JOB_FAILED_MS = 30 * 60_000;
 const JOB_ROWS = 8;
 const PROGRESS_PUSH_MS = 900;       // throttle for the bytes-received PATCH
 
 /* ───────────── Parser groups ───────────── */
-type GroupId = 'logs' | 'documents' | 'images' | 'binary' | 'archives';
+type GroupId = 'logs' | 'documents' | 'images' | 'network' | 'binary' | 'archives';
 const GROUPS: { id: GroupId; label: string }[] = [
   { id: 'logs', label: 'Logs' },
   { id: 'documents', label: 'Documents' },
   { id: 'images', label: 'Images (OCR)' },
+  { id: 'network', label: 'Network captures' },
   { id: 'binary', label: 'Binary & memory dumps' },
   { id: 'archives', label: 'Archives' },
 ];
 function groupOf(p: ParserInfo): GroupId {
   const t = `${p.family} ${p.name}`.toLowerCase();
+  if (/pcap|capture|packet/.test(t)) return 'network';
   if (/ocr|image|tesseract/.test(t)) return 'images';
   if (/archive|zip|gzip|\bgz\b|tar/.test(t)) return 'archives';
   if (/binary|dump|memory|strings|\bmem\b|raw/.test(t)) return 'binary';
@@ -678,20 +688,37 @@ export function IngestScreen() {
 
   // What the progress list shows: everything still moving, every failure, and results from the last few
   // minutes. Server-side retention (30 min) is the outer bound; this is just what is still interesting.
+  // The list ages rows out by wall clock, so it has to be re-evaluated on a clock and not only when the
+  // query returns: the idle poll is 20 s, and a finished transfer that hangs around for another 20 s
+  // after the server has already dropped it is exactly the stale row this change exists to remove.
+  const [tick, setTick] = useState(0);
   const jobRows = useMemo(() => {
     const now = Date.now();
     const caseId = c.data?.id;
     return (jobsQ.data?.jobs ?? [])
       // library jobs belong to no case; case jobs only show on the case they were started in
       .filter((j) => j.target === 'library' || !j.caseId || j.caseId === caseId)
-      .filter((j) => (j.state === 'ready' ? now - Date.parse(j.updatedAt) < JOB_RECENT_MS : true))
+      .filter((j) => {
+        if (j.state === 'ready') return now - Date.parse(j.updatedAt) < JOB_DONE_MS;
+        if (j.state === 'error') return now - Date.parse(j.updatedAt) < JOB_FAILED_MS;
+        return true;
+      })
       .slice(0, JOB_ROWS);
-  }, [jobsQ.data, c.data?.id]);
+  }, [jobsQ.data, c.data?.id, tick]);
+  // Only while something is actually counting down — a panel showing nothing but failures has no
+  // deadline and must not hold a timer open for the half hour they stay.
+  const hasDoneRows = jobRows.some((j) => j.state === 'ready');
+  useEffect(() => {
+    if (!hasDoneRows) return;
+    const t = window.setInterval(() => setTick((n) => n + 1), 2500);
+    return () => window.clearInterval(t);
+  }, [hasDoneRows]);
   const pendingDrops = useMemo(() => {
     const known = new Set(jobRows.map((j) => j.file));
     return dropped.filter((d) => !known.has(d.name));
   }, [dropped, jobRows]);
-  const finishedJobs = jobRows.filter((j) => j.state === 'ready' || j.state === 'error').length;
+  const failedJobs = jobRows.filter((j) => j.state === 'error').length;
+  const finishedJobs = jobRows.filter((j) => j.state === 'ready').length + failedJobs;
   const activeJobs = jobRows.length - finishedJobs;
   const clearJobs = useMutation({ mutationFn: api.clearJobs, onSuccess: refreshJobs });
   const lib = useLibrary();
@@ -853,7 +880,7 @@ export function IngestScreen() {
               )}
               {finishedJobs > 0 && (
                 <button className="btn btn--sm btn--ghost" style={{ marginLeft: 'auto' }} disabled={clearJobs.isPending} onClick={() => clearJobs.mutate()}>
-                  Clear finished
+                  {failedJobs === finishedJobs ? `Dismiss ${failedJobs === 1 ? 'failure' : 'failures'}` : 'Clear finished'}
                 </button>
               )}
             </div>

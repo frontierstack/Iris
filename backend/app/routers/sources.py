@@ -310,7 +310,7 @@ _RAW_LINE_MAX = 2000          # chars kept per line in the viewer (the full line
 _RAW_LIMIT_MAX = 2000         # lines per page
 # Formats that are never line-addressable, even when the first 8 KB happens to be NUL-free.
 _BINARY_EXT = {".evtx", ".dmp", ".bin", ".sqlite", ".sqlite3", ".db", ".mem", ".vmem", ".raw", ".img", ".pcap",
-               ".pcapng", ".zip", ".gz", ".7z", ".rar", ".pdf", ".xlsx", ".xls", ".docx", ".doc", ".png", ".jpg",
+               ".pcapng", ".cap", ".zip", ".gz", ".7z", ".rar", ".pdf", ".xlsx", ".xls", ".docx", ".doc", ".png", ".jpg",
                ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".exe", ".dll", ".sys",
                ".tar", ".tgz", ".bz2", ".xz", ".zst", ".db3", ".sqlitedb", ".msg"}
 _BINARY_HINT = ("This file is not line-addressable (binary or structured container). Iris parsed it into events — "

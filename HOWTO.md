@@ -357,13 +357,18 @@ Drop files on the drop zone or click **Choose files**. Everything lands in the w
 once; filing a log into a case is a separate step on the row afterwards.
 
 Supported: text logs (nginx/syslog/plaintext), `.evtx` and EVTX XML, JSON/JSONL/CloudTrail/k8s audit, CSV/TSV/
-pipe-delimited, SQLite databases, `.eml`/`.mbox`/`.msg`, PDF, XLSX/XLS, DOCX, images via OCR, memory/binary dumps
+pipe-delimited, SQLite databases, packet captures (`.pcap`/`.pcapng`/`.cap`), `.eml`/`.mbox`/`.msg`, PDF, XLSX/XLS, DOCX, images via OCR, memory/binary dumps
 (strings + IOC extraction), and `zip`/`tar`/`gz`/`bz2`/`xz`/`7z` archives (nested to depth 3). Unknown layouts land
 in state **MAP** — click the row to edit the field mapping or press **Suggest with AI**.
 
 * Filter by name/parser and by state; per-source size and a combined total.
 * **Live parse progress**, and a warning naming any file that is **not** in the pool — a file absent from search is
   indistinguishable from a search that found nothing.
+* Transfers **clear themselves**. Once a file is ingested *and* parsed, its transfer row ages out on its own (about
+  20 seconds) — the file is in the Sources table right below it with its parser, state and event count, so the row
+  has nothing left to say. A **failed** transfer stays for 30 minutes and has to be dismissed: it is the one thing
+  on that panel restated nowhere else, and clearing it automatically would silently drop the report that evidence
+  never made it into the pool.
 * Click a row to open the **raw log viewer** (numbered pages, server-side line filter). Structured and binary
   sources show their parsed records instead of bytes. **Detach** turns it into a floating window you can drag and
   resize anywhere; the choice is remembered.
@@ -380,7 +385,7 @@ is paid whether the file yields useful fields or none. Each row carries an **enr
 | `raw` | in the pool and searchable as text — **no timestamps, no severities, no fields, no entities, no detections**. This source is invisible to the timeline, the entity graph and the anomaly list. |
 | `queued` | waiting for the worker. |
 | `enriching` | being parsed right now. |
-| `enriched` | done. Also the starting state of anything with no raw form (EVTX, SQLite, PDF, XLSX, OCR, mail) — those parse fully on upload. |
+| `enriched` | done. Also the starting state of anything with no raw form (EVTX, SQLite, PDF, XLSX, OCR, mail, packet captures) — those parse fully on upload. |
 | `skipped` | you declined phase 2. It stays raw on purpose and raises no warning. |
 | `error` | phase 2 failed; the message is on the row. The raw lines are still in the pool — nothing was lost — and **Enrich now** retries it. |
 

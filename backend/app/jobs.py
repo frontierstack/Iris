@@ -37,7 +37,15 @@ UTC = timezone.utc
 ACTIVE_STATES = ("queued", "uploading", "parsing")
 TERMINAL_STATES = ("ready", "error")
 
-RETAIN_SEC = 30 * 60      # a finished job stays visible this long, so a refresh right after it lands still shows it
+RETAIN_SEC = 30 * 60      # a FAILED job stays visible this long, so a refresh right after it lands still shows it
+# A job that SUCCEEDED clears itself. "Clear finished" was a button the analyst had to press after every
+# ingest to tidy up rows that had nothing left to say: the file is parsed, it is in the Sources table
+# below with its parser, its state and its event count, and the transfer row is a duplicate of that.
+# Long enough to see the row land and settle (a poll is 2 s), short enough that the panel empties itself.
+# A FAILURE is the opposite and keeps the full RETAIN_SEC: it is the ONE thing on that panel that is not
+# restated anywhere else in a form the analyst can act on, and auto-clearing it would silently discard
+# the report of evidence that never made it into the pool.
+READY_RETAIN_SEC = 20
 MAX_JOBS = 200            # hard cap, oldest first — jobs.json must not grow without bound
 STALE_UPLOAD_SEC = 600    # an upload nobody has advanced for this long is dead (tab closed mid-transfer)
 
@@ -431,7 +439,8 @@ class JobRegistry:
         now = time.time()
         keep: dict[str, Job] = {}
         for jid, j in self._jobs.items():
-            if j.state in TERMINAL_STATES and now - j.updated_ts > RETAIN_SEC:
+            keep_for = READY_RETAIN_SEC if j.state == "ready" else RETAIN_SEC
+            if j.state in TERMINAL_STATES and now - j.updated_ts > keep_for:
                 continue
             keep[jid] = j
         if len(keep) > MAX_JOBS:

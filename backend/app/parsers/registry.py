@@ -16,6 +16,7 @@ from .jsonl import JsonlParser
 from .k8s_audit import K8sAuditParser
 from .memdump import MemdumpParser, is_binary
 from .nginx import NginxParser
+from .pcap import EXTENSIONS as PCAP_EXTENSIONS, MAGICS as PCAP_MAGICS, PcapParser
 from .pdf import PdfParser
 from .plaintext import PlaintextParser
 from .sqlitedb import JOURNAL_MAGIC, MAGIC as SQLITE_MAGIC, WAL_MAGIC, WAL_MAGIC_ALT, SqliteParser
@@ -55,7 +56,8 @@ def all_parsers() -> list[BaseParser]:
         DocxParser(),
         EmailParser(),
         # SqliteParser is NOT here on purpose: it is selected by magic in binary_hint. Sniffing it by
-        # extension would hand every non-SQLite ".db" to a parser that can only fail on it.
+        # extension would hand every non-SQLite ".db" to a parser that can only fail on it. PcapParser
+        # is out for the same reason: a capture is identified by its magic, never by sniffing text.
         ImageParser(),
         MemdumpParser(),
         PlaintextParser(),
@@ -83,6 +85,8 @@ def parser_by_name(name: str) -> Optional[BaseParser]:
         return DelimitedParser()
     if want == SqliteParser().name:     # selected by magic, so not in all_parsers()
         return SqliteParser()
+    if want == PcapParser.name:         # ditto
+        return PcapParser()
     return None
 
 
@@ -136,6 +140,11 @@ def binary_hint(filename: str, data: bytes) -> Optional[BaseParser]:
         return ImageParser()
     if head.startswith(b"ElfFile"):
         return EvtxParser()
+    # A capture is its magic. The extension is claimed too — deliberately, like the SQLite siblings:
+    # a .pcap that is not one must be TOLD that, and falling through would run `strings` over packet
+    # bytes and produce a source full of protocol confetti that looks like evidence.
+    if head[:4] in PCAP_MAGICS or lower.endswith(PCAP_EXTENSIONS):
+        return PcapParser()
     return None
 
 

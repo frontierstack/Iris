@@ -5,8 +5,8 @@ from typing import Optional
 
 from fastapi import APIRouter
 
-from ..parsers import (archives as _archives, docx as _docx, eml as _eml, image as _image, pdf as _pdf,
-                       sqlitedb as _sqlite, xlsx as _xlsx)
+from ..parsers import (archives as _archives, docx as _docx, eml as _eml, image as _image, pcap as _pcap,
+                       pdf as _pdf, sqlitedb as _sqlite, xlsx as _xlsx)
 from ..parsers.memdump import EXTENSIONS as BIN_EXT
 
 router = APIRouter(prefix="/parsers", tags=["parsers"])
@@ -87,6 +87,13 @@ def list_parsers() -> list[dict]:
                "Opened READ-ONLY (mode=ro&immutable=1 — the evidence file is never written to). Every user table is "
                "enumerated; timestamp columns are decoded from unix s/ms/us/ns, Julian day, WebKit/Chrome and .NET "
                "ticks; one event per row with table/row in fields and BLOBs rendered as size + SHA-256."),
+        _entry("packet capture", "network.pcap", list(_pcap.EXTENSIONS),
+               "libpcap (.pcap/.cap) and pcapng, decoded with the standard library alone — no scapy, no "
+               "tshark. One event per packet: the five-tuple (src_ip/dst_ip/src_port/dst_port/protocol) "
+               "plus TCP flags, VLAN and TTL in fields, and the application-layer facts a capture is "
+               "opened for — DNS question and answers, HTTP method/host/URL/user-agent, and the TLS "
+               "ClientHello SNI, which is the only readable identity in an encrypted flow. Ethernet, "
+               "VLAN, raw IP, Linux cooked v1/v2 and loopback link types; IPv4 and IPv6."),
         _entry("E-mail message", "mail.message", [".eml", ".mbox", ".msg"],
                "RFC 822 .eml and multi-message .mbox (one event per message): Date, From/To/Cc, Subject, Message-ID, "
                "originating IPs from Received, SPF/DKIM/DMARC from Authentication-Results, body URLs and attachment "

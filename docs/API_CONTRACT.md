@@ -14,7 +14,7 @@ type Severity = 'critical'|'high'|'medium'|'low'|'info';
                severity, no parsed fields, no entities, no detections. A screen showing any of those for
                this source is showing a DEFAULT, not a finding, and has to say so.
      queued    waiting for the enrichment worker.      enriching  being parsed right now.
-     enriched  done — and also the BIRTH state of a container that has no raw form (EVTX, SQLite, PDF,
+     enriched  done — and also the BIRTH state of a container that has no raw form (EVTX, SQLite, pcap, PDF,
                XLSX, OCR'd image, mail): there is no readable text until its parser has run, so those
                parse fully on ingest exactly as before.
      skipped   the analyst declined it. Technically identical to `raw`, but a DECISION — it is never
@@ -206,7 +206,7 @@ against the **network**, not against a web page: a browser on this machine reach
    - A line-oriented TEXT log comes back with `enrich:'raw'` and its full `events` count within the
      request: phase 1 splits it into lines and lands them in the pool, searchable at once. `range` is
      null and every event carries `ts:''` until phase 2 has run — see **Two-phase ingest** below.
-     A binary/structured container (EVTX, SQLite, PDF, XLSX, image, mail) has no raw form and parses
+     A binary/structured container (EVTX, SQLite, PDF, XLSX, image, mail, pcap) has no raw form and parses
      fully here, synchronously for files ≤ 50 MB and in a background thread above that (poll GET /api/case).
    - **Never creates a case.** With no active case (`Case.pending`) the bytes are staged in the library and
      parsed into the case-less pool: `X-Iris-Staged-To-Library` holds the number of files staged, the returned
@@ -406,7 +406,11 @@ CSV/TSV/pipe-delimited (header row auto-detected → field names), plaintext (ti
 XLSX/XLS (each row → event; header row → fields; sheet name in fields), DOCX (paragraphs). Images (.png .jpg .jpeg .tif .bmp .webp): OCR via
 tesseract → lines, after a preprocessing search (rescale to a measured text height, deskew, contrast/binarize/denoise variants scored by
 tesseract's own confidence); each event carries `ocr_variant`, `ocr_confidence` and `ocr_quality` (high|medium|low) in fields so a weak read is
-visible as one. E-mail: .eml, .mbox (one event per message) and Outlook .msg (extract-msg; body, attachment names + SHA-256 merged in). Binary / memory dumps (.dmp .raw .mem .bin .img .vmem, or any file that fails UTF-8 decode): printable-strings extraction
+visible as one. Packet captures (.pcap .pcapng .cap): libpcap and pcapng decoded with the standard library alone (no scapy/tshark) - one event per packet, with
+`src_ip`/`dst_ip`/`src_port`/`dst_port`/`protocol`/`tcp_flags`/`ttl`/`vlan` in fields, plus the application layer a capture is opened for: DNS
+question and answers (`dns_query`, `dns_qtype`, `dns_answers`, `dns_rcode`), HTTP (`http_method`, `http_host`, `url`, `user_agent`, `http_status`)
+and the TLS ClientHello SNI (`tls_sni`, also `domain`). Ethernet + VLAN, raw IP, Linux cooked v1/v2 and loopback link types; IPv4 and IPv6. A
+malformed packet becomes one event carrying `parse_error`, and a truncated capture keeps every packet before the cut. E-mail: .eml, .mbox (one event per message) and Outlook .msg (extract-msg; body, attachment names + SHA-256 merged in). Binary / memory dumps (.dmp .raw .mem .bin .img .vmem, or any file that fails UTF-8 decode): printable-strings extraction
 (ASCII + UTF-16LE, min length 6) → each string an event, timestamps/IPs/URLs/paths/emails/registry keys extracted as fields+entities, offset in fields.
 Archives: .zip .gz expanded. Unknown text → plaintext parser.
 

@@ -1,7 +1,7 @@
 # Iris — log parser & correlation workbench
 
-Drop syslog, nginx, EVTX, CloudTrail, k8s audit, JSON/CSV/XLSX, SQLite databases, mail, PDFs, DOCX, screenshots (OCR),
-memory dumps, archives or unknown text into the workspace. Iris fingerprints each file, normalizes every line into one
+Drop syslog, nginx, EVTX, CloudTrail, k8s audit, JSON/CSV/XLSX, SQLite databases, packet captures (pcap/pcapng),
+mail, PDFs, DOCX, screenshots (OCR), memory dumps, archives or unknown text into the workspace. Iris fingerprints each file, normalizes every line into one
 schema, runs detections, correlates events into incident clusters and an entity graph, and drafts a findings report
 (Markdown / JSON / STIX 2.1 / PDF).
 

@@ -172,7 +172,9 @@ def test_finished_jobs_are_pruned_and_the_list_is_capped(c, monkeypatch) -> None
     REGISTRY.finish(old.id, parser="plaintext", events=0)
     assert _job(c, old.id)["state"] == "ready", "a just-finished job must still be visible after a refresh"
 
+    # Retention is now per outcome: a ready job ages out on READY_RETAIN_SEC, a failure on RETAIN_SEC.
     monkeypatch.setattr(jobs_mod, "RETAIN_SEC", 1)
+    monkeypatch.setattr(jobs_mod, "READY_RETAIN_SEC", 1)
     with REGISTRY.lock:
         REGISTRY.get(old.id).updated_ts = time.time() - 5  # type: ignore[union-attr]
     rows = c.get("/api/jobs?limit=500").json()["jobs"]
@@ -187,6 +189,45 @@ def test_finished_jobs_are_pruned_and_the_list_is_capped(c, monkeypatch) -> None
     kept = {j["id"] for j in c.get("/api/jobs?limit=500").json()["jobs"]}
     assert len(kept) <= 5
     assert ids[-1] in kept and ids[0] not in kept, "pruning must drop the OLDEST jobs, not the newest"
+
+
+def test_a_successful_job_clears_itself_and_a_failed_one_does_not(c) -> None:
+    """The analyst should not have to press "Clear finished" after every ingest.
+
+    A ready job is a duplicate of the Sources row underneath it — same file, same parser, same event
+    count — so it ages out in seconds. A FAILURE is the one thing on that panel that is restated
+    nowhere else in a form they can act on, and auto-clearing it would silently discard the report
+    that evidence never made it into the pool. Both halves are the test.
+    """
+    done = REGISTRY.create("settled.log", 10, "library", "")
+    REGISTRY.finish(done.id, parser="plaintext", events=3)
+    failed = REGISTRY.create("broken.log", 10, "library", "")
+    REGISTRY.fail(failed.id, "the parser could not read a record")
+
+    live = {j["id"] for j in c.get("/api/jobs?limit=500").json()["jobs"]}
+    assert done.id in live and failed.id in live, "both must survive long enough to be seen"
+
+    # Age both past READY_RETAIN_SEC but nowhere near RETAIN_SEC.
+    assert jobs_mod.READY_RETAIN_SEC < jobs_mod.RETAIN_SEC
+    aged = time.time() - (jobs_mod.READY_RETAIN_SEC + 5)
+    with REGISTRY.lock:
+        REGISTRY.get(done.id).updated_ts = aged      # type: ignore[union-attr]
+        REGISTRY.get(failed.id).updated_ts = aged    # type: ignore[union-attr]
+
+    rows = c.get("/api/jobs?limit=500").json()["jobs"]
+    ids = {j["id"] for j in rows}
+    assert done.id not in ids, "a finished upload must clear itself"
+    assert failed.id in ids, "a failure must stay until it is dismissed"
+    assert "could not read" in next(j for j in rows if j["id"] == failed.id)["error"]
+
+
+def test_a_running_job_is_never_aged_out(c) -> None:
+    """Whatever the clock says, work still in flight stays on the panel."""
+    job = REGISTRY.create("uploading.log", 5_000_000, "library", "")
+    REGISTRY.progress(job.id, 1000)
+    with REGISTRY.lock:
+        REGISTRY.get(job.id).updated_ts = time.time() - (jobs_mod.READY_RETAIN_SEC + 5)  # type: ignore[union-attr]
+    assert _job(c, job.id)["state"] in ("queued", "uploading")
 
 
 def test_a_stalled_upload_is_not_reported_as_running_forever(c, monkeypatch) -> None:
