@@ -592,6 +592,13 @@ class CaseEnrichment(BaseModel):
     committing: bool = False
     # The one field a screen needs to answer "what is it waiting on?". Everything above is a COUNT.
     activity: EnrichActivity = Field(default_factory=EnrichActivity)
+    # The pool-wide detection pass is running in the BACKGROUND. Per-event rules are stamped on new
+    # events before they enter the pool; the windowed rules read the density of the whole pool and are
+    # re-evaluated afterwards, off the worker, coalesced. It holds nothing up — the queue moves, the
+    # events are searchable — but it is minutes of one core on a large workspace and a pass nobody can
+    # see is exactly the "nothing is happening" the activity field exists to prevent.
+    detectionsRefreshing: bool = False
+    detectionsRefreshSec: int = 0
     # What the RUNNING source is doing, so a screen can show movement rather than a number that changes
     # once a minute. A source takes tens of seconds on a large pool, so "1 running" on its own is
     # indistinguishable from "stuck" — which is exactly how it was read. Straight off

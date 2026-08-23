@@ -635,6 +635,12 @@ Full contract: `docs/API_CONTRACT.md`.
   lines are in the pool and searchable, and phase 2 waits for you to ask. Use *Interpret now* on the row,
   or turn automatic interpretation back on. Iris says this instead of showing a 0 % bar, because a bar
   that never moves cannot be told apart from a hang.
+- **The Sources strip says *Merging interpreted sources into the pool* or *Re-checking windowed
+  detection rules*** — both are normal. The first is one rebuild of the whole pool index after a batch of
+  files finishes interpreting (minutes on a workspace of millions of events; the strip shows which step
+  and for how long). The second runs in the background after that (and once after every restart) and holds nothing up: search, the
+  timeline and the graph already have the new events. Only the *windowed* rules (bursts, sprays) need the
+  whole pool re-read; every per-event rule was applied before the events went in.
 - **A drop of many files shows some as *waiting its turn*** — that is normal and healthy: Iris sends three files
   at a time and the rest queue. They are not stalled, and the tab tells the server they are still coming, so they
   are not failed either. Leave the tab open: **closing it abandons everything that has not been sent yet**, and

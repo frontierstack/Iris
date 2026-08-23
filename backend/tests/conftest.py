@@ -100,6 +100,13 @@ def _an_active_case_exists():
     # when it lands (store._refresh_detections_async). Left running past the end of a test, that bump
     # lands in the MIDDLE of the next one — a derived key moves between two lines, a graph reports
     # 'building' where 'ready' was asserted. Drain it here so no test inherits another's background work.
+    # A background library load schedules its detection pass only when the LOAD ends, so a teardown
+    # that checked `_detect_busy` alone could look between the two and hand the next test a pass that
+    # starts in its middle. Wait for the load, then for the pass.
+    for _ in range(300):
+        if not getattr(STORE, "pool_loading", False):
+            break
+        time.sleep(0.05)
     for _ in range(200):
         if not getattr(STORE, "_detect_busy", False):
             break
@@ -113,6 +120,9 @@ def drain_enrichment(timeout: float = 60.0) -> None:
 
     _enrich.QUEUE.start(STORE)
     assert _enrich.QUEUE.drain(timeout), "enrichment did not finish"
+    # The windowed-rule correction runs on its own thread after the commit. A burst or a spray, or any
+    # hit count over the whole pool, is that thread's output — so "enrichment finished" has to include it.
+    assert STORE.wait_detections(timeout), "the background detection pass did not finish"
 
 
 def load_sample_case(c):

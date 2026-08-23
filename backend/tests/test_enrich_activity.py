@@ -77,7 +77,7 @@ def test_a_merge_is_reported_as_a_merge_and_not_as_a_queue(c) -> None:
     assert a["kind"] == "merging"
     assert a["sources"] == 2 and a["events"] == 13_830_977
     assert a["stage"] == "indexing"
-    assert a["stageIndex"] == 3 and a["stageCount"] == 5
+    assert a["stageIndex"] == 4 and a["stageCount"] == 6
     # the sentence has to name the thing being waited on, not just its existence
     assert "Merging 2 interpreted sources" in a["detail"]
     assert "13,830,977 events" in a["detail"]
@@ -210,7 +210,24 @@ def test_a_real_swap_publishes_and_clears_its_merge(tmp_path, monkeypatch) -> No
     st.events = [Event(id="e1", sourceId=sid, raw="old", ts="2026-01-01T00:00:00Z")]
     st.event_index = {"e1": 0}
     st._swap_many({sid: [Event(id="e1", sourceId=sid, raw="new", ts="2026-01-01T00:00:00Z")]}, {})
-    assert [s["stage"] for s in seen][:4] == ["filtering", "sorting", "indexing", "timestamps"]
+    stages = [x["stage"] for x in seen]
+    assert stages[:5] == ["detecting", "filtering", "sorting", "indexing", "timestamps"]         or stages[:4] == ["filtering", "sorting", "indexing", "timestamps"], stages
     assert all(s["sources"] == 1 for s in seen)
     assert enrich_mod.MERGE.snapshot() == {}, "the merge record outlived the merge"
     assert [e.raw for e in st.events] == ["new"]
+
+
+def test_the_background_detection_pass_is_reported_while_it_runs(c) -> None:
+    """A pool-wide pass nobody can see is the same class of bug as a merge nobody can see."""
+    with STORE.lock:
+        STORE._detect_busy = True
+        STORE._detect_started = time.time() - 130
+    try:
+        e = c.get("/api/case").json()["enrichment"]
+        assert e["detectionsRefreshing"] is True
+        assert 125 <= e["detectionsRefreshSec"] <= 140
+    finally:
+        with STORE.lock:
+            STORE._detect_busy = False
+    e = c.get("/api/case").json()["enrichment"]
+    assert e["detectionsRefreshing"] is False and e["detectionsRefreshSec"] == 0

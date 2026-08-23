@@ -99,6 +99,8 @@ export function useEnrichment() {
     },
     committing: e?.committing ?? false,
     activity: e?.activity,
+    detectionsRefreshing: e?.detectionsRefreshing ?? false,
+    detectionsRefreshSec: e?.detectionsRefreshSec ?? 0,
     needsAction: e?.needsAction ?? 0,
     total: sources.length,
     raw,
@@ -284,7 +286,8 @@ export function EnrichActions({ source }: { source: Source }) {
  */
 export function EnrichBanner() {
   const { pathname } = useLocation();
-  const { outstanding, total, pending, running, raw, counts, detail, committing, sources, activity } = useEnrichment();
+  const { outstanding, total, pending, running, raw, counts, detail, committing, sources, activity,
+    detectionsRefreshing, detectionsRefreshSec } = useEnrichment();
   const enrichAll = useEnrichAll();
   const invalidate = useInvalidateCaseData();
   // Enrichment finishes with no request from the UI, so every derived query (search, timeline, graph,
@@ -304,7 +307,7 @@ export function EnrichBanner() {
   // interpreted, the graph, the anomaly list and the case timeline answer over PART of the corpus and
   // no longer say so on the screen. This strip, on Sources, is the only place that says it.
   if (!pathname.startsWith('/ingest')) return null;
-  if (!outstanding && !(counts?.error ?? 0)) return null;
+  if (!outstanding && !(counts?.error ?? 0) && !detectionsRefreshing) return null;
 
   // INTERPRETED means enriched — not "not raw". Counting `total - raw` called a queued source
   // interpreted, so the strip read "14 of 14 sources interpreted" directly above "Interpreting
@@ -369,6 +372,17 @@ export function EnrichBanner() {
           <div className="enrich-banner__line"><span className="spinner" />{fmtInt(queued)} queued to interpret</div>
         ) : null}
 
+        {detectionsRefreshing && (
+          // The per-event rules are already on the new events; this is the windowed-rule pass over the
+          // whole pool, in the background. Everything is searchable meanwhile — say so, or a spinner
+          // with nothing queued reads as one more thing being waited on.
+          <div className="enrich-banner__line">
+            <span className="spinner" />
+            <span>Re-checking windowed detection rules over the whole pool in the background — search,
+              the timeline and the graph are not waiting on it.</span>
+            {detectionsRefreshSec >= 5 && <span className="muted"> · {fmtDur(detectionsRefreshSec)}</span>}
+          </div>
+        )}
         {(raw.length > 0 && idle) || failed > 0 ? (
           <div className={cx('enrich-banner__line', failed > 0 && 'enrich-banner__line--act')}>
             {failed > 0 && <Icon.Warn />}

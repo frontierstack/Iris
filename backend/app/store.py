@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import sys
+import operator
 import threading
 import time
 import uuid
@@ -1326,14 +1327,21 @@ class Store:
             except Exception as exc:  # a corrupt staged file must never take the workspace down
                 print(f"[iris] library pool load failed: {exc}")
             finally:
-                with self._detect_lock:
-                    self._run_detections()      # O(pool): never under self.lock, see _detect_lock
+                # The pool is COMPLETE here: every file is parsed (or reported skipped) and every
+                # cached source came back carrying the detections it was saved with. The catalogue
+                # pass that follows only re-stamps what a RULE change since caching would alter, and
+                # it is minutes of one core on a large workspace — 9 min at 13.8 M events, measured.
+                # It used to run right here, before `pool_loading` cleared, so the whole time the UI
+                # said "loading", the graph stayed paused and nothing said what was actually going
+                # on. Clear the load first — the workspace is usable — and run the pass where every
+                # other post-commit pass now runs: in the background, visible as `detectionsRefreshing`.
                 with self.lock:
                     self.pool_loading = False
                     self.pool_pending = 0
                     self.pool_current_file = ""
                     self.pool_bytes_done = self.pool_bytes_total
                 self.bump()
+                self._refresh_detections_async()
 
         if background_ok and total > LIBRARY_SYNC_LIMIT:
             print(f"[iris] loading {len(rows)} library file(s) ({total / 1e6:.0f} MB) in the background")
@@ -1881,7 +1889,7 @@ class Store:
                 for e in self.events:
                     if e.sourceId == sid and e.raw in by_raw:
                         remap[e.id] = by_raw[e.raw]
-            events.sort(key=ts_key)
+            events = _sort_events(events)
             with self.lock:
                 gone = sid not in self.sources
             if gone:
@@ -1893,6 +1901,7 @@ class Store:
             deferred = self._defer_swap(sid, events, remap, skew, unmapped, len(old_ids), t0)
             if deferred is not None:
                 return deferred          # committed with the rest of the batch, see `enrich_batch`
+            self._stamp_detections(events)
             lost = self._swap_source_events(sid, events, remap)
         except Exception as exc:
             # Anything raising AFTER `enriching` was set leaves the source stuck in that state for the
@@ -1918,13 +1927,13 @@ class Store:
                 self.skews[sid] = skew
             self.source_parse_errors[sid] = unmapped
         PARSE_PROGRESS.finish(sid)
-        with self._detect_lock:
-            self._run_detections()
         self.bump()
-        # Cache the finished source so the next restart neither re-parses nor re-enriches it. It runs
-        # AFTER the detection pass, because the detections are stamped on the events and are part of
-        # what is being saved; and it uses `events`, which this method already holds, so the cache
-        # never costs a scan of the pool.
+        self._refresh_detections_async()
+        # Cache the finished source so the next restart neither re-parses nor re-enriches it. The
+        # per-event detections are already stamped on `events` (`_stamp_detections` ran before the
+        # swap); the windowed correction lands later and is re-derived at startup regardless, because
+        # the startup pass exists precisely to re-stamp what the rules say. It uses `events`, which
+        # this method already holds, so the cache never costs a scan of the pool.
         self._cache_library_source(sid, events)
         # ONLY a case-origin source belongs in case.json — a library source persists nothing here
         # (save_meta lists case sources only), so the write is pure risk on a background worker.
@@ -2016,7 +2025,13 @@ class Store:
             live = [b for b in batch if b["sid"] in self.sources]
         if not live:
             return 0
-        lost = self._swap_many({b["sid"]: b["events"] for b in live}, 
+        # Detections for the NEWCOMERS before they enter the pool — proportional to the batch — and
+        # the pool-wide burst correction in the background after. See `_stamp_detections`.
+        enrich.MERGE.start(len(live), len(self.events))
+        enrich.MERGE.step("detecting", sum(len(b["events"]) for b in live))
+        for b in live:
+            self._stamp_detections(b["events"])
+        lost = self._swap_many({b["sid"]: b["events"] for b in live},
                                {k: v for b in live for k, v in b["remap"].items()})
         now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         with self.lock:
@@ -2034,9 +2049,8 @@ class Store:
                 if b["skew"] is not None:
                     self.skews[sid] = b["skew"]
                 self.source_parse_errors[sid] = b["unmapped"]
-        with self._detect_lock:
-            self._run_detections()
         self.bump()
+        self._refresh_detections_async()    # the windowed rules, over the whole pool, off this thread
         for b in live:                      # the cache wants the events, which the batch still holds
             self._cache_library_source(b["sid"], b["events"])
         if any(self.source_origin.get(b["sid"], "case") == "case" for b in live):
@@ -2072,7 +2086,7 @@ class Store:
         # Say what this is and how big it is BEFORE the first O(pool) stage. Everything below runs for
         # minutes on a large workspace and used to be completely silent: the analyst saw "1 queued to
         # interpret" for a 16.9 MB file and nothing about the 13.8 M-event merge it was queued behind.
-        enrich.MERGE.start(len(sids), len(self.events))
+        enrich.MERGE.start(len(sids), len(self.events), keep_clock=True)
         # A source's raw events may still be sitting in the BULK BUFFER when phase 2 lands: the raw
         # phase appends into `_pending` during a library load and the enrichment worker can swap that
         # same source before `_flush_pending` runs. Filtering only `self.events` then left BOTH copies
@@ -2088,7 +2102,7 @@ class Store:
             merged = [e for e in base if e.sourceId not in sids]
             merged.extend(incoming)
             enrich.MERGE.step("sorting", len(merged))
-            merged.sort(key=ts_key)
+            merged = _sort_events(merged)
             enrich.MERGE.step("indexing", len(merged))
             index = _build_index(merged)
             enrich.MERGE.step("timestamps", len(merged))
@@ -2098,6 +2112,25 @@ class Store:
             with self.lock:
                 if self.events is not base:
                     continue
+                # Liveness is decided HERE, under the lock, not by a check the caller made earlier.
+                # `enrich_source` asked "was this source deleted?" before handing its events over, and
+                # a per-event detection pass now runs between that question and this swap — seconds
+                # of regex, not microseconds. A case switch or a source delete landing in that gap
+                # (a test's `create_case` did exactly this) put the parsed events of a source that no
+                # longer existed into the pool: orphans, with ids that collided with the next
+                # sources' — 2,150 duplicate ids in a 4,698-event pool. Every mutation of `sources`
+                # takes this lock, so re-checking inside it closes the window completely.
+                alive = {sid for sid in sids if sid in self.sources}
+                if alive != sids:
+                    dead = sids - alive
+                    for sid in dead:
+                        lost.pop(sid, None)
+                    sids = alive
+                    incoming = [e for e in incoming if e.sourceId in alive]
+                    if not alive:
+                        enrich.MERGE.finish()
+                        return lost
+                    continue          # rebuild off the lock without the dead source's events
                 self.events = merged
                 self.event_index = index
                 self.ts = ts
@@ -2309,7 +2342,7 @@ class Store:
         else:
             for i, ev in enumerate(events):
                 ev.id = f"e{base + i + 1:x}"
-        events.sort(key=ts_key)
+        events = _sort_events(events)
         return events, skew, unmapped
 
     def _normalize(self, sid: str, filename: str, family: str, parsed: list[ParsedEvent]) -> tuple[list[Event], Optional[float], int]:
@@ -2352,8 +2385,7 @@ class Store:
     def _merge_into_pool(self, events: list[Event]) -> None:
         while True:
             base = self.events
-            merged = base + events
-            merged.sort(key=ts_key)
+            merged = _sort_events(base + events)
             index = {e.id: i for i, e in enumerate(merged)}
             ts = _epochs(merged) if merged else np.zeros(0, dtype=np.float64)
             with self.lock:
@@ -2365,9 +2397,41 @@ class Store:
 
     def _reindex(self) -> None:
         if any(self.events[i].ts > self.events[i + 1].ts for i in range(len(self.events) - 1)):
-            self.events = sorted(self.events, key=ts_key)
+            self.events = _sort_events(self.events)
         self.event_index = {e.id: i for i, e in enumerate(self.events)}
         self.ts = _epochs(self.events) if self.events else np.zeros(0, dtype=np.float64)
+
+    def _stamp_detections(self, events: list[Event]) -> None:
+        """Run the catalogue over events that are ABOUT TO ENTER the pool — and only them.
+
+        The pass after a commit used to be `_run_detections()`, the whole catalogue over the whole
+        pool, and 68 % of it is `re.search` over every event's raw line: measured 38 s per million
+        events, so on the analyst's 13.8 M-event workspace roughly nine minutes after EVERY batch —
+        which is what "committing" was for half an hour with the merge itself long finished.
+
+        What can actually change when events are added? Per-event rules on the events already in the
+        pool cannot: same event, same rule, same answer. Only the WINDOWED rules can (a burst's count
+        reads the density of the whole pool), and they are the cheap, vectorised part. So this stamps
+        the newcomers here, proportional to the batch, and the pool-wide burst correction runs in the
+        background, coalesced — the same shape `delete_source` already uses for the same reason.
+
+        Exactness: these events are not in the pool yet, so no reader can see them half-stamped; they
+        are sorted and given their own epoch array because `find_bursts` uses `searchsorted` over its
+        `ts`; and the full background pass re-stamps everything afterwards, so a burst that straddles
+        the batch boundary is found there. Suppression counts are NOT recorded from this partial pass —
+        the full pass records the whole-pool figure.
+        """
+        if not events:
+            return
+        RULES_STORE.load()
+        excl = EXCLUSIONS.matcher()
+        ordered = _sort_events(events)
+        ts = _epochs(ordered) if ordered else np.zeros(0, dtype=np.float64)
+        with self._detect_lock:
+            run_rules(ordered, ts, disabled=RULES_STORE.detection_disabled(),
+                      overrides=RULES_STORE.detection_overrides(),
+                      params=RULES_STORE.detection_params(), exclude=excl)
+            RULES_STORE.apply_all(ordered, excl)
 
     def _run_detections(self) -> None:
         """Built-in Sigma-like rules (minus disabled ones) + enabled custom regex rules."""
@@ -2539,6 +2603,22 @@ class Store:
                 break
         self._refresh_detections_async()
 
+    def wait_detections(self, timeout: float = 60.0) -> bool:
+        """Block until the background detection pass has finished. TESTS ONLY.
+
+        Per-event rules are on an event before it enters the pool; the windowed rules are corrected
+        afterwards on their own thread. A test that asserts on a burst, a spray, or a hit count over
+        the whole pool is asserting on that thread's output and has to wait for it — the same way
+        `drain_enrichment` waits for the queue. Nothing on a request path may call this.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self.lock:
+                if not getattr(self, "_detect_busy", False):
+                    return True
+            time.sleep(0.02)
+        return False
+
     def _refresh_detections_async(self) -> None:
         """Re-evaluate the rule catalogue off the request thread, coalescing repeated calls.
 
@@ -2553,6 +2633,7 @@ class Store:
                 return
             self._detect_busy = True
             self._detect_again = False
+            self._detect_started = time.time()
 
         def run() -> None:
             try:
@@ -2565,6 +2646,7 @@ class Store:
                             self._detect_busy = False
                             return
                         self._detect_again = False
+                        self._detect_started = time.time()
             except Exception:  # noqa: BLE001 — a failed refresh must not take the store down
                 with self.lock:
                     self._detect_busy = False
@@ -2995,7 +3077,12 @@ class Store:
         # different sentence from "work is in flight".
         needs = counts.error + (counts.raw if pending == 0 else 0)
         activity = self._enrich_activity(q, running, file_name, pct, eta, counts)
+        with self.lock:
+            refreshing = bool(getattr(self, "_detect_busy", False))
+            refresh_since = float(getattr(self, "_detect_started", 0.0) or 0.0)
         return CaseEnrichment(counts=counts, running=running, pending=pending, activity=activity,
+                              detectionsRefreshing=refreshing,
+                              detectionsRefreshSec=int(max(0.0, time.time() - refresh_since)) if refreshing else 0,
                               outstanding=counts.raw + pending,
                               committing=bool(q.get("committing")),
                               runningFile=file_name, runningPct=pct, runningPhase=phase,
@@ -3152,6 +3239,34 @@ def _clean_labels(labels: Optional[list[str]]) -> list[str]:
 # one. `ts_key` and `_iso_to_epoch` must agree on that ordering or the array and the list disagree.
 def ts_key(e: "Event") -> tuple[int, str]:
     return (1, "") if not e.ts else (0, e.ts)
+
+
+def _sort_events(events: list) -> list:
+    """The pool's order: by timestamp STRING, unstamped events last, ties in arrival order.
+
+    This is `sorted(events, key=ts_key)` and must stay exactly that — event ORDER decides event IDS
+    on every path that assigns them, and ids are what every case-set entry, note and indicator cites.
+    It is written this way because `key=ts_key` is one Python call plus one tuple allocation per
+    event: measured at 1 M events, 2.07 s against 1.31 s here, on a step that runs on every commit.
+
+    Why it is identical: a stable sort with key `(1, "")` for every unstamped event and `(0, ts)` for
+    the rest is, by construction, "the stamped ones sorted by `ts` with ties in input order, then the
+    unstamped ones in input order". Partitioning first and sorting the stamped half with a C-level
+    `attrgetter` computes that same thing without the per-event Python frame. Timestamps are compared
+    as STRINGS on purpose, not as epochs: that is what today's order is, and an epoch key would reorder
+    a pool that mixed precisions. `tests/test_perf_equivalence.py` pins it on randomised input.
+    """
+    stamped = [e for e in events if e.ts]
+    if len(stamped) == len(events):
+        stamped.sort(key=_TS_GETTER)
+        return stamped
+    blank = [e for e in events if not e.ts]
+    stamped.sort(key=_TS_GETTER)
+    stamped.extend(blank)
+    return stamped
+
+
+_TS_GETTER = operator.attrgetter("ts")
 
 
 def _iso_to_epoch(s: str) -> float:

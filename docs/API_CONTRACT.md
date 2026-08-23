@@ -148,6 +148,15 @@ interface CaseEnrichment { counts:EnrichCounts;
   committing:boolean /*a finished batch is merging into the pool*/;
   pending:number; outstanding:number;
   activity:EnrichActivity;
+  /* The pool-wide detection pass is running in the BACKGROUND. After a commit the per-event rules are
+     stamped on the NEW events before they enter the pool (proportional to the batch); the windowed
+     rules read the density of the whole pool and are re-evaluated afterwards, off the worker,
+     coalesced across commits. It holds nothing up — the events are searchable, the queue moves — but
+     on a large workspace it is minutes of one core, and a pass nobody can see is exactly the "nothing
+     is happening" `activity` exists to prevent. Measured at 1 M events the full catalogue is 38 s, 68 %
+     of it `re.search` over every raw line; running it on the worker after every batch was what
+     "committing" spent half an hour on with the merge itself long finished. */
+  detectionsRefreshing:boolean; detectionsRefreshSec:number;
   runningFile:string; runningPct:number|null; runningPhase:string; runningEtaSec:number|null;
   needsAction:number }
 

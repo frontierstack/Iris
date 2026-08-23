@@ -191,6 +191,10 @@ export interface CaseEnrichment {
    *  what is being waited on — the difference between "1 queued" and "merging 2 sources into a
    *  13.8M-event pool, 4m". */
   activity?: EnrichActivity;
+  /** the pool-wide (windowed-rule) detection pass is running in the background. Holds nothing up,
+   *  but it is minutes of one core on a big workspace and deserves a line rather than silence. */
+  detectionsRefreshing?: boolean;
+  detectionsRefreshSec?: number;
   /** queued + enriching — is work IN FLIGHT? This is what a progress banner counts down. */
   pending: number;
   /** raw + queued + enriching — is my ANSWER incomplete? Those sources are in the pool as raw lines,

@@ -222,7 +222,10 @@ class MergeProgress:
     status in exactly the window it is worth having.
     """
 
-    STAGES = ("filtering", "sorting", "indexing", "timestamps", "curation")
+    # `detecting` is the per-event rule pass over the NEWCOMERS (proportional to the batch); the rest
+    # are the O(pool) merge stages. The pool-wide burst correction runs afterwards in the background
+    # and is not a stage of this — it does not hold anything up.
+    STAGES = ("detecting", "filtering", "sorting", "indexing", "timestamps", "curation")
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -233,14 +236,16 @@ class MergeProgress:
         self.stage_i = 0
         self.started = 0.0
 
-    def start(self, sources: int, events: int) -> None:
+    def start(self, sources: int, events: int, keep_clock: bool = False) -> None:
         with self._lock:
+            already = self.active
             self.active = True
             self.sources = max(0, int(sources))
             self.events = max(0, int(events))
-            self.stage = self.STAGES[0]
-            self.stage_i = 1
-            self.started = time.time()
+            if not (already and keep_clock):
+                self.stage = self.STAGES[0]
+                self.stage_i = 1
+                self.started = time.time()
 
     def step(self, stage: str, events: int = -1) -> None:
         with self._lock:
