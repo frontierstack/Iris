@@ -209,6 +209,66 @@ class EnrichResult:
     took_ms: int = 0
 
 
+class MergeProgress:
+    """What `Store._swap_many` is doing, readable WHILE it does it.
+
+    The merge is the longest thing phase 2 does and the only part with nothing to show for itself. It is
+    O(THE WHOLE POOL) however little changed — rebuild the event list, sort it, build the id index,
+    build the timestamp array — so on a 13.8 M-event workspace it runs for minutes, and a 16.9 MB file
+    sitting behind it reported "1 queued to interpret" and not one word about what it was queued behind.
+
+    Deliberately its own small lock and nothing else: `Store.enrichment()` reads this from a request
+    thread, and making that wait on the STORE lock (which the merge takes to swap) would freeze the
+    status in exactly the window it is worth having.
+    """
+
+    STAGES = ("filtering", "sorting", "indexing", "timestamps", "curation")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.active = False
+        self.sources = 0        # interpreted sources in this batch
+        self.events = 0         # events in the pool being rebuilt
+        self.stage = ""
+        self.stage_i = 0
+        self.started = 0.0
+
+    def start(self, sources: int, events: int) -> None:
+        with self._lock:
+            self.active = True
+            self.sources = max(0, int(sources))
+            self.events = max(0, int(events))
+            self.stage = self.STAGES[0]
+            self.stage_i = 1
+            self.started = time.time()
+
+    def step(self, stage: str, events: int = -1) -> None:
+        with self._lock:
+            if not self.active:
+                return
+            self.stage = stage
+            if stage in self.STAGES:
+                self.stage_i = self.STAGES.index(stage) + 1
+            if events >= 0:
+                self.events = int(events)
+
+    def finish(self) -> None:
+        with self._lock:
+            self.active = False
+            self.stage = ""
+            self.stage_i = 0
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            if not self.active:
+                return {}
+            return {"sources": self.sources, "events": self.events, "stage": self.stage,
+                    "stageIndex": self.stage_i, "stageCount": len(self.STAGES),
+                    "elapsedSec": int(max(0.0, time.time() - self.started))}
+
+
+MERGE = MergeProgress()
+
 class EnrichQueue:
     """One background worker, one source at a time, oldest first.
 
@@ -225,6 +285,11 @@ class EnrichQueue:
         self._wake = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._current: str = ""
+        # What the worker is doing, and since when. "queued" with nothing else said is exactly the state
+        # the analyst reported: a 16.9 MB file waiting, with no way to see it was waiting on a pool merge
+        # that had been running for minutes.
+        self._phase: str = "idle"
+        self._phase_since: float = time.time()
         self._stop = False
         self._warned_no_worker = False
         self.last: dict[str, EnrichResult] = {}
@@ -258,10 +323,24 @@ class EnrichQueue:
                 return True
         return False
 
+    def _set_phase(self, phase: str) -> None:
+        with self._lock:
+            if self._phase != phase:
+                self._phase = phase
+                self._phase_since = time.time()
+
     def status(self) -> dict:
         with self._lock:
+            phase = self._phase
+            # A queue nobody is servicing is ABANDONED, not busy, and that is a different sentence:
+            # those sources will stay raw until someone restarts the worker. `submit()` already logs it;
+            # this is the same fact where the analyst can see it.
+            if self._q and not self._alive():
+                phase = "noWorker"
             return {"running": self._current, "queued": list(self._q),
                     "pending": len(self._q) + (1 if self._current else 0),
+                    "phase": phase,
+                    "phaseElapsedSec": int(max(0.0, time.time() - self._phase_since)),
                     # A finished batch waiting for its shared merge is REAL work — `_swap_many` is
                     # O(the whole pool), tens of seconds at 16 M events — but the sources in it are
                     # already `enriched`, so nothing in `counts` describes it. Without this the screen
@@ -334,6 +413,7 @@ class EnrichQueue:
                 sid = self._q.pop(0) if self._q else ""
                 self._current = sid
             if not sid:
+                self._set_phase("idle")
                 self._wake.wait(timeout=1.0)
                 self._wake.clear()
                 continue
@@ -346,6 +426,7 @@ class EnrichQueue:
                     with self._lock:
                         self._q.append(sid)
                         self._current = ""
+                    self._set_phase("waitingForPool")
                     self._wake.wait(timeout=2.0)
                     self._wake.clear()
                     continue
@@ -375,6 +456,7 @@ class EnrichQueue:
                 with self._lock:
                     self._committing = True
                 with (batching() if batching else contextlib.nullcontext()):
+                    self._set_phase("parsing")
                     self.last[sid] = store.enrich_source(sid)
                     started = time.time()
                     while (pending is not None and pending() and pending() < BATCH_MAX
@@ -390,6 +472,7 @@ class EnrichQueue:
                                 self._current = ""
                             break
                         try:
+                            self._set_phase("parsing")
                             self.last[nxt] = store.enrich_source(nxt)
                         except Exception as exc:   # one bad file must not lose the whole batch
                             self.last[nxt] = EnrichResult(sid=nxt, ok=False,
@@ -401,6 +484,10 @@ class EnrichQueue:
                     self._current = ""
                     self._committing = False
                     drained = not self._q
+                # The batch (and its merge) is over. Anything still queued is now waiting on the worker
+                # itself rather than on work in flight, and the phase has to say so or the next source
+                # looks like it is being interpreted when nothing is.
+                self._set_phase("idle")
             if drained:
                 # The storm is over: this is the ONE index warm that matters. Every bump during the run
                 # skipped it (Store.warm_search_async), because a ~75 s pure-Python rebuild that is

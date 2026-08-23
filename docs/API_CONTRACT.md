@@ -147,8 +147,27 @@ interface CaseEnrichment { counts:EnrichCounts;
   running:string /*source in phase 2 right now, '' when none is*/;
   committing:boolean /*a finished batch is merging into the pool*/;
   pending:number; outstanding:number;
+  activity:EnrichActivity;
   runningFile:string; runningPct:number|null; runningPhase:string; runningEtaSec:number|null;
   needsAction:number }
+
+/* WHAT phase 2 is doing right now — the answer to "what is it waiting on?". The counts say how much is
+   LEFT and never said what was happening: a 16.9 MB file behind a batch merge reported "1 queued to
+   interpret" for minutes while the 13.8 M-event pool rebuild it was queued behind ran unannounced.
+   Every kind below used to render as that one sentence.
+     parsing         a source is being read and normalized (this one has `file`/`pct`/`etaSec`)
+     merging         a finished batch is being folded into the pool — O(THE WHOLE POOL), the long one.
+                     Belongs to NO source (its members are already `enriched`), carries `sources`,
+                     `events` and which of the merge's stages is running, and OUTRANKS `running`.
+     waitingForPool  the library is still loading; the worker yields rather than compete with it
+     noWorker        nothing is servicing the queue — those sources stay raw until Iris restarts
+     idle            nothing to do (with a queue: between items, which is not "a file is being read")
+   `detail` is the sentence to show, written where the facts are. `elapsedSec` is what turns "it is
+   doing something" into "it has been doing this for four minutes". */
+interface EnrichActivity { kind:'idle'|'parsing'|'merging'|'waitingForPool'|'noWorker';
+  detail:string; elapsedSec:number;
+  file:string; pct:number|null; etaSec:number|null;
+  sources:number; events:number; stage:string; stageIndex:number; stageCount:number }
 
 interface Settings {
   theme:string;                                   // 'iris-dark' | 'graphite' | 'paper' | 'midnight-blue' | 'solar'

@@ -140,9 +140,14 @@ export type GraphReviewEvent =
 /** A staged library file whose events are NOT in the pool — i.e. NOT searchable.
  *  'budget' = it would have taken the pool past its memory cap (budgetBytes), 'unreadable' = the bytes
  *  could not be read off disk. A file that failed to PARSE is never here: it is a Source in state ERROR. */
+/** Why a staged file is NOT in the pool. The union was declared as just 'budget'|'unreadable', which
+ *  made a two-way ternary in the UI look exhaustive — so a 'memory' skip was labelled "unreadable" and
+ *  sent the analyst to check the disk for a file the machine simply had no RAM for. They have different
+ *  fixes and the API has always kept them apart; only this type did not. */
+export type PoolSkipReason = 'budget' | 'memory' | 'unreadable' | 'parse-error' | 'not-parsed';
 export interface PoolSkip {
   fileName: string; displayName: string; size: number;
-  reason: 'budget' | 'unreadable';
+  reason: PoolSkipReason;
   detail: string; budgetBytes: number; usedBytes: number;
 }
 
@@ -182,6 +187,10 @@ export interface CaseEnrichment {
   /** a finished batch is being merged into the pool — real work, tens of seconds on a large pool, and
    *  it belongs to no single source because every member of it is already `enriched`. */
   committing?: boolean;
+  /** WHAT phase 2 is doing right now, with elapsed time. The counts say how much is left; this says
+   *  what is being waited on — the difference between "1 queued" and "merging 2 sources into a
+   *  13.8M-event pool, 4m". */
+  activity?: EnrichActivity;
   /** queued + enriching — is work IN FLIGHT? This is what a progress banner counts down. */
   pending: number;
   /** raw + queued + enriching — is my ANSWER incomplete? Those sources are in the pool as raw lines,
@@ -563,6 +572,19 @@ export interface ParseProgress {
   phase: 'reading' | 'parsing' | 'enriching' | 'merging';
   bytesPerSec: number; etaSec: number | null; elapsedSec: number;
 }
+/** See CaseEnrichment.activity. `kind` names the state; `detail` is the sentence to show.
+ *  'merging' is the long one and belongs to no source — it rebuilds the whole pool index. */
+export interface EnrichActivity {
+  kind: 'idle' | 'parsing' | 'merging' | 'waitingForPool' | 'noWorker';
+  detail: string;
+  elapsedSec: number;
+  file: string;
+  pct: number | null;
+  etaSec: number | null;
+  /** merging only */
+  sources: number; events: number; stage: string; stageIndex: number; stageCount: number;
+}
+
 export interface JobsResponse { jobs: UploadJob[]; active: number; total: number }
 
 /* ───── Bulk AI field mapping (Ingest → mapping queue) ───── */

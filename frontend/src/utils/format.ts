@@ -123,6 +123,18 @@ export function fmtEta(seconds: number | null | undefined): string {
   return `${Math.floor(m / 60)}h ${m % 60}m left`;
 }
 
+/** A bare duration: "42s", "4m 12s", "1h 3m". No "left" — this is elapsed, not remaining.
+ *  Elapsed is what turns "it is doing something" into "it has been doing this for four minutes",
+ *  which is the difference between waiting and worrying. */
+export function fmtDur(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds) || seconds < 0) return '';
+  const s = Math.round(seconds);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
 /** "12.4 MB/s" */
 export function fmtRate(bytesPerSec: number | null | undefined): string {
   if (!bytesPerSec || bytesPerSec <= 0) return '';

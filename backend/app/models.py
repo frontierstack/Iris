@@ -458,9 +458,12 @@ class PoolSkip(BaseModel):
 
     An aggregate count ("2 files skipped") is useless when the two are 263 MB each: a file absent from
     search looks exactly like "no matching events". Every skip is therefore named, sized and explained.
-    `reason` is 'budget' (the pool memory cap, the numbers below say by how much) or 'unreadable' (the
-    bytes could not be read off disk). A file that FAILED TO PARSE is a different problem and is never
-    reported here — it is a pool source in state ERROR carrying the parser's message.
+
+    `reason` has FIVE values, listed on the field below, and they must never be collapsed: each one
+    tells the analyst to do something different. This docstring used to name only two of them, and the
+    UI's own type declared only those two — so a two-way ternary looked exhaustive and printed
+    "unreadable" for a 'memory' skip, sending the analyst to check the disk for a file the machine
+    simply had no RAM for.
     """
     fileName: str            # the on-disk name in $IRIS_DATA_DIR/library/
     displayName: str         # the original upload name
@@ -529,6 +532,38 @@ class EnrichCounts(BaseModel):
     error: int = 0
 
 
+class EnrichActivity(BaseModel):
+    """What phase 2 is doing RIGHT NOW — the answer to "what is it waiting on?".
+
+    `counts` says how much is left; it never said what was happening. A 16.9 MB file behind a batch
+    merge reported "1 queued to interpret" and nothing else, for minutes, while the pool rebuild it was
+    queued behind ran unannounced. Every state below used to render as that same sentence:
+
+      parsing         a source is being read and normalized (this one has a percentage)
+      merging         a finished batch is being folded into the pool — O(the whole pool), the long one
+      waitingForPool  the library is still loading; the worker yields to it rather than compete
+      noWorker        nothing is servicing the queue, so those sources will stay raw until it restarts
+      idle            nothing to do
+
+    `detail` is the sentence to show. `elapsedSec` is what turns "it is doing something" into "it has
+    been doing this for four minutes", which is the difference between waiting and worrying.
+    """
+    kind: Literal["idle", "parsing", "merging", "waitingForPool", "noWorker"] = "idle"
+    detail: str = ""
+    elapsedSec: int = 0
+    # parsing only
+    file: str = ""
+    pct: Optional[float] = None
+    etaSec: Optional[int] = None
+    # merging only: how many interpreted sources are in the batch, how many events are being rebuilt,
+    # and which of the merge's O(pool) stages is running.
+    sources: int = 0
+    events: int = 0
+    stage: str = ""
+    stageIndex: int = 0
+    stageCount: int = 0
+
+
 class CaseEnrichment(BaseModel):
     """How much of the pool has been through phase 2 of the ingest (see app/enrich.py).
 
@@ -555,6 +590,8 @@ class CaseEnrichment(BaseModel):
     # member of it is already `enriched` — and on a large pool it is tens of seconds. Reported so the
     # screen can say what is happening instead of naming a file that is no longer being read.
     committing: bool = False
+    # The one field a screen needs to answer "what is it waiting on?". Everything above is a COUNT.
+    activity: EnrichActivity = Field(default_factory=EnrichActivity)
     # What the RUNNING source is doing, so a screen can show movement rather than a number that changes
     # once a minute. A source takes tens of seconds on a large pool, so "1 running" on its own is
     # indistinguishable from "stuck" — which is exactly how it was read. Straight off

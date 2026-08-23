@@ -6,7 +6,7 @@ import type { EnrichState, Source } from '../api/types';
 import { Icon } from './icons';
 import { useCase, useInvalidateCaseData } from '../hooks/queries';
 import { useToast } from '../hooks/useToast';
-import { cx, fmtBytes, fmtEta, fmtInt, fmtRate, fmtTs } from '../utils/format';
+import { cx, fmtBytes, fmtDur, fmtEta, fmtInt, fmtRate, fmtTs } from '../utils/format';
 
 /**
  * Two-phase ingest, said out loud.
@@ -98,6 +98,7 @@ export function useEnrichment() {
       etaSec: e?.runningEtaSec ?? null,
     },
     committing: e?.committing ?? false,
+    activity: e?.activity,
     needsAction: e?.needsAction ?? 0,
     total: sources.length,
     raw,
@@ -283,7 +284,7 @@ export function EnrichActions({ source }: { source: Source }) {
  */
 export function EnrichBanner() {
   const { pathname } = useLocation();
-  const { outstanding, total, pending, running, raw, counts, detail, committing, sources } = useEnrichment();
+  const { outstanding, total, pending, running, raw, counts, detail, committing, sources, activity } = useEnrichment();
   const enrichAll = useEnrichAll();
   const invalidate = useInvalidateCaseData();
   // Enrichment finishes with no request from the UI, so every derived query (search, timeline, graph,
@@ -329,7 +330,29 @@ export function EnrichBanner() {
             interpreting one adds parsed fields, entities and detections.</span>
         </div>
 
-        {running ? (
+        {/* WHAT is happening, from the server, with how long it has been happening. This replaced
+            three hand-rolled branches that could only say "Interpreting <file>" or "N queued" — and a
+            merge, which is the longest thing phase 2 does and belongs to no file, rendered as the
+            second one. `activity.detail` is a full sentence written where the facts are. */}
+        {activity && activity.kind !== 'idle' ? (
+          <div className="enrich-banner__line">
+            <span className="spinner" />
+            <span>{activity.detail}</span>
+            {activity.kind === 'merging' && activity.stageCount > 0 && (
+              <span className="muted"> (step {activity.stageIndex} of {activity.stageCount})</span>
+            )}
+            {activity.elapsedSec >= 5 && <span className="muted"> · {fmtDur(activity.elapsedSec)}</span>}
+            {typeof activity.etaSec === 'number' && activity.etaSec > 0 &&
+              <span className="muted"> · ~{fmtDur(activity.etaSec)} left</span>}
+            {queued > 0 && activity.kind !== 'noWorker' &&
+              <span className="muted"> · {fmtInt(queued)} waiting</span>}
+          </div>
+        ) : activity && queued > 0 ? (
+          <div className="enrich-banner__line">
+            <span className="spinner" />{activity.detail || `${fmtInt(queued)} queued to interpret`}
+          </div>
+        ) : running ? (
+          // Fallback for a server that does not send `activity` yet.
           <div className="enrich-banner__line">
             <span className="spinner" />
             Interpreting <span className="mono">{detail.file || running}</span>
@@ -338,12 +361,8 @@ export function EnrichBanner() {
             {queued > 0 ? ` · ${fmtInt(queued)} waiting` : ''}
           </div>
         ) : committing ? (
-          // The gap that used to keep the last file's name on screen. Merging a finished batch into
-          // the pool is O(the whole pool) — tens of seconds at 16 M events — and belongs to no single
-          // source, so it is named for what it is rather than blamed on a file that is already done.
           <div className="enrich-banner__line">
-            <span className="spinner" />
-            Merging interpreted sources into the pool
+            <span className="spinner" />Merging interpreted sources into the pool
             {queued > 0 ? ` · ${fmtInt(queued)} waiting` : ''}
           </div>
         ) : queued > 0 ? (

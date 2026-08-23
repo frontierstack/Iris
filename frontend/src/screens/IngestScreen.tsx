@@ -586,6 +586,16 @@ function JobRow({ job, pct }: { job: UploadJob; pct?: number }) {
    dropped the TWO LARGEST files (263 MB each of 589 MB), and the only trace was an aggregate count.
    A file absent from search is indistinguishable from a search that found nothing, so it gets a real
    warning here — named, sized, explained, with the remedy attached. */
+/** One label per reason. A skip's reason decides what the analyst should DO about it, so collapsing
+ *  them (as a two-way ternary did) is not a wording problem — it is the wrong instruction. */
+const SKIP_LABEL: Record<string, string> = {
+  budget: 'over budget',
+  memory: 'not enough memory',
+  unreadable: 'unreadable',
+  'parse-error': 'parse failed',
+  'not-parsed': 'not expanded',
+};
+
 function NotLoaded() {
   const c = useCase();
   const qc = useQueryClient();
@@ -609,6 +619,23 @@ function NotLoaded() {
   if (!skips.length) return null;
   const budget = c.data?.poolBudgetBytes ?? 0;
   const missing = skips.reduce((n, s) => n + s.size, 0);
+  // The explanation has to come from the reasons ACTUALLY present, not from the budget. It used to
+  // print "The workspace pool holds at most unlimited of log (IRIS_POOL_MAX_MB)" — a broken sentence
+  // naming an env var that had nothing to do with why the file was skipped. There is no cap by default
+  // (deliberately), so on the common path that line explained a limit that does not exist.
+  const kinds = new Set(skips.map((s) => s.reason));
+  const why: string[] = [];
+  if (kinds.has('memory')) {
+    why.push('this machine did not have the memory to hold them at the time — nothing is misconfigured, '
+      + 'the workspace is simply bigger than the box. Free memory, delete a source below, or give the '
+      + 'machine more RAM, then load it.');
+  }
+  if (kinds.has('budget') && budget) {
+    why.push(`the pool cap of ${fmtBytes(budget)} refused them — raise IRIS_POOL_MAX_MB or remove sources below.`);
+  }
+  if (kinds.has('unreadable')) why.push('their bytes could not be read from disk — this one is a file or permissions problem.');
+  if (kinds.has('not-parsed')) why.push('they are containers Iris only expands when attached to a case.');
+  if (kinds.has('parse-error')) why.push('the parser failed on them.');
 
   return (
     <section>
@@ -621,9 +648,7 @@ function NotLoaded() {
             </div>
             <div className="notloaded__sub">
               These files are staged on disk but were never parsed, so Search, Timeline, Anomalies and the graph
-              cannot see a single event from them. The workspace pool holds at most{' '}
-              <b>{budget ? fmtBytes(budget) : 'unlimited'}</b> of log ({budget ? 'raise ' : ''}<span className="mono">IRIS_POOL_MAX_MB</span>
-              {budget ? ', or free the pool by removing sources below' : ''}).
+              cannot see a single event from them.{why.length ? ` Why: ${why.join(' Also, ')}` : ''}
             </div>
           </div>
         </div>
@@ -632,9 +657,15 @@ function NotLoaded() {
             <div key={s.fileName} className="notloaded__row">
               <span className="cell-mono cell-bright ellipsis" title={s.fileName}>{s.displayName}</span>
               <span className="cell-mono num">{fmtBytes(s.size)}</span>
-              <span className="badge badge--warn">{s.reason === 'budget' ? 'over budget' : 'unreadable'}</span>
+              {/* Name the ACTUAL reason. This was a two-way ternary over a five-value enum, so every
+                  reason that was not 'budget' printed "unreadable" — including 'memory', which sent the
+                  analyst looking for a disk fault instead of freeing RAM. */}
+              <span className="badge badge--warn">{SKIP_LABEL[s.reason] ?? s.reason}</span>
               <span className="notloaded__why">{s.detail}</span>
-              {s.reason === 'budget' && (
+              {(s.reason === 'budget' || s.reason === 'memory') && (
+                // 'memory' is exactly the case that needs this and did not have it: the detail text
+                // said "free memory and load it from Sources" while offering no control to do so. The
+                // server re-checks live headroom and refuses with real numbers, so the button is safe.
                 <button className="btn btn--sm" disabled={load.isPending}
                   title="Parse it into the workspace anyway. Refused, with numbers, if the machine cannot hold it."
                   onClick={() => load.mutate(s.fileName)}>

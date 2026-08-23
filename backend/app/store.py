@@ -35,7 +35,7 @@ from . import config, enrich, metrics, pool_store
 from .detect import RULES, run_rules
 from .exclusions import EXCLUSIONS
 from .rules import RULES_STORE
-from .models import (Case, CaseEnrichment, CaseNote, CaseSetEntry, CaseSnapshot, EnrichCounts, Event,
+from .models import (Case, CaseEnrichment, CaseNote, CaseSetEntry, CaseSnapshot, EnrichActivity, EnrichCounts, Event,
                      ParseProgressInfo, PoolFileProgress, PoolProgress, PoolSkip, Posture, QueueItem,
                      Source, max_sev)
 from .normalize import to_iso   # the per-record normalization itself lives in parsers/parallel.py
@@ -2069,6 +2069,10 @@ class Store:
         if not sids:
             return lost
         incoming: list[Event] = [e for evs in by_source.values() for e in evs]
+        # Say what this is and how big it is BEFORE the first O(pool) stage. Everything below runs for
+        # minutes on a large workspace and used to be completely silent: the analyst saw "1 queued to
+        # interpret" for a 16.9 MB file and nothing about the 13.8 M-event merge it was queued behind.
+        enrich.MERGE.start(len(sids), len(self.events))
         # A source's raw events may still be sitting in the BULK BUFFER when phase 2 lands: the raw
         # phase appends into `_pending` during a library load and the enrichment worker can swap that
         # same source before `_flush_pending` runs. Filtering only `self.events` then left BOTH copies
@@ -2080,12 +2084,17 @@ class Store:
                 self._pending = [e for e in self._pending if e.sourceId not in sids]
         while True:
             base = self.events
+            enrich.MERGE.step("filtering", len(base))
             merged = [e for e in base if e.sourceId not in sids]
             merged.extend(incoming)
+            enrich.MERGE.step("sorting", len(merged))
             merged.sort(key=ts_key)
-            index = {e.id: i for i, e in enumerate(merged)}
+            enrich.MERGE.step("indexing", len(merged))
+            index = _build_index(merged)
+            enrich.MERGE.step("timestamps", len(merged))
             ts = _epochs(merged) if merged else np.zeros(0, dtype=np.float64)
             fired = sum(len(e.detections) for e in merged)
+            enrich.MERGE.step("curation", len(merged))
             with self.lock:
                 if self.events is not base:
                     continue
@@ -2124,6 +2133,7 @@ class Store:
         # ids just moved for a whole batch of sources: re-point any entry whose pointer no longer
         # matches its anchor. Cheap when nothing drifted — it walks the case set, not the pool.
         self._reanchor_case_set()
+        enrich.MERGE.finish()
         return lost
 
     @staticmethod
@@ -2984,11 +2994,55 @@ class Store:
         # move it; `error` means the parse failed and can be retried. Both need a person, which is a
         # different sentence from "work is in flight".
         needs = counts.error + (counts.raw if pending == 0 else 0)
-        return CaseEnrichment(counts=counts, running=running, pending=pending,
+        activity = self._enrich_activity(q, running, file_name, pct, eta, counts)
+        return CaseEnrichment(counts=counts, running=running, pending=pending, activity=activity,
                               outstanding=counts.raw + pending,
                               committing=bool(q.get("committing")),
                               runningFile=file_name, runningPct=pct, runningPhase=phase,
                               runningEtaSec=eta, needsAction=needs)
+
+    @staticmethod
+    def _enrich_activity(q: dict, running: str, file_name: str, pct, eta, counts) -> EnrichActivity:
+        """Turn the queue's phase into the sentence the analyst reads.
+
+        Every branch names WHAT is happening and, where the number exists, HOW BIG it is. The merge one
+        matters most: it is the longest thing here, it belongs to no single source, and saying "1 queued
+        to interpret" while it runs is how a working app reads as a hung one.
+        """
+        merge = enrich.MERGE.snapshot()
+        phase = str(q.get("phase") or "idle")
+        elapsed = int(q.get("phaseElapsedSec") or 0)
+        if merge:
+            n, ev = merge["sources"], merge["events"]
+            stage = merge.get("stage") or ""
+            return EnrichActivity(
+                kind="merging", elapsedSec=int(merge.get("elapsedSec") or 0),
+                sources=n, events=ev, stage=stage,
+                stageIndex=int(merge.get("stageIndex") or 0), stageCount=int(merge.get("stageCount") or 0),
+                detail=(f"Merging {n} interpreted source{'' if n == 1 else 's'} into the pool "
+                        f"({ev:,} events) — {stage}. This rebuilds the whole pool index and takes "
+                        f"minutes at this size; anything queued waits for it."))
+        if phase == "noWorker":
+            return EnrichActivity(kind="noWorker", elapsedSec=elapsed,
+                                  detail="Nothing is servicing the interpretation queue — these sources "
+                                         "stay raw until Iris is restarted. Their lines are still in the "
+                                         "pool and still searchable.")
+        if phase == "waitingForPool":
+            return EnrichActivity(kind="waitingForPool", elapsedSec=elapsed,
+                                  detail="Waiting for the library to finish loading before interpreting "
+                                         "anything — the two would otherwise compete for the machine.")
+        if running:
+            return EnrichActivity(kind="parsing", elapsedSec=elapsed, file=file_name or running,
+                                  pct=pct, etaSec=eta,
+                                  detail=f"Interpreting {file_name or running}"
+                                         + (f" — {pct:.0f}%" if isinstance(pct, (int, float)) else ""))
+        if counts.queued:
+            # Queued with no phase to explain it: the worker is between items. Say that rather than
+            # implying something is being read.
+            return EnrichActivity(kind="idle", elapsedSec=elapsed,
+                                  detail=f"{counts.queued} source{'' if counts.queued == 1 else 's'} "
+                                         "waiting for the interpretation worker.")
+        return EnrichActivity(kind="idle", elapsedSec=elapsed)
 
     # ---------------------------------------------------------------- case
     def case(self) -> Case:
@@ -3118,6 +3172,24 @@ def _iso_to_epoch(s: str) -> float:
             return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC).timestamp()
         except ValueError:
             return float("inf")
+
+
+def _build_index(events: list) -> dict:
+    """`{e.id: i}` over the whole pool.
+
+    This was briefly chunked with a `time.sleep(0)` between blocks, on the theory that a 13.8 M-iteration
+    Python loop starves every other thread and is why `/api/case` could not answer during a merge. That
+    theory is WRONG and the note is kept so it is not re-derived: CPython already releases the GIL every
+    `sys.getswitchinterval()` (5 ms by default) between bytecodes, so a long pure-Python loop is
+    preempted whether or not it yields, and the mutation test could not tell the two versions apart.
+
+    What actually made the merge unanswerable was memory pressure (the machine swapping) plus one core
+    saturated — and `merged.sort(key=...)`, which precomputes the keys in Python and then compares them
+    in C without releasing the GIL at all. That one is a genuine multi-second stall and no amount of
+    yielding elsewhere fixes it. The answer to "what is it waiting on?" is therefore to SAY so
+    (`enrich.MergeProgress`), not to pretend the wait can be chunked away.
+    """
+    return {e.id: i for i, e in enumerate(events)}
 
 
 def _epochs(events: list[Event]) -> np.ndarray:

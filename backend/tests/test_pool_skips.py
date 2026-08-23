@@ -247,3 +247,39 @@ def test_case_still_answers_while_a_skipped_file_is_in_the_plan() -> None:
     finally:
         with st.lock:
             st.pool_plan.pop("huge.log", None)
+
+
+def test_a_memory_skip_is_reported_as_memory_and_not_as_unreadable(c) -> None:
+    """The five reasons must reach the client distinctly — each one means a different fix.
+
+    'unreadable' says the bytes could not be read off disk, and an analyst reading it goes and checks
+    the file. 'memory' says the machine had no RAM for it, and the fix is to free some. Reporting the
+    second as the first is not a wording slip; it is the wrong instruction. (The UI collapsed them
+    because its own `PoolSkip.reason` type declared only two values — this pins the API half.)
+    """
+    STORE.note_pool_skip("x_big.pcap", "big.pcap", 1_933_574_144, "memory",
+                         "needs about 11962 MB of memory and this machine has 6856.0 MB free")
+    try:
+        rows = c.get("/api/case").json()["poolSkippedFiles"]
+        mine = [r for r in rows if r["fileName"] == "x_big.pcap"]
+        assert mine, "the skip was not reported at all"
+        row = mine[0]
+        assert row["reason"] == "memory", f"reason was flattened to {row['reason']!r}"
+        assert row["displayName"] == "big.pcap" and row["size"] == 1_933_574_144
+        assert "memory" in row["detail"]
+    finally:
+        STORE.clear_pool_skip("x_big.pcap")
+
+
+def test_every_skip_reason_survives_the_round_trip(c) -> None:
+    """No reason may be silently rewritten on its way to the client."""
+    reasons = ["budget", "memory", "unreadable", "parse-error", "not-parsed"]
+    for i, r in enumerate(reasons):
+        STORE.note_pool_skip(f"x_{i}.log", f"{r}.log", 100, r, f"detail for {r}")
+    try:
+        rows = {x["fileName"]: x for x in c.get("/api/case").json()["poolSkippedFiles"]}
+        got = [rows[f"x_{i}.log"]["reason"] for i in range(len(reasons))]
+        assert got == reasons
+    finally:
+        for i in range(len(reasons)):
+            STORE.clear_pool_skip(f"x_{i}.log")
