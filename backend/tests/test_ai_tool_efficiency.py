@@ -109,7 +109,13 @@ def test_include_refuses_an_unknown_part_with_the_real_list(client):
 
 
 def test_a_multi_event_read_fits_inside_one_tool_result(client):
-    """investigator._clip cuts from the END: an unclamped batch loses its LAST events entirely."""
+    """investigator._clip cuts from the END: an unclamped batch loses its LAST events entirely.
+
+    The shedding ladder has to CONVERGE, not merely try: the identity of 25 rows (ids, timestamps,
+    sources, file names, a 300-character msg each, and the JSON key names for all of them) is already
+    around 6 kB before one log line is included, so every optional part can be gone and the result can
+    still overflow. Its last step keeps only what is needed to cite a row and open it.
+    """
     ids = [e.id for e in STORE.events[:MAX_FETCH]]
     out = REGISTRY["get_events"].fn({"eventIds": ids, "include": "raw,fields,entities"}, ctx())
     assert out["returned"] == len(ids)
@@ -117,6 +123,8 @@ def test_a_multi_event_read_fits_inside_one_tool_result(client):
     assert len(body) <= TOOL_RESULT_CHARS, (
         f"a full {len(ids)}-event read is {len(body)} bytes and would be truncated at "
         f"{TOOL_RESULT_CHARS} — the last events would silently vanish")
+    # every row is still citable, whatever the ladder had to give up on the way
+    assert all(r.get("id") and r.get("ts") is not None for r in out["rows"])
 
 
 # ============================================================ one entity question, ONE call

@@ -7,8 +7,8 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from ..models import Rule, RuleInput, RuleTestInput, RuleTestResult
-from ..rules import RULES_STORE, RuleError, test_rule
+from ..models import Rule, RuleInput, RulePreviewResult, RuleTestInput, RuleTestResult
+from ..rules import RULES_STORE, RuleError, decorate, preview_rule, test_rule
 from ..store import STORE
 
 router = APIRouter(prefix="/rules", tags=["rules"])
@@ -50,6 +50,37 @@ def test_rule_endpoint(body: RuleTestInput) -> RuleTestResult:
         return RuleTestResult(**test_rule(events, body))
     except RuleError as exc:
         raise HTTPException(400, str(exc))
+
+
+@router.post("/preview", response_model=RulePreviewResult)
+def preview_rule_endpoint(body: RuleInput) -> RulePreviewResult:
+    """Dry-run a rule definition against the pool WITHOUT saving it.
+
+    Same body as POST /api/rules, and the same matcher underneath, so what this reports is what the rule
+    would do. Nothing is written, no event is tagged and the catalogue is untouched: the point is to be
+    able to try a rule before installing one, which otherwise means saving it, re-running the pass over
+    the whole pool, reading the damage and undoing it.
+
+    `trigger` comes back too — the generated, read-only sentence describing what the engine will actually
+    evaluate. An author who is about to save a rule should see the condition in the engine's words, not
+    only their own prose.
+    """
+    draft = _draft_rule(body)
+    with STORE.lock:
+        events = list(STORE.events)
+    out = preview_rule(events, draft)
+    return RulePreviewResult(**out, trigger=draft.logic or "", mechanism=draft.mechanism or "")
+
+
+def _draft_rule(body: RuleInput) -> Rule:
+    """An UNSAVED Rule from a RuleInput, decorated the way a saved one is (trigger + mechanism)."""
+    return decorate(Rule(id="preview", name=body.name or "preview", description=body.description or "",
+                         sev=body.sev, enabled=True, builtin=False,
+                         kind="conditions" if body.conditions else "regex",
+                         pattern=body.pattern, field=body.field or "any", flags=body.flags,
+                         sourceFilter=body.sourceFilter or "", conditions=list(body.conditions or []),
+                         combinator=body.combinator or "and", threshold=body.threshold,
+                         tags=list(body.tags or [])))
 
 
 @router.post("/suggest")

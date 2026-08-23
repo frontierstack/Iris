@@ -432,6 +432,30 @@ four separate pieces: an analyst-editable **description** (prose, matches nothin
 the engine actually evaluates), its **mechanism**, and **params** — every constant in the condition, editable and
 validated. Custom rules are a raw regex or a list of typed conditions with an optional threshold.
 
+#### Entity-graph rules
+Some findings cannot be phrased as "is this line suspicious?" — one address authenticating as fourteen
+different accounts is a property of the **shape** of the relationships, and every one of those lines is
+unremarkable on its own. Iris ships ten rules that read the entity graph instead, listed on **Anomalies →
+Graph findings**:
+
+| Rule | What it looks for |
+|---|---|
+| `SIGMA-GRAPH-0010` | one address, many accounts (spray, shared credentials, a jump box) |
+| `SIGMA-GRAPH-0014` | one account, many addresses |
+| `SIGMA-GRAPH-0018` | a host reaching many different public addresses |
+| `SIGMA-GRAPH-0022` | the same file or hash present on many hosts |
+| `SIGMA-GRAPH-0026` | an entity that appears across many log files — the pivot |
+| `SIGMA-GRAPH-0030` | a relationship that is almost entirely failures or denials |
+| `SIGMA-GRAPH-0034` | a domain answering with many addresses (fast flux) |
+| `SIGMA-GRAPH-0038` | one account touching many hosts (lateral movement) |
+| `SIGMA-GRAPH-0042` | a one-off account on a host everything else uses constantly |
+| `SIGMA-GRAPH-0046` | a well-connected entity that also fired detections |
+
+They are ordinary built-ins in the rule catalogue: switch one off, retune its thresholds, restore it.
+What differs is what they read and what they produce — a finding names the **entity** and links to the
+graph focused on it and to its events. They are computed from the entity graph, so the section says
+*waiting for the entity graph* until that is built rather than showing an empty list.
+
 ### 5. Entity graph
 Live force layout on a canvas. Drag nodes (toggle *Pin after drag*), drag empty space to pan, wheel to zoom,
 double-click / `⌂` / `0` fits, arrows pan (Shift = faster), `+`/`−` zoom.

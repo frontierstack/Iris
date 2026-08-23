@@ -657,7 +657,9 @@ export interface Rule {
    */
   logic?: string;
   /** how the rule decides. Drives the badge next to the trigger in the editor. */
-  mechanism?: 'regex' | 'fields' | 'threshold' | 'correlation';
+  /** 'graph' reads the ENTITY GRAPH rather than one event at a time (see GraphFinding): it tags no
+   *  event, so its `hits` is null until a graph roll-up has been computed — never 0. */
+  mechanism?: 'regex' | 'fields' | 'threshold' | 'correlation' | 'graph';
   /** the regexes it actually matches with — derived from the regex params / conditions, never hand-maintained */
   patterns?: RulePattern[];
   /** built-in only: every editable knob of the condition */
@@ -671,6 +673,9 @@ export type RuleInput = Omit<Rule, 'id' | 'createdAt' | 'updatedAt' | 'hits' | '
   };
 export interface RuleTestRequest { pattern: string; field: RuleField; flags?: RuleFlags; sourceFilter?: string }
 export interface RuleTestResult { hits: number; sample: Event[]; tookMs: number; error?: string }
+/** A dry run of a whole rule definition (POST /api/rules/preview) — nothing is saved and no event is
+ *  tagged. `trigger` is what the ENGINE would evaluate, in words; it is never the analyst's description. */
+export interface RulePreviewResult extends RuleTestResult { trigger: string; mechanism: string }
 export interface RuleSuggestRequest { prompt: string; examples?: string[] }
 export interface RuleSuggestResult { rule: Rule; rationale: string; source: 'ai' | 'heuristic' }
 export interface Anomaly {
@@ -681,6 +686,33 @@ export interface Anomaly {
  *  rules revision, in the background. While `status.state === 'building'` the list is empty on purpose —
  *  render the build state, because an empty anomaly list reads as "nothing fired". */
 export interface AnomaliesResponse { total: number; anomalies: Anomaly[]; status?: DerivedState }
+
+/* ───── Entity-graph findings (GET /api/graph/anomalies) ─────
+ * A whole class of detection cannot be phrased per event: one address authenticating as fourteen
+ * accounts is a property of the SHAPE of the relationships, and every one of those lines is
+ * unremarkable. These rules read the built graph and name the ENTITY, citing real event ids. */
+export interface GraphFinding {
+  ruleId: string; name: string; sev: Severity;
+  nodeId: string; nodeType: string; nodeValue: string;
+  /** one sentence, already in the analyst's terms */
+  summary: string;
+  /** the number the threshold was compared against, and what it counts */
+  metric: number; metricLabel: string;
+  /** neighbour node ids that make up the fan-out (capped) */
+  related: string[];
+  citedEventIds: string[];
+  first: string; last: string;
+}
+export interface GraphFindingsResponse {
+  findings: GraphFinding[];
+  /** graph rules that are switched on */
+  rules: number;
+  /** FALSE means the graph is not built, so nobody has looked. Render that state — an empty list would
+   *  say the graph is clean, which is a claim nothing has checked. */
+  evaluated: boolean;
+  status?: DerivedState;
+  tookMs: number;
+}
 
 /* ───── Search field facets (GET /api/events/fields) ───── */
 export interface FieldFacetValue { value: string; count: number }

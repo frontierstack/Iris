@@ -504,6 +504,9 @@ def _summarise(proto: str, src: str, dst: str, sport: int, dport: int, extra: st
     if extra:
         parts.append(extra)
     if payload is not None and len(payload):
+        # In fields as well as in the message: a rule about cleartext protocols has to tell a bare SYN
+        # from a packet actually carrying credentials, and "len=" inside a sentence is not a field.
+        fields["payload_len"] = str(len(payload))
         parts.append(f"len={len(payload)}")
     if app:
         parts.append("·")

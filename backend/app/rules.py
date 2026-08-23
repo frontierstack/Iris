@@ -38,9 +38,15 @@ SANDBOX_NOTE = ("evaluation deadlines are enforced inside the match" if _regex i
                 "the `regex` module is not installed: a runaway match cannot be interrupted, only reported")
 
 from . import config
-from .detect import (MAX_CONDITIONS, PARAMS as BUILTIN_PARAMS, RULES as BUILTIN_RULES, condition_pred,
+from .detect import (MAX_CONDITIONS, PARAMS as BUILTIN_PARAMS, all_builtin_rules, condition_pred,
                      condition_values, conditions_trigger, find_bursts, param_spec, parse_condition, parse_param,
                      regex_trigger)
+
+# Registers the ENTITY-GRAPH rules into the shipped catalogue (detect.EXTRA_RULES). Imported for the
+# side effect on purpose: the rules store is the one place that has to know about every built-in, and a
+# catalogue that depends on some other module having been imported first is a catalogue that is
+# sometimes short a dozen rules.
+from . import graph_rules  # noqa: F401
 from .models import (EMPTY_LIST, Detection, Event, Rule, RuleCondition, RuleFlags, RuleInput,
                      RuleParam, RulePattern, RuleTestInput, RuleThreshold, max_sev)
 
@@ -542,6 +548,49 @@ def test_rule(events: list[Event], body: RuleTestInput) -> dict[str, Any]:
     return {"hits": len(idx), "sample": sample, "tookMs": int((time.perf_counter() - t0) * 1000)}
 
 
+def preview_rule(events: list[Event], r: Rule) -> dict[str, Any]:
+    """What this rule WOULD flag, without saving it and without tagging a single event.
+
+    `test_rule` above answers the same question for a bare regex, which is what the rule drawer's live
+    box needs. This one takes a whole Rule — regex OR typed conditions OR conditions plus a windowed
+    threshold — and it exists because the alternative is worse in a specific way: an author (a person or
+    the assistant) who cannot try a rule has to SAVE it to find out what it does, and saving re-runs the
+    catalogue over the pool and stamps detections on the analyst's evidence. Undoing that is a second
+    full pass. A rule is cheap to imagine and expensive to install, so trying one must not cost an
+    install.
+
+    It deliberately builds the predicate through `conditions_matcher` / `compiled` — the SAME path
+    `apply_rule` uses — so a preview and the rule that follows it can never disagree. Anything unsafe is
+    refused here exactly as it would be at save time (ReDoS screen, condition validation, the sandbox
+    deadline); a timeout comes back as `error`, not as an exception, because "this pattern is too
+    expensive to run" is the answer the author needs.
+    """
+    t0 = time.perf_counter()
+    try:
+        if r.conditions:
+            pred = conditions_matcher(r)
+        else:
+            if not (r.pattern or "").strip():
+                raise RuleError("a rule needs either a pattern or at least one condition")
+            bad = screen_pattern(r.pattern or "")
+            if bad:
+                raise RuleError(bad)
+            pred = _matcher(compile_pattern(r.pattern or "", r.flags), r.field or "any", r.sourceFilter or "")
+    except RuleError as exc:
+        return {"hits": 0, "sample": [], "tookMs": 0, "error": str(exc)}
+    select = (lambda: RulesStore._threshold_hits(r, events, pred)) if (r.conditions and r.threshold) \
+        else (lambda: [i for i, e in enumerate(events) if pred(e)])
+    try:
+        idx = _run_with_timeout(select)
+    except RuleTimeout as exc:
+        return {"hits": 0, "sample": [], "tookMs": int((time.perf_counter() - t0) * 1000), "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - a preview must never take a request down
+        return {"hits": 0, "sample": [], "tookMs": int((time.perf_counter() - t0) * 1000),
+                "error": f"{type(exc).__name__}: {exc}"}
+    return {"hits": len(idx), "sample": [events[i] for i in idx[:20]],
+            "tookMs": int((time.perf_counter() - t0) * 1000)}
+
+
 # ------------------------------------------------------------------ persistence
 class RulesStore:
     def __init__(self) -> None:
@@ -645,7 +694,7 @@ class RulesStore:
             overrides = dict(self.builtin_overrides)
             removed = set(self.removed_builtins)
             disabled = set(self.disabled_builtins)
-        for br in BUILTIN_RULES:
+        for br in all_builtin_rules():
             is_removed = br.id in removed
             if is_removed and not include_removed:
                 continue
@@ -743,7 +792,7 @@ class RulesStore:
             return out
 
     def is_builtin(self, rid: str) -> bool:
-        return any(br.id == rid for br in BUILTIN_RULES)
+        return any(br.id == rid for br in all_builtin_rules())
 
     def enabled_custom(self) -> list[Rule]:
         return [r for r in self.custom_rules() if r.enabled]
@@ -780,7 +829,7 @@ class RulesStore:
         self.load()
         if not self.is_builtin(rid):
             raise KeyError(rid)
-        shipped = next(b for b in BUILTIN_RULES if b.id == rid)
+        shipped = next(b for b in all_builtin_rules() if b.id == rid)
         default_tags = [rid.split("-")[1].lower()] if "-" in rid else []
         ov: dict[str, Any] = {}
         name = (body.name or "").strip()
@@ -894,7 +943,7 @@ class RulesStore:
             self._compiled.clear()
             n_builtin = 0
             if scope == "all":
-                ids = {b.id for b in BUILTIN_RULES}
+                ids = {b.id for b in all_builtin_rules()}
                 n_builtin = len(ids - self.removed_builtins)
                 self.removed_builtins |= ids
         self.save()
@@ -1033,10 +1082,27 @@ class RulesStore:
         for e in events:
             for d in e.detections:
                 counts[d.id] = counts.get(d.id, 0) + 1
+        # A GRAPH rule tags no event, so `counts` has nothing to say about it and 0 would be a lie in the
+        # loudest possible place: "this rule has never fired". Its hits come from the graph findings
+        # roll-up when one has ALREADY been computed — never by building a graph to answer /api/rules —
+        # and stay None ("not evaluated") otherwise. None and 0 are different facts here.
+        graph_hits = _graph_hits()
         out = []
         for r in rules:
+            if r.mechanism == "graph":
+                out.append(r.model_copy(update={"hits": graph_hits.get(r.id), "error": self.errors.get(r.id) or r.error}))
+                continue
             out.append(r.model_copy(update={"hits": counts.get(r.id, 0), "error": self.errors.get(r.id) or r.error}))
         return out
+
+
+def _graph_hits() -> dict[str, Optional[int]]:
+    """Findings per graph rule, ONLY from an already-computed roll-up. Never builds anything."""
+    try:
+        from .graph_findings import peek_counts
+        return peek_counts()
+    except Exception:  # noqa: BLE001 - the rules screen must render even if the graph layer is unhappy
+        return {}
 
 
 RULES_STORE = RulesStore()

@@ -400,6 +400,37 @@ The contract that makes it safe to build a UI on:
 - **The two controls** are `POST /api/sources/{id}/enrich` and `POST /api/sources/{id}/enrich/skip`
   (above); the automatic behaviour is `settings.ingest.autoEnrich`.
 
+### POST /api/rules/preview
+Dry-run a rule definition against the pool **without saving it**. Body is the same `RuleInput` as
+`POST /api/rules`; nothing is written, no event is tagged and the catalogue is untouched.
+
+```
+-> { name, sev, pattern?, field?, sourceFilter?, conditions?[], combinator?, threshold? }
+<- { hits, sample: EventOut[], tookMs, error?, trigger, mechanism }
+```
+`trigger` is the generated, read-only sentence describing what the ENGINE would evaluate — never the
+analyst's description. The matcher is the same one `apply_rule` uses, so a preview and the rule that
+follows it cannot disagree. An unsafe pattern (ReDoS screen) or one that runs past the sandbox deadline
+comes back as `error`, not as `hits: 0`.
+
+### GET /api/graph/anomalies?scope=all|case&sev=&limit=
+Detections that read the **entity graph** rather than one event at a time (`app/graph_rules.py`).
+
+```
+<- { findings: GraphFinding[], rules: <graph rules enabled>, evaluated: bool,
+     status?: DerivedState, tookMs }
+GraphFinding = { ruleId, name, sev, nodeId, nodeType, nodeValue, summary, metric, metricLabel,
+                 related: string[], citedEventIds: string[], first, last }
+```
+* A finding names an **entity**, not an event: a fan-out is a property of a node, so these never appear
+  in `Event.detections` and never in `GET /api/anomalies`.
+* `citedEventIds` are real ids from that node's own events, resolved against the pool the graph was
+  built from — a finding that cannot be opened is an assertion.
+* **`evaluated: false` means the graph is not built and nobody has looked.** The endpoint NEVER builds
+  one. Render the state; an empty `findings` list under `evaluated: false` is not "the graph is clean".
+* The rules are ordinary built-ins on `GET /api/rules` with `mechanism: "graph"` — same toggle, same
+  parameter overrides, same restore. Their `hits` is `null` (not `0`) until a roll-up exists.
+
 ## Supported input types (parsers)
 Text logs: nginx/apache access, syslog, EVTX (.evtx binary + .xml export), CloudTrail JSON, k8s audit JSONL, generic JSON / JSONL / JSON arrays,
 CSV/TSV/pipe-delimited (header row auto-detected → field names), plaintext (timestamp regex). Documents: PDF (text extraction per page → lines),

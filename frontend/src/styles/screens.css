@@ -1816,6 +1816,38 @@
   gap: 2px;
   min-width: 0;
 }
+/* Graph findings. The SUMMARY column is the wide one on purpose: the row's job is to state the shape in
+   one sentence ("10.9.9.9 authenticated as 8 different accounts"), and a rule name plus a number cannot
+   say that. The two links are the point of the row, so they are dimmed, never hover-hidden. */
+.gfind-grid {
+  grid-template-columns:
+    minmax(88px, 0.7fr) minmax(160px, 1.2fr) minmax(280px, 3fr) minmax(58px, 0.4fr) minmax(150px, 0.9fr);
+}
+.gfind__what {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.gfind__what .cell-bright {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gfind__summary {
+  min-width: 0;
+  color: var(--text);
+  line-height: 1.45;
+}
+.gfind__go {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  opacity: 0.72;
+}
+.gfind-grid:hover .gfind__go {
+  opacity: 1;
+}
 .anom__name .cell-bright {
   overflow: hidden;
   text-overflow: ellipsis;

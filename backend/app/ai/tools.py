@@ -409,13 +409,65 @@ def _fit_rows(out: dict[str, Any], budget: int = ROW_BUDGET) -> dict[str, Any]:
                     r["fields"] = dict(list(r["fields"].items())[:n])
         return go
 
+    def thin_detections(n: int) -> Callable[[], None]:
+        """Keep the first n rule ids per row and say how many were dropped.
+
+        Last on the ladder on purpose — a detection id is the most citable thing on a row. It exists at
+        all because the catalogue GREW: an event that fires six rules carries six ids, and at 25 rows
+        that is the difference between fitting in one tool result and having the last rows silently cut
+        off the end. Never drop the key entirely: "no detections" and "detections not shown" are
+        different claims about the evidence.
+        """
+        def go() -> None:
+            for r in rows:
+                d = r.get("detections")
+                if isinstance(d, list) and len(d) > n:
+                    r["detections"] = d[:n]
+                    r["detectionsTruncated"] = len(d) - n
+        return go
+
+    def keep_identity() -> Callable[[], None]:
+        """The floor of the ladder: id, timestamp, severity, source and detections, nothing else.
+
+        A ladder that can RUN OUT is not a budget — and this one could, because the identity of 25 rows
+        (id, ts, sev, source, file, host, user, a 300-character msg, and the JSON key names for all of
+        them) is ~6 kB before a single log line is included. When it ran out, `_clip` took the overflow
+        off the END and the last rows vanished without a word, which is the failure this whole function
+        exists to prevent. So the last step gives up everything that is not needed to CITE the row and
+        go and read it. It is a real loss, and it is stated in `trimmed` — but a row the model can
+        still open beats a row it never saw.
+        """
+        keep = ("id", "ts", "sev", "source", "detections", "detectionsTruncated", "inCase")
+        def go() -> None:
+            for r in rows:
+                for k in [k for k in r if k not in keep]:
+                    r.pop(k, None)
+        return go
+
+    def clamp_msg(n: int) -> Callable[[], None]:
+        def go() -> None:
+            for r in rows:
+                if len(str(r.get("msg", ""))) > n:
+                    r["msg"] = str(r["msg"])[:n]
+        return go
+
+    # The last three steps exist because the BASE row grew: `msg` is capped at 300 characters and the
+    # detection list is as long as the number of rules that fired, so 25 rows of ordinary events can
+    # exceed the budget with raw, fields and entities ALREADY dropped — and then the ladder ran out and
+    # `_clip` cut the last rows off the end without a word, which is the exact failure this exists to
+    # prevent. `msg` is a normalized summary and goes before `raw`; a detection id is the most citable
+    # thing on a row, so it is trimmed last and never removed (an empty list would say "nothing fired").
     return _shed(out, budget, [
         ("shorter raw lines", clamp_raw(240)),
         ("fewer parsed fields", thin_fields(4)),
         ("entities dropped", drop("entities")),
         ("shorter raw lines again", clamp_raw(120)),
         ("parsed fields dropped", drop("fields")),
+        ("shorter messages", clamp_msg(160)),
         ("raw lines dropped", drop("raw")),
+        ("fewer detection ids per row", thin_detections(2)),
+        ("shorter messages again", clamp_msg(80)),
+        ("everything but the identity of each row", keep_identity()),
     ], "to keep every row you asked for inside one tool result. Ask for fewer ids, or a smaller limit, "
        "if you need the full text of each line.")
 
@@ -2039,6 +2091,86 @@ def _create_detection_rule(args: dict[str, Any], ctx: RunContext) -> dict[str, A
                         f"created detection rule {r.id} '{r.name}' ({cost['hits']} hit(s), {cost['reapplyMs']} ms)",
                         {"kind": "rule_created", "ruleId": r.id})
     return {"ok": True, "rule": _rule_row(r), **cost, "action": action}
+
+
+@tool("preview_detection_rule",
+      "DRY-RUN a rule definition against the whole pool WITHOUT saving it: how many events it would "
+      "flag, up to 20 of them, and the trigger sentence describing what the engine would actually "
+      "evaluate. Same arguments as create_detection_rule. Call this BEFORE creating a rule — saving one "
+      "re-runs the catalogue over the pool and stamps detections on the analyst's evidence, so a rule "
+      "that turns out to match a million lines (or none) is expensive to install and expensive to undo. "
+      "A pattern that is unsafe or too slow comes back as `error` rather than being run.",
+      {"name": {"type": "string", "description": "only used to label the preview"},
+       "pattern": {"type": "string", "description": "regular expression (regex rules)"},
+       "field": {"type": "string", "description": "any|msg|raw|host|user|source|file (default any)"},
+       "sourceFilter": {"type": "string", "description": "only events whose source/file contains this"},
+       "conditions": {"type": "array", "description": "typed conditions [{field, op, value}]",
+                      "items": {"type": "object", "properties": {"field": {"type": "string"},
+                                                                 "op": {"type": "string"},
+                                                                 "value": {"type": "string"}}}},
+       "combinator": {"type": "string", "enum": ["and", "or"]},
+       "threshold": {"type": "object", "description": "{count, window (seconds), groupBy}",
+                     "properties": {"count": {"type": "integer"}, "window": {"type": "integer"},
+                                    "groupBy": {"type": "string"}}},
+       "sev": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]}},
+      [])
+def _preview_detection_rule(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
+    from fastapi import HTTPException
+    from ..routers.rules import preview_rule_endpoint
+    if not _s(args.get("pattern"), 2000).strip() and not (args.get("conditions") or []):
+        raise ToolError("a preview needs either a `pattern` (regex) or at least one entry in `conditions`")
+    body = _rule_input({**args, "name": _s(args.get("name"), 120).strip() or "preview"})
+    try:
+        res = call_route(preview_rule_endpoint, body=body)
+    except HTTPException as exc:
+        raise ToolError(f"that rule definition is not valid: {exc.detail}")
+    # `sample` is a list of EventOut; _row takes the API row shape, which is what model_dump gives it.
+    rows = [_row(e.model_dump(), {"raw"}, 200, 0) for e in res.sample[:10]]
+    out: dict[str, Any] = {"hits": res.hits, "tookMs": res.tookMs, "trigger": res.trigger,
+                           "mechanism": res.mechanism, "sample": rows, "saved": False}
+    if res.error:
+        out["error"] = res.error
+    # A rule that matches nothing and a rule that matches everything are both wrong, and neither is
+    # obvious from a number alone once the pool is large. Say which one this is.
+    total = len(_store().events)
+    if total:
+        out["poolEvents"] = total
+        out["sharePercent"] = round(res.hits * 100.0 / total, 3)
+        if res.hits == 0:
+            out["note"] = ("this rule matches NOTHING in the pool as it stands. That may be correct for a "
+                           "rule meant to catch something that has not happened yet — say so if it is.")
+        elif res.hits * 20 >= total:
+            out["note"] = ("this matches more than 5% of every event in the workspace. A rule that fires "
+                           "on that share of the evidence is a label, not a detection.")
+    return out
+
+
+@tool("list_graph_findings",
+      "Detections that read the ENTITY GRAPH instead of one line at a time: one address authenticating "
+      "as many accounts, one account used from many addresses, a hash present on many hosts, a name "
+      "resolving to many addresses, a relationship that is almost all failures, an entity that spans "
+      "many log files. Each finding names the ENTITY and cites real event ids. These findings never "
+      "appear in list_detections — that tool reads Event.detections, and a fan-out is a property of a "
+      "node, not of any one of its events.",
+      {"scope": {"type": "string", "enum": ["all", "case"], "description": "whole pool (default) or the case set"},
+       "sev": {"type": "string", "description": "comma-separated severities to keep"},
+       "limit": {"type": "integer", "description": "findings to return, 1-100 (default 30)"}})
+def _list_graph_findings(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
+    from .. import graph_findings
+    scope = "case" if _s(args.get("scope"), 8).strip().lower() == "case" else "all"
+    limit = max(1, min(100, int(args.get("limit") or 30)))
+    want = {x.strip().lower() for x in _s(args.get("sev"), 80).split(",") if x.strip()}
+    # The graph is the expensive part and it may still be building. _await_derived is the same bounded
+    # wait every other graph tool takes: it ends, and it refuses with what is still building rather than
+    # answering [] — an empty list here would be read as "the graph is clean", which nothing checked.
+    store = _store()
+    _await_derived(ctx, "graph", lambda: store.graph_v2_ready(scope),
+                   lambda: store.graph_status(scope), "list_graph_findings")
+    rows = graph_findings.get(scope)
+    if want:
+        rows = [f for f in rows if f.sev in want]
+    return {"total": len(rows), "scope": scope,
+            "findings": [f.as_dict() for f in rows[:limit]]}
 
 
 @tool("update_detection_rule",

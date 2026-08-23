@@ -918,7 +918,10 @@ class Rule(BaseModel):
     logic: Optional[str] = None  # the TRIGGER - the exact condition the engine evaluates. Read-only: for a built-in it
                                  # is Python, for a custom rule it is generated from the pattern/conditions. Distinct
                                  # from `description`, which is analyst prose and matches nothing.
-    mechanism: Optional[Literal["regex", "fields", "threshold", "correlation"]] = None  # how it decides
+    # 'graph' is a rule that reads the ENTITY GRAPH rather than one event at a time (app/graph_rules.py):
+    # it tags no event and its hits are findings, so `hits` is None rather than 0 when nothing has
+    # evaluated it yet. See GraphFinding.
+    mechanism: Optional[Literal["regex", "fields", "threshold", "correlation", "graph"]] = None  # how it decides
     patterns: list[RulePattern] = Field(default_factory=list)  # the regexes it uses (derived, never maintained by hand)
     params: list[RuleParam] = Field(default_factory=list)  # built-in only: the editable knobs of its condition
 
@@ -963,6 +966,49 @@ class RuleTestResult(BaseModel):
     sample: list[EventOut]
     tookMs: int
     error: Optional[str] = None
+
+
+class RulePreviewResult(RuleTestResult):
+    """A dry run of a whole rule definition (POST /api/rules/preview).
+
+    Extends the regex test with the two derived things an author needs before saving: `trigger` is what
+    the ENGINE will evaluate, in words, and `mechanism` is how it decides. Neither is the analyst's
+    description, which matches nothing.
+    """
+    trigger: str = ""
+    mechanism: str = ""
+
+
+class GraphFindingOut(BaseModel):
+    """One hit from a graph rule (app/graph_rules.py).
+
+    It names an ENTITY, not an event, because that is what the finding is about: a fan-out is a property
+    of the node. `citedEventIds` are real ids from that node's own events so the claim can be opened —
+    the same rule every AI-written artefact in this app follows.
+    """
+    ruleId: str
+    name: str
+    sev: Severity
+    nodeId: str
+    nodeType: str
+    nodeValue: str
+    summary: str
+    metric: int
+    metricLabel: str
+    related: list[str] = Field(default_factory=list)
+    citedEventIds: list[str] = Field(default_factory=list)
+    first: str = ""
+    last: str = ""
+
+
+class GraphFindings(BaseModel):
+    findings: list[GraphFindingOut] = Field(default_factory=list)
+    rules: int = 0                      # graph rules that were evaluated (enabled ones)
+    # None while the graph is still building - NOT an empty list. "we have not looked" and "nothing
+    # matched" are different answers and the screen says which.
+    evaluated: bool = False
+    status: Optional[dict] = None
+    tookMs: int = 0
 
 
 class Anomaly(BaseModel):

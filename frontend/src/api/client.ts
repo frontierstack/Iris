@@ -5,7 +5,7 @@ import type {
 } from './types';
 import type { FieldFacetsQuery, FieldFacetsResponse, JobsResponse, RawLogPage, UploadJob } from './types';
 import type { AiInvestigateRequest, AiRun, AiRunEvent, AiThread, AiToolsResponse, AiUndoResult, IocMarkers } from './types';
-import type { AuthStatus, McpStatus } from './types';
+import type { AuthStatus, GraphFindingsResponse, McpStatus, RulePreviewResult } from './types';
 
 export class ApiError extends Error {
   status: number;
@@ -308,6 +308,18 @@ export const api = {
   restoreDefaultRules: () => request<{ ok: true; restored: number }>('/api/rules/restore-defaults', json('POST')),
   testRule: (body: RuleTestRequest, signal?: AbortSignal) => request<RuleTestResult>('/api/rules/test', { ...json('POST', body), signal }),
   suggestRule: (body: RuleSuggestRequest) => request<RuleSuggestResult>('/api/rules/suggest', json('POST', body)),
+  /** Dry-run a whole rule definition: what it WOULD flag, without saving it or tagging any event. */
+  previewRule: (body: RuleInput, signal?: AbortSignal) =>
+    request<RulePreviewResult>('/api/rules/preview', { ...json('POST', body), signal }),
+  /** Detections that read the entity graph (fan-out, pivots, failure-heavy relationships). */
+  graphAnomalies: (q: { scope?: 'all' | 'case'; sev?: Severity[]; limit?: number } = {}) => {
+    const p = new URLSearchParams();
+    if (q.scope) p.set('scope', q.scope);
+    if (q.sev?.length) p.set('sev', q.sev.join(','));
+    if (q.limit) p.set('limit', String(q.limit));
+    const qs = p.toString();
+    return request<GraphFindingsResponse>(`/api/graph/anomalies${qs ? `?${qs}` : ''}`);
+  },
   anomalies: (q: { sev?: Severity[]; limit?: number } = {}) => {
     const p = new URLSearchParams();
     if (q.sev?.length) p.set('sev', q.sev.join(','));

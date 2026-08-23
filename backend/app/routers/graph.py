@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from ..ai.graph_review import review_graph
 from ..graph import DEFAULT_LIMIT, NODE_TYPES
-from ..models import Entity, GraphEdge, GraphLink, GraphNode, GraphV2
+from ..models import Entity, GraphEdge, GraphFindingOut, GraphFindings, GraphLink, GraphNode, GraphV2
 from ..store import STORE
 
 router = APIRouter(prefix="/graph", tags=["graph"])
@@ -144,6 +144,37 @@ def graph(scope: str = Query("all", pattern="^(all|case)$"),
              if e.source in node_ids and e.target in node_ids and not (e.id in seen or seen.add(e.id))]
     stats = {**stats, "edges": len(edges), "status": status}
     return GraphV2(nodes=nodes, edges=edges, stats=stats)
+
+
+@router.get("/anomalies", response_model=GraphFindings)
+def graph_anomalies(scope: str = Query("all", pattern="^(all|case)$"),
+                    sev: str = "", limit: int = Query(200, ge=1, le=1000)) -> GraphFindings:
+    """Detections that read the ENTITY GRAPH: fan-out, pivots, failure-heavy relationships.
+
+    A whole class of finding cannot be phrased as "is this line suspicious?" — one address authenticating
+    as fourteen accounts is a property of the SHAPE of the relationships, and every one of those lines is
+    unremarkable on its own. `app/graph_rules.py` holds the catalogue; they are ordinary built-ins on the
+    rules screen (toggle, tune, restore) and differ only in what they read and what they produce.
+
+    NEVER BUILDS THE GRAPH. If one is not current this returns `evaluated: false` with the graph's own
+    build status, and the screen says "waiting for the entity graph" — an empty list would say the graph
+    is clean, which is a claim nothing has checked. Registered BEFORE /graph/{name:path} on purpose:
+    that catch-all would otherwise swallow this path and answer with an Entity named "anomalies".
+    """
+    from .. import graph_findings
+
+    rows, status = graph_findings.ready(scope)
+    from ..graph_rules import GRAPH_RULES
+    from ..rules import RULES_STORE
+    off = RULES_STORE.detection_disabled()
+    active = sum(1 for r in GRAPH_RULES if r.id not in off)
+    if rows is None:
+        return GraphFindings(findings=[], rules=active, evaluated=False, status=status)
+    want = {x.strip().lower() for x in sev.split(",") if x.strip()}
+    if want:
+        rows = [f for f in rows if f.sev in want]
+    return GraphFindings(findings=[GraphFindingOut(**f.as_dict()) for f in rows[:limit]], rules=active,
+                         evaluated=True, status=status, tookMs=int(status.get("buildMs") or 0))
 
 
 @router.get("/node/{node_id:path}")

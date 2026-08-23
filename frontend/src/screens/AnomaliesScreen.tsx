@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
-import { SEVERITIES, type Anomaly, type Event, type Rule, type RuleCondition, type RuleField, type RuleInput, type RuleOp, type RuleParamKind, type RuleSuggestResult, type RuleTestResult, type Severity } from '../api/types';
+import { SEVERITIES, type Anomaly, type Event, type GraphFinding, type Rule, type RuleCondition, type RuleField, type RuleInput, type RuleOp, type RuleParamKind, type RuleSuggestResult, type RuleTestResult, type Severity } from '../api/types';
 import { DerivedPauseActions } from '../components/Enrichment';
 import { Icon } from '../components/icons';
 import { BuildingState, ConfirmDialog, Drawer, EmptyState, ErrorState, SectionHead, SevTag, SkeletonRows, Toggle } from '../components/ui';
@@ -371,6 +371,7 @@ const MECHANISM: Record<NonNullable<Rule['mechanism']>, { label: string; detail:
   fields: { label: 'field match', detail: 'It fires when specific parsed fields hold specific values — an exact comparison, no pattern involved.' },
   threshold: { label: 'threshold + time window', detail: 'It counts matching events inside a sliding time window and fires when the count crosses the threshold.' },
   correlation: { label: 'cross-event correlation', detail: 'It joins this event to something another rule already flagged, so it depends on that rule still being enabled.' },
+  graph: { label: 'entity graph', detail: 'It reads the entity graph — how many different accounts, addresses or hosts one entity is linked to — rather than any single event. It tags no event: its hits are findings, listed under Graph findings above.' },
 };
 
 /** One (field, operator, value) row of the condition builder. */
@@ -1139,10 +1140,121 @@ function RulesSection() {
   );
 }
 
+/* ───────────────────────── Entity-graph findings ─────────────────────────
+ * A whole class of detection cannot be phrased per event: "this address authenticated as fourteen
+ * different accounts" is a property of the SHAPE of the relationships, and every one of those lines is
+ * unremarkable on its own. So these rows name an ENTITY rather than a rule-with-hits, and every one
+ * carries the way through to the thing it is about: the graph, focused on that node, and the events it
+ * was derived from. A finding you cannot open is an assertion. */
+function GraphFindingRow({ f }: { f: GraphFinding }) {
+  const q = `entity:"${f.nodeValue.replace(/"/g, '\\"')}"`;
+  return (
+    <div className="table__row table__row--sev gfind-grid" style={{ ['--row-sev' as string]: sevVar(f.sev) }}>
+      <div className="sev-cell"><SevTag sev={f.sev} /></div>
+      <div className="gfind__what">
+        <span className="cell-bright">{f.name}</span>
+        <span className="cell-mono cell-dim" style={{ fontSize: 'var(--fs-xs)' }}>{f.ruleId}</span>
+      </div>
+      <div className="gfind__summary">
+        <span className="chip chip--mono chip--static">{f.nodeType}</span>{' '}
+        {f.summary}
+      </div>
+      <div className="cell-mono num" title={f.metricLabel}>{fmtInt(f.metric)}</div>
+      <div className="gfind__go">
+        <Link className="btn btn--sm btn--ghost" to={`/graph?focus=${encodeURIComponent(f.nodeId)}`}
+          title="Open the entity graph focused on this node">Graph</Link>
+        <Link className="btn btn--sm btn--ghost" to={`/search?q=${encodeURIComponent(q)}`}
+          title="Every event this entity appears in">Events</Link>
+      </div>
+    </div>
+  );
+}
+
+function GraphFindingsSection() {
+  const [sev, setSev] = useState<Severity[]>([]);
+  const q = useQuery({
+    queryKey: ['graph-anomalies'],
+    queryFn: () => api.graphAnomalies({ limit: 200 }),
+    // Only while the graph is still being built. A finding list is derived from a structure that is
+    // itself cached per store version, so polling a ready one is a request that can never say anything
+    // new — and the sidebar polling /api/graph is what started a six-worker extraction every few seconds.
+    refetchInterval: (query) => (query.state.data && !query.state.data.evaluated ? 3000 : false),
+  });
+  const rows = useMemo(() => {
+    const all = q.data?.findings ?? [];
+    return sev.length ? all.filter((f) => sev.includes(f.sev)) : all;
+  }, [q.data, sev]);
+  const counts = useMemo(() => {
+    const m: Partial<Record<Severity, number>> = {};
+    for (const f of q.data?.findings ?? []) m[f.sev] = (m[f.sev] ?? 0) + 1;
+    return m;
+  }, [q.data]);
+
+  return (
+    <section>
+      <SectionHead
+        eyebrow="02 · Entity graph"
+        title={<>Graph findings {q.data?.evaluated && <span className="sec__count">{q.data.findings.length}</span>}</>}
+        hint={
+          <>
+            Detections that read the entity graph rather than one line at a time — fan-out, pivots and
+            failure-heavy relationships. {q.data ? `${q.data.rules} graph rule${q.data.rules === 1 ? '' : 's'} enabled` : ''}
+            {' '}· tune them in the rule catalogue below.
+          </>
+        }
+      />
+      {q.isError && <ErrorState error={q.error} onRetry={() => void q.refetch()} />}
+      {q.isLoading && <SkeletonRows n={3} />}
+      {/* NOT built is not the same as nothing found, and the screen must never render the first as the
+          second: an empty list under a heading reads as "your graph is clean", which nothing checked. */}
+      {q.data && !q.data.evaluated && (
+        <>
+          <BuildingState what="entity graph" status={q.data.status} />
+          <DerivedPauseActions />
+        </>
+      )}
+      {q.data?.evaluated && q.data.findings.length === 0 && (
+        <EmptyState
+          icon={<Icon.Graph />}
+          title="No graph findings"
+          body="Every enabled graph rule ran against the current entity graph and none of them matched. Their thresholds are editable in the rule catalogue below."
+        />
+      )}
+      {q.data?.evaluated && q.data.findings.length > 0 && (
+        <>
+          <div className="anom__toolbar">
+            <div className="chip-row">
+              <span className="chip-row__label">Severity</span>
+              {SEVERITIES.map((s) => {
+                const n = counts[s] ?? 0;
+                return (
+                  <button key={s} type="button" disabled={n === 0}
+                    className={cx('chip', sev.includes(s) && 'chip--on')}
+                    onClick={() => setSev((cur) => (cur.includes(s) ? cur.filter((x) => x !== s) : [...cur, s]))}>
+                    {s}<span className="chip__count">{n}</span>
+                  </button>
+                );
+              })}
+              {sev.length > 0 && <button className="linklike" onClick={() => setSev([])}>clear</button>}
+            </div>
+          </div>
+          <div className="table">
+            <div className="table__head gfind-grid">
+              <div>Sev</div><div>Rule</div><div>What the graph shows</div><div className="num">Size</div><div />
+            </div>
+            {rows.map((f) => <GraphFindingRow key={`${f.ruleId}|${f.nodeId}`} f={f} />)}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
 export function AnomaliesScreen() {
   return (
     <div className="page anomalies">
       <AnomaliesSection />
+      <GraphFindingsSection />
       <RulesSection />
     </div>
   );

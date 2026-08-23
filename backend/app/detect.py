@@ -275,6 +275,230 @@ R = {
         trigger="Counts firewall events with action deny, drop, reject or block, grouped by src. Fires on a 60-second "
                 "window holding 50 or more.",
         mechanism="threshold"),
+    # ---------------------------------------------------------------- web (continued)
+    "WEB-0071": Rule(
+        "SIGMA-WEB-0071", "Forced browsing - 403 burst", "medium",
+        description="One source is being refused at volume. Someone is walking a wordlist through the site looking "
+                    "for a page the access rules forgot.",
+        trigger="Counts nginx events whose http.status is 403, grouped by src_ip. Fires on a 60-second window holding "
+                "30 or more.",
+        mechanism="threshold"),
+    "WEB-0075": Rule(
+        "SIGMA-WEB-0075", "Webshell path requested", "high",
+        description="The request names a script that only an attacker asks for - a dropped shell, or a probe for one "
+                    "somebody else dropped. A hit on a path that EXISTS is a compromise, not a scan.",
+        trigger="The http.path field matches the webshell regex (known shell names, or a script taking a command "
+                "parameter such as cmd=, exec= or eval=).",
+        mechanism="regex"),
+    "WEB-0079": Rule(
+        "SIGMA-WEB-0079", "JNDI / Log4Shell injection attempt", "critical",
+        description="A ${jndi:...} lookup sent to a server. If anything downstream logs it through a vulnerable Log4j "
+                    "that string is remote code execution, not a request.",
+        trigger="The request path, the user-agent or the raw line matches the JNDI regex.",
+        mechanism="regex"),
+    "WEB-0084": Rule(
+        "SIGMA-WEB-0084", "Oversized request path", "low",
+        description="A request path far longer than anything the application generates. Usually an encoded payload or "
+                    "an overflow attempt hiding in the URL.",
+        trigger="The length of http.path is at or above the length threshold.",
+        mechanism="fields"),
+    # ---------------------------------------------------------------- identity
+    "AUTH-0230": Rule(
+        "SIGMA-AUTH-0230", "Successful sign-in outside business hours", "low",
+        description="An interactive sign-in at an hour nobody here works. Weak on its own; next to anything else in a "
+                    "timeline it is what says the session was not the account owner's.",
+        trigger="A successful Windows 4624 interactive logon (LogonType 2, 10 or 11) or a CloudTrail ConsoleLogin "
+                "success whose UTC hour falls outside the business window.",
+        mechanism="fields"),
+    # ---------------------------------------------------------------- Windows (continued)
+    "WIN-0160": Rule(
+        "SIGMA-WIN-0160", "Endpoint protection event", "high",
+        description="Defender reported malware, or its real-time protection was changed. Both matter: the first names "
+                    "what was found, the second is usually what an attacker does so the first never happens.",
+        trigger="A Windows event whose EventID is one of the Defender ids (1116 malware detected, 1117 action taken, "
+                "5001 real-time protection disabled, 5007 configuration changed).",
+        mechanism="fields"),
+    "WIN-0170": Rule(
+        "SIGMA-WIN-0170", "Password spray - many accounts from one source", "high",
+        description="One source failing against MANY DIFFERENT accounts is spraying a single password across the "
+                    "directory. A per-account lockout never sees it, which is the whole point of the technique.",
+        trigger="Counts DISTINCT TargetUserName values in 4625 events grouped by IpAddress. Fires when one source "
+                "reaches the distinct-account threshold inside the window.",
+        mechanism="threshold"),
+    "WIN-0175": Rule(
+        "SIGMA-WIN-0175", "Service installed", "high",
+        description="A new Windows service. It starts on boot as SYSTEM, which is why it is a favourite place to keep "
+                    "access - and why PsExec-style lateral movement leaves one behind.",
+        trigger="A Windows event whose EventID is 7045 (System log) or 4697 (Security log).",
+        mechanism="fields"),
+    "WIN-0180": Rule(
+        "SIGMA-WIN-0180", "Scheduled task created", "medium",
+        description="A scheduled task runs code later, on a timer, with nobody logged in. Persistence that survives a "
+                    "reboot and a password reset.",
+        trigger="A Windows event whose EventID is 4698 or 106 (TaskScheduler log).",
+        mechanism="fields"),
+    "WIN-0185": Rule(
+        "SIGMA-WIN-0185", "Backup and recovery destroyed", "critical",
+        description="Shadow copies deleted, the backup catalogue wiped, or recovery switched off. This is the step "
+                    "immediately before ransomware encrypts, and it is what makes the encryption stick.",
+        trigger="A 4688 process creation whose CommandLine matches the recovery-destruction regex (vssadmin delete "
+                "shadows, wbadmin delete, bcdedit recoveryenabled no, wmic shadowcopy delete).",
+        mechanism="regex"),
+    "WIN-0190": Rule(
+        "SIGMA-WIN-0190", "Kerberoasting - RC4 service tickets", "high",
+        description="Service tickets requested in bulk with the weak RC4 cipher - which is what an attacker asks for, "
+                    "because those tickets crack offline into service account passwords.",
+        trigger="Counts 4769 events whose TicketEncryptionType is 0x17, grouped by the requesting account. Fires on a "
+                "10-minute window holding 10 or more.",
+        mechanism="threshold"),
+    # ---------------------------------------------------------------- Linux (continued)
+    "LNX-0060": Rule(
+        "SIGMA-LNX-0060", "Reverse shell command", "critical",
+        description="A command whose only purpose is to hand a shell to a remote listener. There is no legitimate "
+                    "reason for this string to appear in a production log.",
+        trigger="The raw line matches the reverse-shell regex (/dev/tcp redirection, nc -e, socat EXEC, a python or "
+                "perl socket one-liner).",
+        mechanism="regex"),
+    "LNX-0065": Rule(
+        "SIGMA-LNX-0065", "Cron or systemd persistence", "high",
+        description="A scheduled job or a service unit was written. Like a scheduled task on Windows, it runs code "
+                    "after everyone has gone home and survives the reboot.",
+        trigger="The raw line matches the persistence regex (a unit file under /etc/systemd/system, a job under "
+                "/etc/cron.d or /var/spool/cron, a crontab edit, or systemctl enable), or the message of a "
+                "scheduler program matches it.",
+        mechanism="regex"),
+    "LNX-0070": Rule(
+        "SIGMA-LNX-0070", "SUID bit set on a binary", "high",
+        description="A binary was made to run as its owner rather than its caller. Set on a shell or an interpreter, "
+                    "that is a root backdoor anyone on the box can use.",
+        trigger="The raw line matches the SUID regex (chmod u+s / g+s, or a 4xxx / 2xxx octal mode).",
+        mechanism="regex"),
+    "LNX-0075": Rule(
+        "SIGMA-LNX-0075", "Kernel module loaded", "medium",
+        description="Code loaded into the kernel. A rootkit lives here, below everything that would otherwise report "
+                    "it - including the tooling looking for it.",
+        trigger="syslog program is insmod, modprobe or kextload, or the raw line matches the kernel-module regex.",
+        mechanism="regex"),
+    # ---------------------------------------------------------------- AWS (continued)
+    "AWS-0080": Rule(
+        "SIGMA-AWS-0080", "S3 bucket opened to the world", "critical",
+        description="Object storage made readable by anyone. Whatever is in that bucket is public from this moment, "
+                    "and stays public until somebody notices.",
+        trigger="CloudTrail eventName is one of PutBucketAcl, PutBucketPolicy, PutBucketWebsite or "
+                "DeletePublicAccessBlock AND the raw event body contains a public-principal marker.",
+        mechanism="fields"),
+    "AWS-0085": Rule(
+        "SIGMA-AWS-0085", "Secret retrieval burst", "high",
+        description="One identity pulling secrets in bulk. That is credential harvesting whether or not the identity "
+                    "is allowed to do it - normal use fetches a secret, not the vault.",
+        trigger="Counts CloudTrail events whose eventName is GetSecretValue, GetParameter, GetParameters or Decrypt, "
+                "grouped by user. Fires on a 5-minute window holding 20 or more.",
+        mechanism="threshold"),
+    "AWS-0090": Rule(
+        "SIGMA-AWS-0090", "Snapshot or image shared outside the account", "critical",
+        description="A disk image was shared with another account or made public. It is a copy of the data that "
+                    "leaves no trace in any data-plane log - exfiltration through the control plane.",
+        trigger="CloudTrail eventName is ModifySnapshotAttribute, ModifyImageAttribute or ModifyDBSnapshotAttribute "
+                "and the raw body contains a sharing marker.",
+        mechanism="fields"),
+    "AWS-0095": Rule(
+        "SIGMA-AWS-0095", "Security service disabled", "critical",
+        description="Detection itself was switched off - GuardDuty, Config, Security Hub or Macie. Anti-forensics "
+                    "against the account's own alarms, and usually adjacent to whatever came next.",
+        trigger="CloudTrail eventName is one of DeleteDetector, UpdateDetector, StopMonitoringMembers, "
+                "DeleteConfigurationRecorder, StopConfigurationRecorder, DisableSecurityHub or DisableMacie.",
+        mechanism="fields"),
+    # ---------------------------------------------------------------- Kubernetes (continued)
+    "K8S-0030": Rule(
+        "SIGMA-K8S-0030", "cluster-admin binding created", "critical",
+        description="Someone was granted the cluster's highest role. From here every namespace, every secret and "
+                    "every node is reachable, and the binding outlives the session that made it.",
+        trigger="resource is clusterrolebindings or rolebindings, verb is create or update, and the raw request names "
+                "cluster-admin.",
+        mechanism="fields"),
+    "K8S-0035": Rule(
+        "SIGMA-K8S-0035", "Anonymous or unauthenticated API access", "high",
+        description="The API server answered a request that carried no identity. Anything it returned went to whoever "
+                    "could reach the port.",
+        trigger="The audit event's user is system:anonymous, or the raw request names system:unauthenticated.",
+        mechanism="fields"),
+    # ---------------------------------------------------------------- mail
+    "MAIL-0010": Rule(
+        "SIGMA-MAIL-0010", "Sender authentication failed", "medium",
+        description="The message failed the checks that prove it came from the domain it claims. Not proof of "
+                    "phishing on its own, but every phish that spoofs a domain fails one of these.",
+        trigger="An e-mail event whose spf, dkim or dmarc field holds a failure verdict (fail, softfail, none, "
+                "permerror, temperror).",
+        mechanism="fields"),
+    "MAIL-0014": Rule(
+        "SIGMA-MAIL-0014", "Executable or macro attachment", "high",
+        description="An attachment that can run code the moment it is opened. This is the delivery step of most "
+                    "intrusions that start with mail.",
+        trigger="An e-mail event whose attachment names match the dangerous-attachment regex.",
+        mechanism="regex"),
+    # ---------------------------------------------------------------- packet captures
+    "PCAP-0010": Rule(
+        "SIGMA-PCAP-0010", "DNS tunnelling - oversized query name", "high",
+        description="A DNS name far longer than any real host name, or one long random-looking label. DNS leaves "
+                    "almost every network unfiltered, so it is what data goes out through when nothing else can.",
+        trigger="A captured DNS query whose dns_query reaches the length threshold, or which contains a single label "
+                "matching the long-label regex.",
+        mechanism="regex"),
+    "PCAP-0014": Rule(
+        "SIGMA-PCAP-0014", "DNS query flood from one host", "medium",
+        description="One host resolving names at machine speed - a tunnel carrying data, a domain-generation "
+                    "algorithm hunting for its controller, or a resolver being used to amplify an attack.",
+        trigger="Counts captured DNS queries grouped by src_ip. Fires on a 60-second window holding 300 or more.",
+        mechanism="threshold"),
+    "PCAP-0018": Rule(
+        "SIGMA-PCAP-0018", "Cleartext protocol in use", "medium",
+        description="Traffic on a protocol that carries its credentials in the clear. Anyone on the path - including "
+                    "whoever is already inside - reads the password by watching.",
+        trigger="A captured TCP packet carrying a payload whose dst_port is one of the cleartext ports (21 FTP, "
+                "23 telnet, 110 POP3, 143 IMAP, 512/513/514 r-services).",
+        mechanism="fields"),
+    "PCAP-0022": Rule(
+        "SIGMA-PCAP-0022", "TLS to a suspicious domain", "medium",
+        description="The ClientHello names a domain on a service attackers use for throwaway infrastructure. The flow "
+                    "is encrypted, so this name is the only thing about it you can read.",
+        trigger="A captured TLS ClientHello whose tls_sni matches the suspicious-domain regex (dynamic DNS and "
+                "tunnelling services, and the cheap TLDs they are registered under).",
+        mechanism="regex"),
+    "PCAP-0026": Rule(
+        "SIGMA-PCAP-0026", "Port scan - SYN fan-out", "medium",
+        description="One host opening connections to many DIFFERENT ports in seconds. That is a scan, not use - "
+                    "software talks to the port it needs.",
+        trigger="Counts DISTINCT dst_port values in captured TCP packets whose only flag is SYN, grouped by src_ip. "
+                "Fires when one source reaches the distinct-port threshold inside the window.",
+        mechanism="threshold"),
+    "PCAP-0030": Rule(
+        "SIGMA-PCAP-0030", "TLS on a non-standard port", "low",
+        description="An encrypted session somewhere other than the usual ports. Legitimate services do this; so does "
+                    "a command-and-control channel trying to look like anything but HTTPS.",
+        trigger="A captured TLS ClientHello (tls_sni present) whose dst_port is not one of the standard TLS ports.",
+        mechanism="fields"),
+    # ---------------------------------------------------------------- any source
+    "APP-0070": Rule(
+        "SIGMA-APP-0070", "Secret material in a log line", "high",
+        description="A credential was written into a log. Logs are copied, shipped and read far more widely than the "
+                    "secret store is - from here the key is wherever this file went.",
+        trigger="The raw line of ANY source matches the secret regex (AWS access key id, a PEM private key header, a "
+                "JWT, or an assigned password / api key / token).",
+        mechanism="regex"),
+    "APP-0075": Rule(
+        "SIGMA-APP-0075", "Encoded command line", "high",
+        description="A command handed its instructions as base64 so that neither a human nor a log search can read "
+                    "them. The encoding is the intent - nothing legitimate needs to hide its arguments.",
+        trigger="The raw line of ANY source matches the encoded-command regex (powershell -enc with a base64 blob, "
+                "certutil -decode, FromBase64String, base64 -d piped into a shell).",
+        mechanism="regex"),
+    "APP-0080": Rule(
+        "SIGMA-APP-0080", "Ransomware indicator", "critical",
+        description="A ransom note name or an encrypted-file extension. By the time this reaches a log the encryption "
+                    "has already started somewhere.",
+        trigger="The raw line of ANY source matches the ransomware regex (ransom note filenames, known encrypted "
+                "extensions).",
+        mechanism="regex"),
 }
 
 RULES: list[Rule] = list(R.values())
@@ -290,6 +514,39 @@ _SHELL = re.compile(r"COMMAND=(?:/usr)?/bin/(?:ba|z|da)?sh\b|COMMAND=/bin/su\b|C
 _USERADD = re.compile(r"\b(useradd|adduser)\b.*(new user|name=|:\s+\S+)", re.I)
 _LOGIN_PATH = re.compile(r"/(login|signin|sign-in|auth|authenticate|session|token|oauth/token)\b", re.I)
 _AUTH_FAIL = re.compile(r"(login|auth|authentication|password).*(fail|invalid|denied|rejected)|invalid (credentials|password)|auth(entication)? failure", re.I)
+
+# ---- regexes for the rules added alongside the pcap parser and the wider catalogue. Each one is the
+#      SHIPPED DEFAULT of a regex Param below (never a bare constant in run_rules): RULE_PATTERNS and
+#      Rule.patterns are derived from those params, so a pattern maintained here and there would drift.
+_WEBSHELL = re.compile(r"/(c99|r57|wso|b374k|alfa|shell|cmd|backdoor|webshell|adminer|tinyfilemanager)\.(php|asp|aspx|jsp|jspx|phtml|cfm)\b"
+                       r"|\.(php|asp|aspx|jsp|jspx|phtml)\?(?:[^&]*&)*(cmd|exec|eval|system|shell|passthru|run|download)=", re.I)
+_JNDI = re.compile(r"\$\{\s*(?:\$\{[^}]*\}|[^}])*?jndi\s*:|\$\{jndi:|%24%7bjndi", re.I)
+_RECOVERY_DESTROY = re.compile(r"vssadmin(\.exe)?\s+delete\s+shadows|wmic\s+shadowcopy\s+delete|wbadmin(\.exe)?\s+delete\s+(catalog|systemstatebackup|backup)"
+                               r"|bcdedit(\.exe)?\s+.*(recoveryenabled\s+no|bootstatuspolicy\s+ignoreallfailures)"
+                               r"|Get-WmiObject\s+Win32_Shadowcopy.*Delete|Remove-Item.*\\\\Recovery", re.I)
+_REVERSE_SHELL = re.compile(r"(?:ba|z|k)?sh\s+-i\s*>&\s*/dev/(tcp|udp)/|/dev/(tcp|udp)/\d{1,3}(?:\.\d{1,3}){3}/\d+"
+                            r"|\bnc(?:at)?\b[^\n|;]*\s-[a-z]*e[a-z]*\s+/(?:usr/)?bin/(?:ba|z|da)?sh"
+                            r"|socat\b[^\n]*exec\s*:|python[0-9.]*\s+-c\s+['\"]?import\s+socket"
+                            r"|perl\s+-e\s+['\"]?use\s+Socket|\bmkfifo\b[^\n]*\|\s*(?:ba|z)?sh", re.I)
+_CRON_PERSIST = re.compile(r"/etc/systemd/system/[^\s]+\.(service|timer)|/etc/cron\.(d|daily|hourly|weekly|monthly)/|/var/spool/cron/"
+                           r"|\bcrontab\b[^\n]*\s-(?:e|r|l\s+-u)|systemctl\s+(enable|link)\b|BEGIN\s+EDIT|REPLACE\b.*crontab", re.I)
+_SUID = re.compile(r"\bchmod\b[^\n]*\b[ug]\+s\b|\bchmod\b\s+[0-7]?[246][0-7]{3}\b|\bchown\b[^\n]*\broot\b[^\n]*\bchmod\b", re.I)
+_KERNEL_MODULE = re.compile(r"\b(insmod|modprobe|kextload|rmmod)\b|\bmodule\s+(loaded|verification\s+failed)\b|loading\s+out-of-tree\s+module", re.I)
+_ATTACHMENT_BAD = re.compile(r"\.(exe|scr|pif|com|bat|cmd|ps1|vbs|vbe|js|jse|jar|hta|msi|msp|cpl|lnk|iso|img|vhd|reg|wsf|dll)\b"
+                             r"|\.(docm|xlsm|pptm|dotm|xlam|xll)\b|\.(zip|rar|7z|gz)\s*[>\)]?\s*$", re.I)
+_LONG_LABEL = re.compile(r"(?:^|\.)[A-Za-z0-9+/=_-]{40,}(?:\.|$)")
+_SUSPICIOUS_SNI = re.compile(r"\.(tk|top|xyz|gq|ml|cf|ru|su|cc|pw|buzz|click|zip|mov)$"
+                             r"|(duckdns|no-ip|noip|hopto|ddns|dynu|serveo|ngrok|trycloudflare|localtunnel|pagekite|portmap|onion)\.", re.I)
+_SECRET = re.compile(r"\bAKIA[0-9A-Z]{16}\b|\bASIA[0-9A-Z]{16}\b|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+                     r"|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
+                     r"|\b(?:password|passwd|pwd|api[_-]?key|apikey|secret|token|client[_-]?secret)\s*[=:]\s*[\"']?[^\s\"'&;,]{8,}"
+                     r"|\bxox[baprs]-[0-9A-Za-z-]{10,}|\bghp_[0-9A-Za-z]{30,}", re.I)
+_ENCODED_CMD = re.compile(r"powershell(\.exe)?[^\n]*\s-(?:e|en|enc|enco|encod|encode|encoded|encodedcommand)\s+[A-Za-z0-9+/=]{24,}"
+                          r"|FromBase64String\s*\(|certutil(\.exe)?[^\n]*-decode|base64\s+(?:-d|--decode)[^\n]*\|\s*(?:ba|z)?sh"
+                          r"|\[Convert\]::FromBase64String|echo\s+[A-Za-z0-9+/=]{40,}\s*\|\s*base64\s+(?:-d|--decode)", re.I)
+_RANSOM = re.compile(r"\b(READ_?ME|HOW[_ ]?TO[_ ]?DECRYPT|DECRYPT[_-]?(FILES|INSTRUCTION)|RECOVER[_-]?(FILES|YOUR)|RESTORE[-_]?FILES|"
+                     r"YOUR[_-]?FILES[_-]?ARE[_-]?ENCRYPTED)[^\n]{0,40}\.(txt|html|hta)\b"
+                     r"|\.(locky|crypt|cryptolocker|encrypted|enc|lockbit|conti|ryuk|revil|sodinokibi|djvu|wannacry|wncry|onion|makop|phobos|cerber)\b", re.I)
 
 # ------------------------------------------------------------ editable condition parameters
 # Every constant that decides whether a built-in fires lives here rather than inline in run_rules, so
@@ -450,6 +707,134 @@ PARAMS: dict[str, tuple[Param, ...]] = {
         P("window", "Time window", "seconds", "60", "", "Length of the sliding window the denials are counted in."),
         P("threshold", "Events to fire", "int", "50", "", "How many denials inside one window before the rule fires."),
     ),
+    "SIGMA-WEB-0071": (
+        P("statuses", "Status codes counted", "values", "403", "http.status", "Exact HTTP status codes treated as a refusal."),
+        P("window", "Time window", "seconds", "60", "", "Length of the sliding window the refusals are counted in."),
+        P("threshold", "Events to fire", "int", "30", "", "How many refusals inside one window before the rule fires."),
+    ),
+    "SIGMA-WEB-0075": (
+        P("pattern", "Webshell path", "regex", _WEBSHELL.pattern, "http.path", "Matched against the request path of every web request."),
+    ),
+    "SIGMA-WEB-0079": (
+        P("pattern", "JNDI lookup", "regex", _JNDI.pattern, "http.path", "Matched against the request path, the user-agent and the raw line."),
+    ),
+    "SIGMA-WEB-0084": (
+        P("minLength", "Path length to fire", "int", "1000", "http.path", "Request paths at least this many characters long are flagged."),
+    ),
+    "SIGMA-AUTH-0230": (
+        P("businessStart", "Business hours start (UTC)", "int", "6", "", "First hour of the working day, 0-23, in UTC."),
+        P("businessEnd", "Business hours end (UTC)", "int", "20", "", "Last hour of the working day, 0-23, in UTC. A sign-in outside start..end fires."),
+        P("logonTypes", "Interactive logon types", "values", "2, 10, 11", "LogonType", "Windows 4624 logon types treated as a person signing in."),
+    ),
+    "SIGMA-WIN-0160": (
+        P("eventIds", "Defender event IDs", "values", "1116, 1117, 5001, 5007", "EventID", "Windows Defender event ids that fire the rule."),
+        P("severeIds", "Ids treated as critical", "values", "1116, 5001", "EventID", "Of those, the ids raised to critical: malware found, or protection switched off."),
+    ),
+    "SIGMA-WIN-0170": (
+        P("eventId", "Event ID", "text", "4625", "EventID", "Windows Security event id counted as a failed logon."),
+        P("window", "Time window", "seconds", "900", "", "Length of the sliding window the distinct accounts are counted in."),
+        P("distinctAccounts", "Distinct accounts to fire", "int", "10", "TargetUserName", "How many DIFFERENT accounts one source must fail against."),
+    ),
+    "SIGMA-WIN-0175": (
+        P("eventIds", "Event IDs", "values", "7045, 4697", "EventID", "Windows event ids that mean a service was installed."),
+    ),
+    "SIGMA-WIN-0180": (
+        P("eventIds", "Event IDs", "values", "4698, 106", "EventID", "Windows event ids that mean a scheduled task was created."),
+    ),
+    "SIGMA-WIN-0185": (
+        P("eventId", "Event ID", "text", "4688", "EventID", "Windows Security event id for process creation."),
+        P("pattern", "Recovery destruction", "regex", _RECOVERY_DESTROY.pattern, "CommandLine", "Matched against the command line of every process creation."),
+    ),
+    "SIGMA-WIN-0190": (
+        P("eventId", "Event ID", "text", "4769", "EventID", "Windows Security event id for a Kerberos service ticket request."),
+        P("encryptionTypes", "Ticket encryption types", "values", "0x17, 0x18, 23", "TicketEncryptionType", "Encryption types treated as weak (RC4)."),
+        P("window", "Time window", "seconds", "600", "", "Length of the sliding window the requests are counted in."),
+        P("threshold", "Events to fire", "int", "10", "", "How many weak-cipher ticket requests inside one window before the rule fires."),
+    ),
+    "SIGMA-LNX-0060": (
+        P("pattern", "Reverse shell", "regex", _REVERSE_SHELL.pattern, "raw", "Matched against the raw line of every syslog event."),
+    ),
+    "SIGMA-LNX-0065": (
+        P("pattern", "Persistence path", "regex", _CRON_PERSIST.pattern, "raw", "Matched against the raw line of every syslog event."),
+        P("programs", "Scheduler programs", "values", "cron, crontab, systemd, anacron", "program", "syslog programs whose lines are checked against the pattern."),
+    ),
+    "SIGMA-LNX-0070": (
+        P("pattern", "SUID change", "regex", _SUID.pattern, "raw", "Matched against the raw line of every syslog event."),
+    ),
+    "SIGMA-LNX-0075": (
+        P("pattern", "Kernel module", "regex", _KERNEL_MODULE.pattern, "raw", "Matched against the raw line of every syslog event."),
+    ),
+    "SIGMA-AWS-0080": (
+        P("eventNames", "CloudTrail events", "values", "PutBucketAcl, PutBucketPolicy, PutBucketWebsite, DeletePublicAccessBlock, PutAccountPublicAccessBlock",
+          "eventName", "Any one of these eventNames is checked for the public markers below."),
+        P("publicMarkers", "Public principal markers", "values", "AllUsers, AuthenticatedUsers, \"Principal\":\"*\", \"Principal\": \"*\"", "raw",
+          "Any of these appearing in the raw event body means the bucket was opened up."),
+    ),
+    "SIGMA-AWS-0085": (
+        P("eventNames", "CloudTrail events", "values", "GetSecretValue, GetParameter, GetParameters, GetParametersByPath, Decrypt", "eventName",
+          "Events counted as a secret being read."),
+        P("window", "Time window", "seconds", "300", "", "Length of the sliding window the reads are counted in."),
+        P("threshold", "Events to fire", "int", "20", "", "How many secret reads inside one window before the rule fires."),
+    ),
+    "SIGMA-AWS-0090": (
+        P("eventNames", "CloudTrail events", "values", "ModifySnapshotAttribute, ModifyImageAttribute, ModifyDBSnapshotAttribute, ShareDirectory", "eventName",
+          "Events that can hand a disk image to another account."),
+        P("shareMarkers", "Sharing markers", "values", "\"all\", add, restore, LaunchPermission", "raw",
+          "Any of these in the raw event body means the change was a share rather than a revoke."),
+    ),
+    "SIGMA-AWS-0095": (
+        P("eventNames", "CloudTrail events", "values", "DeleteDetector, UpdateDetector, StopMonitoringMembers, DeleteConfigurationRecorder, StopConfigurationRecorder, DisableSecurityHub, DisableMacie, DeleteMembers",
+          "eventName", "Any one of these eventNames fires the rule."),
+    ),
+    "SIGMA-K8S-0030": (
+        P("resources", "Resources", "values", "clusterrolebindings, rolebindings", "resource", "Audit resources that grant a role."),
+        P("verbs", "Verbs", "values", "create, update, patch", "verb", "Verbs that mean the binding was written."),
+        P("roles", "Roles watched", "values", "cluster-admin, admin", "raw", "A binding naming one of these roles in the raw request fires the rule."),
+    ),
+    "SIGMA-K8S-0035": (
+        P("users", "Anonymous identities", "values", "system:anonymous", "user", "Audit users that mean the request carried no identity."),
+        P("groups", "Unauthenticated groups", "values", "system:unauthenticated", "raw", "Groups in the raw request that mean the same thing."),
+    ),
+    "SIGMA-MAIL-0010": (
+        P("verdictFields", "Verdict fields", "values", "spf, dkim, dmarc, auth_results", "spf", "Fields holding the sender-authentication verdicts."),
+        P("failValues", "Failure verdicts", "values", "fail, softfail, permerror, temperror", "spf",
+          "Verdict values treated as a failure. 'none' is deliberately NOT shipped: dmarc=none is a published "
+          "policy rather than a failed check, and it is common enough that including it would make the rule noise."),
+    ),
+    "SIGMA-MAIL-0014": (
+        P("pattern", "Dangerous attachment", "regex", _ATTACHMENT_BAD.pattern, "attachments", "Matched against the attachment names of every message."),
+    ),
+    "SIGMA-PCAP-0010": (
+        P("minLength", "Query length to fire", "int", "60", "dns_query", "DNS names at least this many characters long are flagged."),
+        P("pattern", "Long label", "regex", _LONG_LABEL.pattern, "dns_query", "A single label matching this is flagged whatever the total length."),
+    ),
+    "SIGMA-PCAP-0014": (
+        P("window", "Time window", "seconds", "60", "", "Length of the sliding window the queries are counted in."),
+        P("threshold", "Events to fire", "int", "300", "", "How many queries from one host inside one window before the rule fires."),
+    ),
+    "SIGMA-PCAP-0018": (
+        P("ports", "Cleartext ports", "values", "21, 23, 110, 143, 512, 513, 514", "dst_port", "Destination ports whose protocols carry credentials in the clear."),
+    ),
+    "SIGMA-PCAP-0022": (
+        P("pattern", "Suspicious domain", "regex", _SUSPICIOUS_SNI.pattern, "tls_sni", "Matched against the server name in every TLS ClientHello."),
+    ),
+    "SIGMA-PCAP-0026": (
+        P("flags", "TCP flags", "text", "SYN", "tcp_flags", "The exact flag set counted as a connection attempt."),
+        P("window", "Time window", "seconds", "60", "", "Length of the sliding window the ports are counted in."),
+        P("distinctPorts", "Distinct ports to fire", "int", "50", "dst_port", "How many DIFFERENT destination ports one source must try."),
+    ),
+    "SIGMA-PCAP-0030": (
+        P("standardPorts", "Standard TLS ports", "values", "443, 8443, 993, 995, 465, 587, 990, 4443", "dst_port", "Ports where TLS is unremarkable; anything else fires."),
+    ),
+    "SIGMA-APP-0070": (
+        P("pattern", "Secret material", "regex", _SECRET.pattern, "raw", "Matched against the raw line of every event, whatever its source."),
+    ),
+    "SIGMA-APP-0075": (
+        P("pattern", "Encoded command", "regex", _ENCODED_CMD.pattern, "raw", "Matched against the raw line of every event, whatever its source."),
+    ),
+    "SIGMA-APP-0080": (
+        P("pattern", "Ransomware indicator", "regex", _RANSOM.pattern, "raw", "Matched against the raw line of every event, whatever its source."),
+    ),
 }
 del P
 R = {k: replace(v, params=PARAMS.get(v.id, ())) for k, v in R.items()}
@@ -463,6 +848,45 @@ RULE_PATTERNS: dict[str, list[tuple[str, str]]] = {
     rid: [(p.field or "raw", p.default) for p in ps if p.kind == "regex"]
     for rid, ps in PARAMS.items() if any(p.kind == "regex" for p in ps)
 }
+
+
+# Built-ins that are NOT evaluated by run_rules. `app/graph_rules.py` registers its catalogue here at
+# import time so there is ONE list of built-in rules: /api/rules, the toggle, the removal, the metadata
+# override and `param_spec` all keep working with no second code path, and the analyst sees one screen.
+# `RULES` stays the event catalogue — run_rules must never iterate a rule it cannot evaluate.
+EXTRA_RULES: list[Rule] = []
+
+
+def register_builtins(rules: Iterable[Rule], params: dict[str, tuple[Param, ...]]) -> None:
+    """Add rules that live in another module to the shipped catalogue (see EXTRA_RULES).
+
+    Idempotent by id: a module re-imported under a different name (tests do this) must not double the
+    catalogue, which would show every graph rule twice on the rules screen.
+    """
+    PARAMS.update(params)
+    have = {r.id for r in EXTRA_RULES}
+    for r in rules:
+        if r.id in have:
+            continue
+        EXTRA_RULES.append(replace(r, params=params.get(r.id, r.params)))
+        have.add(r.id)
+
+
+def all_builtin_rules() -> list[Rule]:
+    """Every shipped rule the CATALOGUE knows about: event rules plus the registered graph rules.
+
+    The import is HERE, lazily, rather than being left to whoever calls first. A catalogue whose size
+    depends on which modules happen to have been imported is a catalogue that is sometimes a dozen rules
+    short — and the symptom would be a rules screen missing the graph rules, or a `restore-defaults` that
+    quietly drops them, both of which look like data loss rather than an import order. Importing inside
+    the function is safe because graph_rules only needs names this module has already defined.
+    """
+    if not EXTRA_RULES:
+        try:
+            from . import graph_rules  # noqa: F401  (registers itself on import)
+        except Exception:  # noqa: BLE001 - a broken optional catalogue must not take the rules API down
+            pass
+    return RULES + EXTRA_RULES
 
 
 def param_spec(rule_id: str, key: str) -> Optional[Param]:
@@ -754,7 +1178,8 @@ def _tag(ev: Event, rule: Rule, level: Optional[str] = None) -> None:
     ev.sev = max_sev(ev.sev, lvl)  # type: ignore[assignment]
 
 
-_FAMILIES = ("nginx.access", "windows.evtx", "syslog", "k8s.audit", "app.jsonl")
+_FAMILIES = ("nginx.access", "windows.evtx", "syslog", "k8s.audit", "app.jsonl",
+             "network.pcap", "mail.message")
 _NET_FAMILIES = ("firewall", "delimited", "netflow", "fw")
 
 
@@ -785,6 +1210,82 @@ def find_bursts(idx: Iterable[int], ts: np.ndarray, key_of: Callable[[int], str]
         if int(counts[k]) >= threshold:
             out.append((key, int(arr[k]), int(counts[k]), int(arr[int(j[k])])))
     return out
+
+
+def find_distinct_bursts(idx: Iterable[int], ts: np.ndarray, key_of: Callable[[int], str],
+                         val_of: Callable[[int], str], window_s: float, threshold: int) -> list[tuple[str, int, int, int]]:
+    """Like find_bursts, but the threshold counts DISTINCT VALUES, not events.
+
+    "One source failed 200 times" and "one source failed against 40 different accounts" are different
+    findings with different responses, and a plain event count cannot tell them apart: a spray that tries
+    each account twice never reaches a volume threshold, and a single account locked out by a script
+    trivially does. So the two helpers exist side by side and neither is a special case of the other.
+
+    Returns (key, anchor_index, distinct_count, first_index) with the anchor being the last event of the
+    densest window — the same contract as find_bursts, so the callers look identical.
+
+    Deliberately NOT vectorised: `searchsorted` gives the window bounds in one shot but the distinct
+    count inside a moving window is a running multiset, which is a scan whatever the backend. Groups are
+    per-source and small; the cost is the grouping, which both helpers pay.
+    """
+    groups: dict[str, list[int]] = defaultdict(list)
+    for i in idx:
+        k = key_of(i)
+        if k:
+            groups[k].append(i)
+    out: list[tuple[str, int, int, int]] = []
+    for key, members in groups.items():
+        if len(members) < threshold:
+            continue                      # fewer events than distinct values needed: impossible
+        arr = np.asarray(members)
+        t = ts[arr]
+        order = np.argsort(t, kind="stable")
+        arr, t = arr[order], t[order]
+        seen: dict[str, int] = {}
+        left = 0
+        best = (0, -1, -1)                # (distinct, anchor, first)
+        for r in range(arr.shape[0]):
+            v = val_of(int(arr[r]))
+            if v:
+                seen[v] = seen.get(v, 0) + 1
+            while t[r] - t[left] > window_s:
+                lv = val_of(int(arr[left]))
+                if lv:
+                    n = seen.get(lv, 0) - 1
+                    if n <= 0:
+                        seen.pop(lv, None)
+                    else:
+                        seen[lv] = n
+                left += 1
+            if len(seen) > best[0]:
+                best = (len(seen), int(arr[r]), int(arr[left]))
+        if best[0] >= threshold:
+            out.append((key, best[1], best[0], best[2]))
+    return out
+
+
+_SCREEN_CACHE: dict[tuple[str, ...], Optional["re.Pattern[str]"]] = {}
+
+
+def _screen(patterns: list["re.Pattern[str]"]) -> Optional["re.Pattern[str]"]:
+    """One alternation over several rule patterns, used as a cheap pre-filter.
+
+    A rule that scans EVERY event (not one family) cannot afford one pass per rule, so the patterns are
+    joined and the individual regexes only run on a line the union already matched. Cached on the pattern
+    texts, because an analyst override changes them and a stale screen would silently stop matching.
+    Returns None if the union will not compile — the caller then skips the pass rather than guessing,
+    which is the safe direction: a rule that reports nothing is visibly not firing, whereas a screen
+    that quietly drops half the lines is a silent evidence bug.
+    """
+    key = tuple(p.pattern for p in patterns)
+    if key in _SCREEN_CACHE:
+        return _SCREEN_CACHE[key]
+    try:
+        rx: Optional["re.Pattern[str]"] = re.compile("|".join(f"(?:{p})" for p in key), re.I)
+    except re.error:
+        rx = None
+    _SCREEN_CACHE[key] = rx
+    return rx
 
 
 def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] = None,
@@ -1082,6 +1583,242 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
         events[anchor].set_field("burst.count", str(count))
         if is_public_ip(ip):
             attackers.setdefault(ip, "port scan")
+
+
+    # ================================================================ the wider catalogue
+    # Everything below was added alongside the pcap parser. Each block re-uses a bucket already built
+    # above — no second walk of the pool per rule — and every constant is read ONCE into a local before
+    # its loop, for the reason documented against the original sections.
+
+    # --- web (continued): 403 bursts, webshells, JNDI, oversized paths
+    w71_statuses = _pl("SIGMA-WEB-0071", "statuses")
+    for ip, anchor, count, first in find_bursts(
+        (i for i in web if events[i].fields.get("http.status", "").lower() in w71_statuses), ts,
+            lambda i: events[i].fields.get("src_ip", ""), _pn("SIGMA-WEB-0071", "window"), _pn("SIGMA-WEB-0071", "threshold")):
+        _tag(events[anchor], R["WEB-0071"])
+        events[anchor].set_field("burst.count", str(count))
+        attackers.setdefault(ip, "403 burst")
+    rx_webshell = _prx("SIGMA-WEB-0075", "pattern", _WEBSHELL)
+    rx_jndi = _prx("SIGMA-WEB-0079", "pattern", _JNDI)
+    w84_min = _pn("SIGMA-WEB-0084", "minLength")
+    for i in web:
+        e = events[i]
+        path = e.fields.get("http.path", "")
+        if path and rx_webshell.search(path):
+            _tag(e, R["WEB-0075"])
+            attackers.setdefault(e.fields.get("src_ip", ""), "webshell request")
+        if (path and rx_jndi.search(path)) or rx_jndi.search(e.fields.get("user_agent", "")) or rx_jndi.search(e.raw):
+            _tag(e, R["WEB-0079"])
+            e.set_field("tactic", "exploitation")
+            attackers.setdefault(e.fields.get("src_ip", ""), "jndi injection")
+        if len(path) >= w84_min:
+            _tag(e, R["WEB-0084"])
+            e.set_field("path.length", str(len(path)))
+
+    # --- sign-in outside business hours. The hour comes from the ts ARRAY, not from re-parsing the
+    #     timestamp text: run_rules already has it, and an unstamped event (ts 0.0) must never be read
+    #     as "midnight" — a raw-phase event has no time, which is not the same as a time of 00:00.
+    a230_start, a230_end = _pn("SIGMA-AUTH-0230", "businessStart"), _pn("SIGMA-AUTH-0230", "businessEnd")
+    a230_types = _pl("SIGMA-AUTH-0230", "logonTypes", lower=False)
+
+    def _outside_hours(i: int) -> bool:
+        t = float(ts[i])
+        if t <= 0:
+            return False
+        hour = int((t // 3600) % 24)
+        return hour < a230_start or hour > a230_end
+
+    # --- Windows (continued)
+    win = fam_of["windows.evtx"]
+    w160_ids, w160_severe = _pl("SIGMA-WIN-0160", "eventIds", lower=False), _pl("SIGMA-WIN-0160", "severeIds", lower=False)
+    w175_ids = _pl("SIGMA-WIN-0175", "eventIds", lower=False)
+    w180_ids = _pl("SIGMA-WIN-0180", "eventIds", lower=False)
+    w185_id = _pt("SIGMA-WIN-0185", "eventId")
+    rx_recovery = _prx("SIGMA-WIN-0185", "pattern", _RECOVERY_DESTROY)
+    a230_win_id = "4624"
+    for i in win:
+        e = events[i]
+        eid = e.fields.get("EventID", "")
+        if eid in w160_ids:
+            _tag(e, R["WIN-0160"], "critical" if eid in w160_severe else None)
+        if eid in w175_ids:
+            _tag(e, R["WIN-0175"])
+            e.set_field_default("tactic", "persistence")
+        if eid in w180_ids:
+            _tag(e, R["WIN-0180"])
+            e.set_field_default("tactic", "persistence")
+        if eid == w185_id and rx_recovery.search(e.fields.get("CommandLine", "") + " " + e.fields.get("NewProcessName", "")):
+            _tag(e, R["WIN-0185"])
+            e.set_field("tactic", "impact")
+        if eid == a230_win_id and any(e.fields.get("LogonType", "").startswith(t) for t in a230_types) and _outside_hours(i):
+            _tag(e, R["AUTH-0230"])
+            e.set_field("signin.hour", f"{int((float(ts[i]) // 3600) % 24):02d}:00 UTC")
+    w170_id = _pt("SIGMA-WIN-0170", "eventId")
+    for ip, anchor, count, first in find_distinct_bursts(
+        (i for i in win if events[i].fields.get("EventID") == w170_id), ts,
+            lambda i: events[i].fields.get("IpAddress", ""),
+            lambda i: events[i].fields.get("TargetUserName", "").lower(),
+            _pn("SIGMA-WIN-0170", "window"), _pn("SIGMA-WIN-0170", "distinctAccounts")):
+        ev = events[anchor]
+        _tag(ev, R["WIN-0170"])
+        ev.set_field("spray.accounts", str(count))
+        ev.msg = f"password spray — {count} different accounts failed from {ip}"
+        if is_public_ip(ip):
+            attackers.setdefault(ip, "password spray")
+    w190_id, w190_enc = _pt("SIGMA-WIN-0190", "eventId"), _pl("SIGMA-WIN-0190", "encryptionTypes")
+    for _, anchor, count, first in find_bursts(
+        (i for i in win if events[i].fields.get("EventID") == w190_id
+            and events[i].fields.get("TicketEncryptionType", "").lower() in w190_enc), ts,
+            lambda i: events[i].fields.get("SubjectUserName") or events[i].user or "kerberos",
+            _pn("SIGMA-WIN-0190", "window"), _pn("SIGMA-WIN-0190", "threshold")):
+        _tag(events[anchor], R["WIN-0190"])
+        events[anchor].set_field("burst.count", str(count))
+
+    # --- Linux (continued): one pass, four regexes, each gated on its own rule
+    lnx = fam_of["syslog"]
+    rx_revshell = _prx("SIGMA-LNX-0060", "pattern", _REVERSE_SHELL)
+    rx_persist = _prx("SIGMA-LNX-0065", "pattern", _CRON_PERSIST)
+    l65_progs = _pl("SIGMA-LNX-0065", "programs")
+    rx_suid = _prx("SIGMA-LNX-0070", "pattern", _SUID)
+    rx_kmod = _prx("SIGMA-LNX-0075", "pattern", _KERNEL_MODULE)
+    for i in lnx:
+        e = events[i]
+        raw = e.raw
+        if rx_revshell.search(raw):
+            _tag(e, R["LNX-0060"])
+            e.set_field("tactic", "command and control")
+        if rx_persist.search(raw) or e.fields.get("program", "").lower() in l65_progs and rx_persist.search(e.msg):
+            _tag(e, R["LNX-0065"])
+            e.set_field_default("tactic", "persistence")
+        if rx_suid.search(raw):
+            _tag(e, R["LNX-0070"])
+            e.set_field_default("tactic", "privilege escalation")
+        if rx_kmod.search(raw):
+            _tag(e, R["LNX-0075"])
+
+    # --- AWS (continued)
+    a80_names, a80_markers = _pl("SIGMA-AWS-0080", "eventNames"), _pl("SIGMA-AWS-0080", "publicMarkers", lower=False)
+    a90_names, a90_markers = _pl("SIGMA-AWS-0090", "eventNames"), _pl("SIGMA-AWS-0090", "shareMarkers", lower=False)
+    a95_names = _pl("SIGMA-AWS-0095", "eventNames")
+    a230_ct_name = "ConsoleLogin"
+    for i in ct:
+        e = events[i]
+        name = e.fields.get("eventName", "")
+        lname = name.lower()
+        if lname in a80_names and any(m in e.raw for m in a80_markers):
+            _tag(e, R["AWS-0080"])
+            e.set_field("exposure", "public")
+        if lname in a90_names and any(m in e.raw for m in a90_markers):
+            _tag(e, R["AWS-0090"])
+            e.set_field("tactic", "exfiltration")
+        if lname in a95_names:
+            _tag(e, R["AWS-0095"])
+            e.set_field("tactic", "defense evasion")
+        if name == a230_ct_name and e.fields.get("result", "").lower() == "success" and _outside_hours(i):
+            _tag(e, R["AUTH-0230"])
+    a85_names = _pl("SIGMA-AWS-0085", "eventNames")
+    for _, anchor, count, first in find_bursts(
+        (i for i in ct if events[i].fields.get("eventName", "").lower() in a85_names), ts,
+            lambda i: events[i].user or events[i].fields.get("userIdentity.arn", ""),
+            _pn("SIGMA-AWS-0085", "window"), _pn("SIGMA-AWS-0085", "threshold")):
+        _tag(events[anchor], R["AWS-0085"])
+        events[anchor].set_field("burst.count", str(count))
+
+    # --- Kubernetes (continued)
+    k30_res, k30_verbs, k30_roles = _pl("SIGMA-K8S-0030", "resources"), _pl("SIGMA-K8S-0030", "verbs"), _pl("SIGMA-K8S-0030", "roles")
+    k35_users, k35_groups = _pl("SIGMA-K8S-0035", "users"), _pl("SIGMA-K8S-0035", "groups")
+    for i in k8s:
+        e = events[i]
+        if e.fields.get("resource", "").lower() in k30_res and e.fields.get("verb", "").lower() in k30_verbs \
+                and any(r in e.raw.lower() for r in k30_roles):
+            _tag(e, R["K8S-0030"])
+            e.set_field("tactic", "privilege escalation")
+        if e.user.lower() in k35_users or any(g in e.raw.lower() for g in k35_groups):
+            _tag(e, R["K8S-0035"])
+
+    # --- mail
+    mail = fam_of["mail.message"]
+    m10_fields, m10_fails = _pl("SIGMA-MAIL-0010", "verdictFields", lower=False), _pl("SIGMA-MAIL-0010", "failValues")
+    rx_attach = _prx("SIGMA-MAIL-0014", "pattern", _ATTACHMENT_BAD)
+    for i in mail:
+        e = events[i]
+        for f in m10_fields:
+            v = e.fields.get(f, "").lower()
+            if v and any(x in v for x in m10_fails):
+                _tag(e, R["MAIL-0010"])
+                e.set_field("auth.verdict", f"{f}={v[:40]}")
+                break
+        names = e.fields.get("attachments") or e.fields.get("attachment_names") or e.fields.get("attachment", "")
+        if names and rx_attach.search(names):
+            _tag(e, R["MAIL-0014"])
+            e.set_field_default("tactic", "initial access")
+
+    # --- packet captures
+    pcap = fam_of["network.pcap"]
+    p10_min = _pn("SIGMA-PCAP-0010", "minLength")
+    rx_long_label = _prx("SIGMA-PCAP-0010", "pattern", _LONG_LABEL)
+    p18_ports = set(_pl("SIGMA-PCAP-0018", "ports"))
+    rx_sni = _prx("SIGMA-PCAP-0022", "pattern", _SUSPICIOUS_SNI)
+    p30_ports = set(_pl("SIGMA-PCAP-0030", "standardPorts"))
+    for i in pcap:
+        e = events[i]
+        f = e.fields
+        q = f.get("dns_query", "")
+        if q and (len(q) >= p10_min or rx_long_label.search(q)):
+            _tag(e, R["PCAP-0010"])
+            e.set_field("dns.query_length", str(len(q)))
+        dport = f.get("dst_port", "")
+        if dport in p18_ports and f.get("protocol") == "TCP" and f.get("payload_len", "0") != "0":
+            _tag(e, R["PCAP-0018"])
+            e.set_field_default("encrypted", "no")
+        sni = f.get("tls_sni", "")
+        if sni:
+            if rx_sni.search(sni):
+                _tag(e, R["PCAP-0022"])
+            if dport and dport not in p30_ports:
+                _tag(e, R["PCAP-0030"])
+    for ip, anchor, count, first in find_bursts(
+        (i for i in pcap if events[i].fields.get("dns_qr") == "query"), ts,
+            lambda i: events[i].fields.get("src_ip", ""), _pn("SIGMA-PCAP-0014", "window"), _pn("SIGMA-PCAP-0014", "threshold")):
+        _tag(events[anchor], R["PCAP-0014"])
+        events[anchor].set_field("burst.count", str(count))
+    p26_flags = _pt("SIGMA-PCAP-0026", "flags").upper()
+    for ip, anchor, count, first in find_distinct_bursts(
+        (i for i in pcap if events[i].fields.get("tcp_flags", "").upper() == p26_flags), ts,
+            lambda i: events[i].fields.get("src_ip", ""),
+            lambda i: events[i].fields.get("dst_port", ""),
+            _pn("SIGMA-PCAP-0026", "window"), _pn("SIGMA-PCAP-0026", "distinctPorts")):
+        ev = events[anchor]
+        _tag(ev, R["PCAP-0026"])
+        ev.set_field("scan.ports", str(count))
+        ev.msg = f"port scan — {count} different ports probed from {ip}"
+        if is_public_ip(ip):
+            attackers.setdefault(ip, "port scan")
+
+    # --- any source: secrets, encoded commands, ransomware markers.
+    # This is the ONE pass that is not restricted to a family, so it is also the only one that can cost a
+    # full scan of the pool. It pays for itself by SCREENING first: the three patterns are joined into a
+    # single alternation and only a line that matches it is tested against them individually, so the
+    # common case is one regex over `raw` and nothing else. The whole pass is skipped when all three
+    # rules are off — a disabled rule must not cost a scan of the evidence.
+    rx_secret = _prx("SIGMA-APP-0070", "pattern", _SECRET)
+    rx_encoded = _prx("SIGMA-APP-0075", "pattern", _ENCODED_CMD)
+    rx_ransom = _prx("SIGMA-APP-0080", "pattern", _RANSOM)
+    universal = [(rx_secret, R["APP-0070"], "credential exposure"),
+                 (rx_encoded, R["APP-0075"], "defense evasion"),
+                 (rx_ransom, R["APP-0080"], "impact")]
+    universal = [u for u in universal if u[1].id not in _DISABLED]
+    if universal:
+        screen = _screen([u[0] for u in universal])
+        if screen is not None:
+            for e in events:
+                raw = e.raw
+                if not raw or not screen.search(raw):
+                    continue
+                for rx, rule, tactic in universal:
+                    if rx.search(raw):
+                        _tag(e, rule)
+                        e.set_field_default("tactic", tactic)
 
     fired = sum(len(e.detections) for e in events)
     return {"fired": fired, "attackers": set(attackers), "rules_evaluated": len(RULES)}

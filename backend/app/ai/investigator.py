@@ -421,6 +421,11 @@ _SUMMARY: dict[str, Callable[[dict[str, Any]], str]] = {
     "list_detections": lambda d: f"{_len(d, 'detections')} of {d.get('total', 0)} rule(s) fired",
     "list_anomalies": lambda d: f"{d.get('shown', _len(d, 'anomalies'))} anomal(ies), {_n(d.get('totalHits', 0))} hits",
     "list_detection_rules": lambda d: f"{_len(d, 'rules')} of {d.get('total', 0)} rule(s) in the catalogue",
+    "list_graph_findings": lambda d: (f"{_len(d, 'findings')} of {d.get('total', 0)} entity-graph finding(s) "
+                                      f"over the {d.get('scope', 'all')} scope"),
+    "preview_detection_rule": lambda d: (f"would flag {_n(d.get('hits', 0))} event(s)"
+                                         + (f" ({d.get('sharePercent')}% of the pool)" if d.get('sharePercent') is not None else "")
+                                         + " — nothing saved"),
     "build_graph": lambda d: (f"{(d.get('totals') or {}).get('entitiesShown', 0)} entit(ies), "
                               f"{(d.get('totals') or {}).get('relationsShown', 0)} relation(s)"),
     "graph_sources": lambda d: f"{_len(d, 'sources')} of {d.get('total', 0)} source(s) contribute entities",

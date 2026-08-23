@@ -8,7 +8,11 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from app.detect import RULES, RULE_PATTERNS
+from app.detect import RULES, RULE_PATTERNS, all_builtin_rules
+
+# The shipped CATALOGUE is `all_builtin_rules()` - the event rules in detect.RULES plus the
+# entity-graph rules registered by app/graph_rules.py. `RULES` alone is what run_rules evaluates,
+# so counting the catalogue with it under-reports by every graph rule.
 from app.main import app
 from tests.conftest import load_sample_case
 
@@ -71,18 +75,18 @@ def test_editing_the_description_does_not_change_what_fires(c) -> None:
 
 def test_clear_all_empties_the_list_and_restore_defaults_brings_builtins_back(c) -> None:
     c.post("/api/rules", json={"name": "keeper", "pattern": "root", "field": "raw", "sev": "low", "kind": "regex"})
-    assert len(c.get("/api/rules").json()) > len(RULES)
+    assert len(c.get("/api/rules").json()) > len(all_builtin_rules())
 
     cleared = c.post("/api/rules/clear?scope=all").json()
-    assert cleared["custom"] >= 1 and cleared["builtin"] == len(RULES)
+    assert cleared["custom"] >= 1 and cleared["builtin"] == len(all_builtin_rules())
     assert c.get("/api/rules").json() == [], "clear all left rules behind"
     # and no detections survive it
     assert all(not e["detections"] for e in c.get("/api/events?limit=500").json()["rows"])
 
     restored = c.post("/api/rules/restore-defaults").json()
-    assert restored["restored"] == len(RULES)
+    assert restored["restored"] == len(all_builtin_rules())
     back = c.get("/api/rules").json()
-    assert len(back) == len(RULES), "custom rules must NOT come back — only built-ins are recoverable"
+    assert len(back) == len(all_builtin_rules()), "custom rules must NOT come back — only built-ins are recoverable"
     assert sum(r["hits"] or 0 for r in back) > 0, "built-ins came back but stopped detecting"
 
 
@@ -91,7 +95,7 @@ def test_clear_custom_scope_leaves_builtins_alone(c) -> None:
     out = c.post("/api/rules/clear?scope=custom").json()
     assert out["custom"] == 1 and out["builtin"] == 0
     ids = [r["id"] for r in c.get("/api/rules").json()]
-    assert len(ids) == len(RULES) and all(i.startswith("SIGMA-") for i in ids)
+    assert len(ids) == len(all_builtin_rules()) and all(i.startswith("SIGMA-") for i in ids)
 
 
 def test_clear_rejects_a_bogus_scope(c) -> None:

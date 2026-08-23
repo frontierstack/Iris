@@ -2218,6 +2218,14 @@ class Store:
         The whole thing is a pass over the pool that mutates `Event.detections`, so it serialises against
         other passes on `_detect_lock` — but not against readers on `self.lock`: saving a rule must not
         freeze /api/case and every other request for the length of a rule pass."""
+        r0 = RULES_STORE.get(rule_id)
+        if r0 is not None and r0.mechanism == "graph":
+            # A GRAPH rule tags no event, so re-running the catalogue over the pool would change nothing
+            # at a cost of O(pool). Its findings are keyed on RULES_STORE.rev (bumped by every mutator),
+            # so the roll-up misses by construction and the next read re-evaluates. Bump the version so
+            # anything watching the store still refreshes.
+            self.bump()
+            return 0
         with self._detect_lock:
             RULES_STORE.strip_rule(rule_id, self.events)
             hits = 0

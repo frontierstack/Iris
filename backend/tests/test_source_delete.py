@@ -99,6 +99,17 @@ def test_the_pool_is_correct_the_moment_delete_returns(client):
     assert all(r["id"] not in dropped_ids for r in rows)
 
 
+def _settle(timeout: float = 10.0) -> None:
+    """Block until no background detection refresh is running."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with STORE.lock:
+            if not getattr(STORE, "_detect_busy", False):
+                return
+        time.sleep(0.02)
+    raise AssertionError("the background detection refresh never finished")
+
+
 def test_rules_fired_is_recounted_without_re_running_the_rules(client, monkeypatch):
     """`rules_fired` is a count, and after a delete the survivors keep the detections they already
     matched — so it is recomputed from them rather than by evaluating the catalogue again."""
@@ -113,6 +124,11 @@ def test_rules_fired_is_recounted_without_re_running_the_rules(client, monkeypat
 
     monkeypatch.setattr(store_mod.Store, "_run_detections", counted)
     client.delete(f"/api/sources/{sid}")
+    # The delete recounts immediately; the coalesced burst refresh (_refresh_detections_async) is a
+    # documented CORRECTION that lands afterwards, and run_rules clears every Event.detections before it
+    # re-tags. Reading the pool in the middle of that window compares a finished count against a
+    # half-rebuilt one, which is a race in the assertion, not in the store. Wait for it to settle.
+    _settle()
     with STORE.lock:
         assert STORE.rules_fired == sum(len(e.detections) for e in STORE.events)
 
