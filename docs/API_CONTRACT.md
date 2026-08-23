@@ -23,6 +23,9 @@ type Severity = 'critical'|'high'|'medium'|'low'|'info';
                lines survive in the pool, and POST /api/sources/{id}/enrich retries it. */
 type EnrichState = 'raw'|'queued'|'enriching'|'enriched'|'skipped'|'error';
 
+/* A source's `file` carries provenance: `incident.zip!var/log/auth.log` names the archive it was
+   staged inside AND the path within it. For such a member `Source.size` is the MEMBER's size, and
+   /raw and /download serve the MEMBER — not the container, which is what they used to do. */
 interface Source { id:string; file:string; parser:string; events:number; range:[string,string]|null;
   confidence:number /*0..1*/; state:'READY'|'REVIEW'|'MAP'|'PARSING'|'ERROR'; size:number; error?:string;
   guessedFields?:string[]; sample?:string; delimiter?:string;
@@ -985,6 +988,18 @@ interface JobsResponse { jobs:UploadJob[] /*newest first*/; active:number; total
 - `GET   /api/jobs?limit=100` → `JobsResponse`. Reading also RECONCILES: threaded parses are resolved by reading the
    source states back out of the store, uploads nothing has advanced or heartbeaten for 10 min become `error` with
    `stale:true`, and finished jobs older than 30 min are pruned (hard cap 200, oldest finished first).
+- **A job is resolved by whether work is IN FLIGHT, not by whether the file is fully interpreted.**
+   `sync()` holds a job in `parsing` while any of its sources is `queued`/`enriching`, and while one is
+   `raw` only when `ingest.autoEnrich` is on (there, `raw` is the moment between the lines landing and
+   the queue taking them). With autoEnrich OFF phase 2 is strictly on demand, so `raw` is settled: the
+   events are in the pool and searchable and nothing will move them but the analyst. Before this, seven
+   captures holding 11.2 M events sat in `parsing` forever behind a 0 % bar — "the parsing indicator
+   spins a long time and says number in progress, but there's nothing happening". It is the same split
+   `GET /api/case` already reports as `enrichment.pending` vs `enrichment.outstanding`.
+- **`progress` on a `parsing` job with no tracker row is a 30-second placeholder, then null.** The gap
+   before a parse thread registers is real and brief; unbounded, a synthesised `pct: 0` is a progress
+   bar for work that does not exist. `null` with state `parsing` means "parsing, no detail" — which is
+   honest — and the UI must render it as such rather than as 0 %.
 - **A job WAITING ITS TURN is not a dead upload.** The Ingest screen declares every dropped file up front and then
    sends three at a time, so file #4 onwards sits in `queued` with `received:0` for as long as the queue ahead of it
    takes. The watchdog measured that wait from job CREATION and buried all of them at exactly 600 s with "the upload

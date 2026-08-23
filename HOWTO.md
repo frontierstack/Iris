@@ -630,6 +630,11 @@ Full contract: `docs/API_CONTRACT.md`.
   the phase, percentage, event count and ETA (hover it for bytes and rate), then READY / REVIEW / MAP / ERROR
   (hover ERROR for the reason). Once the file is READY, the *Interpreted* chip carries the same percentage for
   phase 2, which on a large capture is the longer half.
+- **A file shows PARSING with "no progress reported yet"** — nothing is working on it *right now*. The
+  usual reason is that automatic interpretation is off (Settings → the `autoEnrich` ingest setting): the
+  lines are in the pool and searchable, and phase 2 waits for you to ask. Use *Interpret now* on the row,
+  or turn automatic interpretation back on. Iris says this instead of showing a 0 % bar, because a bar
+  that never moves cannot be told apart from a hang.
 - **A drop of many files shows some as *waiting its turn*** — that is normal and healthy: Iris sends three files
   at a time and the rest queue. They are not stalled, and the tab tells the server they are still coming, so they
   are not failed either. Leave the tab open: **closing it abandons everything that has not been sent yet**, and

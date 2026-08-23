@@ -78,6 +78,11 @@ class Expanded:
 
     members: list[tuple[str, bytes]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    # `expand_path` only: this file is NOT a container and its single member IS the file on disk, so
+    # `members` is empty and the caller should read (or stream) the path itself. It exists so that
+    # deciding "this 1.9 GB capture is not an archive" costs a 64 KB read instead of 1.9 GB — which is
+    # the whole point of having a path-based entry point at all.
+    passthrough: bool = False
 
     @property
     def ok(self) -> bool:
@@ -163,6 +168,166 @@ def expand(filename: str, data: bytes) -> Expanded:
     if budget.tripped:
         out.errors.append(f"{filename}: {budget.tripped}")
     return out
+
+
+# How much of a container is read to decide WHAT it is. Every sniff here looks at a magic number, an
+# extension or the tar header at offset 257 — none of them needs more than a few hundred bytes.
+SNIFF_BYTES = 64 * 1024
+
+
+def expand_path(filename: str, path) -> Expanded:
+    """`expand`, reading the container from DISK instead of from a copy of it in memory.
+
+    The 3.35 GB packet-capture bundle is what this exists for. `expand(filename, data)` needs the whole
+    container as one `bytes` before it can look at the first member — so staging that archive meant 3.6
+    GB of RAM on top of the members it produced, on a VM that segfaults under exactly that pressure.
+
+    zip and tar are the two containers that can be READ member at a time from an open file, and they are
+    also the two that arrive big, so those open the path directly and never hold more than one member.
+    Everything else falls back to `expand()` over the file's bytes, deliberately: the single-file
+    compressors (gz/bz2/xz/zst) decompress into memory whatever we do, 7z and RAR are third-party
+    readers with their own file handling, and a NON-container is about to be parsed from this same path
+    anyway. All of them are already bounded by MAX_MEMBER_BYTES; the outer container was not.
+    """
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(SNIFF_BYTES)
+    except OSError as exc:
+        out = Expanded()
+        out.errors.append(f"{filename}: could not be read ({type(exc).__name__}: {exc}).")
+        return out
+
+    lower = filename.lower()
+    # An Office/OOXML package is a zip that is a DOCUMENT — its parser wants the whole file, not its
+    # entries. `is_ooxml` reads the central directory, which a 64 KB head does not contain, so this
+    # asks the extension first and only then pays for the full read.
+    is_zip = head.startswith(ZIP_MAGIC) or lower.endswith(".zip")
+    if is_zip and not lower.endswith(OFFICE_EXTENSIONS):
+        out, budget = Expanded(), _Budget()
+        try:
+            with open(path, "rb") as fh:
+                if is_ooxml_head(fh):
+                    return expand(filename, _read_all(path))
+                fh.seek(0)
+                _expand_zip(out, budget, filename, None, 0, fileobj=fh)
+        except OSError as exc:
+            out.errors.append(f"{filename}: could not be read ({type(exc).__name__}: {exc}).")
+        if budget.tripped:
+            out.errors.append(f"{filename}: {budget.tripped}")
+        return out
+
+    if _is_tar(head) or lower.endswith(TAR_EXTENSIONS) or _compressed_tar(head):
+        out, budget = Expanded(), _Budget()
+        opened = False
+        try:
+            with open(path, "rb") as fh:
+                opened = _expand_tar(out, budget, filename, None, 0, fileobj=fh)
+        except OSError as exc:
+            out.errors.append(f"{filename}: could not be read ({type(exc).__name__}: {exc}).")
+            return out
+        if opened:
+            if budget.tripped:
+                out.errors.append(f"{filename}: {budget.tripped}")
+            return out
+        # not actually a tar after all — fall through and let the byte path decide
+
+    # The formats that still need the whole file in memory. Each one either decompresses into RAM
+    # regardless (gz/bz2/xz/zst), is handled by a third-party reader with its own file handling
+    # (7z/rar), or rewrites the bytes before anything else sees them (a UTF-16 text export). All are
+    # bounded by MAX_MEMBER_BYTES once expanded; none of them is the multi-gigabyte case.
+    if (head.startswith((GZIP_MAGIC, BZIP2_MAGIC, XZ_MAGIC, ZSTD_MAGIC, SEVENZ_MAGIC, RAR_MAGIC))
+            or lower.endswith((".gz", ".bz2", ".xz", ".lzma", ".zst", ".7z", ".rar"))
+            or (head[:2] in (b"\xff\xfe", b"\xfe\xff") and lower.endswith(_TEXT_EXTENSIONS))):
+        return expand(filename, _read_all(path))
+
+    # Not a container. Say so instead of reading it: the caller has the path and is about to parse
+    # from it anyway, and this is the branch every large log takes.
+    return Expanded(passthrough=True)
+
+
+def _read_all(path) -> bytes:
+    try:
+        with open(path, "rb") as fh:
+            return fh.read()
+    except OSError:
+        return b""
+
+
+def _bytes_of(data: Optional[bytes], fileobj) -> bytes:
+    """The container's own bytes, loaded only on the branch that actually keeps them as a member."""
+    if data is not None:
+        return data
+    if fileobj is None:
+        return b""
+    try:
+        fileobj.seek(0)
+        return fileobj.read()
+    except Exception:
+        return b""
+
+
+def is_ooxml_head(fh) -> bool:
+    """`is_ooxml` for an open file: the marker lives in the central directory at the END of the zip."""
+    try:
+        fh.seek(0)
+        if fh.read(4) != ZIP_MAGIC:
+            return False
+        if OOXML_MARKER in fh.read(4096):
+            return True
+        with zipfile.ZipFile(fh) as zf:
+            return OOXML_MARKER.decode() in zf.namelist()
+    except Exception:
+        return False
+
+
+def read_member(path, member: str) -> bytes:
+    """The bytes of ONE member of a staged container, read from disk.
+
+    `member` is the provenance path Iris already puts on the source — `bundle.zip!var/log/auth.log`, and
+    for nesting `outer.zip!inner.tar!var/log/auth.log`. The first segment names the container itself and
+    is dropped; what follows is walked one level at a time.
+
+    This is what makes a staged archive's members honest. `Store.source_paths[sid]` for such a member is
+    the CONTAINER, so anything that re-read "the source's file" got the archive: phase 2 replaced a
+    perfectly parsed syslog member with lines of decoded zip binary and reported the source `enriched`.
+    Reading the member back is also the bounded thing to do — MAX_MEMBER_BYTES, not the archive's size.
+    """
+    parts = member.split("!")
+    if len(parts) < 2:
+        raise ValueError(f"{member!r} does not name a member inside a container")
+    blob: Optional[bytes] = None
+    for i, want in enumerate(parts[1:]):
+        if i == 0:
+            with open(path, "rb") as fh:
+                blob = _read_one(fh, want)
+        else:
+            blob = _read_one(io.BytesIO(blob or b""), want)
+        if blob is None:
+            raise KeyError(f"{member!r}: {want!r} is not in the container")
+    return blob or b""
+
+
+def _read_one(fh, want: str) -> Optional[bytes]:
+    """One member out of an open zip or tar, by its (already sanitised) inner path."""
+    head = fh.read(SNIFF_BYTES)
+    fh.seek(0)
+    if head.startswith(ZIP_MAGIC):
+        with zipfile.ZipFile(fh) as zf:
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                if safe_member_name(info.filename) == want:
+                    return zf.read(info)
+        return None
+    with tarfile.open(fileobj=fh, mode="r:*") as tf:
+        while True:
+            m = tf.next()
+            if m is None:
+                return None
+            if not m.isfile() or safe_member_name(m.name) != want:
+                continue
+            got = tf.extractfile(m)
+            return got.read() if got is not None else b""
 
 
 # ------------------------------------------------------------------------ internals
@@ -259,12 +424,16 @@ def _expand_single(out: Expanded, budget: _Budget, filename: str, data: bytes, d
     _emit(out, budget, name, blob, depth)
 
 
-def _expand_zip(out: Expanded, budget: _Budget, filename: str, data: bytes, depth: int) -> None:
+def _expand_zip(out: Expanded, budget: _Budget, filename: str, data: Optional[bytes], depth: int,
+                fileobj=None) -> None:
+    """`data` may be None when `fileobj` is an open file: a 3.35 GB zip must never be read into RAM
+    whole just to list what is inside it. The only branch that still needs the bytes is the one that
+    keeps an unreadable container as its own member, and it loads them there."""
     try:
-        zf = zipfile.ZipFile(io.BytesIO(data))
+        zf = zipfile.ZipFile(fileobj if fileobj is not None else io.BytesIO(data or b""))
     except zipfile.BadZipFile as exc:
         out.errors.append(f"{filename}: not a readable zip archive ({exc}).")
-        out.members.append((filename, data))
+        out.members.append((filename, _bytes_of(data, fileobj)))
         return
     encrypted: list[str] = []
     traversal: list[str] = []
@@ -315,9 +484,10 @@ def _expand_zip(out: Expanded, budget: _Budget, filename: str, data: bytes, dept
         )
 
 
-def _expand_tar(out: Expanded, budget: _Budget, filename: str, data: bytes, depth: int) -> bool:
+def _expand_tar(out: Expanded, budget: _Budget, filename: str, data: Optional[bytes], depth: int,
+                fileobj=None) -> bool:
     try:
-        tf = tarfile.open(fileobj=io.BytesIO(data), mode="r:*")
+        tf = tarfile.open(fileobj=(fileobj if fileobj is not None else io.BytesIO(data or b"")), mode="r:*")
     except Exception as exc:
         out.errors.append(f"{filename}: not a readable tar archive ({type(exc).__name__}: {exc}).")
         return False

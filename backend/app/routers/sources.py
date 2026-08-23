@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import re
+import uuid
 
 import os
 import threading
@@ -19,7 +21,7 @@ from ..jobs import REGISTRY
 from ..models import Source
 from ..store import STORE
 from .jobs import resolve_job
-from .library import stage_files
+from .library import _spool, stage_files
 
 router = APIRouter(prefix="/sources", tags=["sources"])
 
@@ -53,17 +55,27 @@ async def upload_sources(response: Response, files: list[UploadFile] = File(...)
         return [by_id[f.sourceId] for f in staged if f.sourceId in by_id]
     out: list[Source] = []
     for i, f in enumerate(files):
-        data = await f.read()
         name = f.filename or "upload.log"
-        jid = resolve_job(ids[i] if i < len(ids) else None, name, len(data), "case", STORE.case_id)
-        REGISTRY.begin_parse(jid, len(data))
+        jid = resolve_job(ids[i] if i < len(ids) else None, name, 0, "case", STORE.case_id)
+        # Land the bytes on disk first, in chunks, and hand the store a PATH. `await f.read()` here was
+        # a full copy of the upload in memory for the whole ingest — see routers/library._spool.
+        staged = STORE.upload_dir / f"{uuid.uuid4().hex[:8]}_{re.sub(r'[^A-Za-z0-9._-]', '_', Path(name).name)}"
+        try:
+            await asyncio.to_thread(STORE.upload_dir.mkdir, parents=True, exist_ok=True)
+            size = await _spool(f, staged)
+        except OSError as exc:
+            staged.unlink(missing_ok=True)
+            REGISTRY.fail(jid, f"could not write the file ({config.safe_os_error(exc)})")
+            raise HTTPException(500, f"could not store {name}: {config.safe_os_error(exc)}")
+        REGISTRY.begin_parse(jid, size)
         try:
             # Archives expand here; a container Iris refuses to open (encrypted, bombed, unsupported) comes
-            # back as an ERROR source carrying the reason. See Store.ingest_upload.
-            # ingest_upload parses inline under SYNC_LIMIT — off the event loop, or every other request
+            # back as an ERROR source carrying the reason. See Store.ingest_upload_path.
+            # It parses inline under SYNC_LIMIT — off the event loop, or every other request
             # in the process waits for it (see routers/library.stage_files)
-            added = await asyncio.to_thread(STORE.ingest_upload, name, data)
+            added = await asyncio.to_thread(STORE.ingest_upload_path, name, staged)
         except Exception as exc:
+            staged.unlink(missing_ok=True)
             REGISTRY.fail(jid, f"{type(exc).__name__}: {exc}")
             raise
         _report(jid, added)
@@ -266,14 +278,15 @@ async def _suggest_for(sid: str) -> dict:
     src = STORE.sources.get(sid)
     if not src:
         raise HTTPException(404, "source not found")
-    path = STORE.source_paths.get(sid)
     lines: list[str] = []
-    if path is not None:
+    if STORE.source_paths.get(sid) is not None:
         try:
-            with open(path, "rb") as fh:
-                head = fh.read(256 * 1024)
+            # source_head, not the raw path: for a member of a staged archive the recorded path is the
+            # CONTAINER, and suggesting a field mapping from a zip's own bytes is worse than suggesting
+            # nothing. Bounded either way — this only ever needs the first few lines.
+            head = STORE.source_head(sid, 256 * 1024)
             lines = [l for l in head.decode("utf-8", errors="replace").splitlines() if l.strip()][:40]
-        except OSError:
+        except (OSError, KeyError, ValueError):
             lines = []
     if not lines and src.sample:
         lines = [l for l in src.sample.splitlines() if l.strip()]
@@ -332,6 +345,26 @@ def _source_path(sid: str) -> tuple[Source, Path]:
     return src, path
 
 
+def _member_of(sid: str) -> str:
+    """The provenance path inside the container, or '' when this source IS its file.
+
+    A member of a library-staged archive shares the container's path, so every reader that opens
+    `source_paths[sid]` gets the ARCHIVE. In the pool that was outright corruption — phase 2 replaced a
+    parsed syslog member with lines of decoded zip binary — and here it is "show me the raw log"
+    answering with the zip's own bytes and calling the source binary.
+    """
+    return STORE.source_member.get(sid, "")
+
+
+def _member_bytes(sid: str, src: Source) -> bytes:
+    """One member, held for one request. Bounded by archives.MAX_MEMBER_BYTES; its container is not."""
+    try:
+        return STORE.source_bytes(sid)
+    except (OSError, KeyError, ValueError) as exc:
+        raise HTTPException(404, f"{src.file} could not be read back out of its archive "
+                                 f"({type(exc).__name__})") from exc
+
+
 def _looks_binary(path: Path, name: str) -> bool:
     if Path(name).suffix.lower() in _BINARY_EXT or path.suffix.lower() in _BINARY_EXT:
         return True
@@ -341,6 +374,12 @@ def _looks_binary(path: Path, name: str) -> bool:
     except OSError:
         return True
     return b"\x00" in head
+
+
+def _lines_of(blob: bytes):
+    """`_read_lines` over bytes already in hand — the archive-member form of the same walk."""
+    for n, line in enumerate(blob.decode("utf-8", "replace").splitlines(), 1):
+        yield n, line
 
 
 def _read_lines(path: Path):
@@ -363,12 +402,20 @@ def source_raw(sid: str, offset: int = Query(0, ge=0), limit: int = Query(500, g
     files (EVTX, dumps, sqlite, anything with NUL bytes up front) return binary:true with a hint.
     """
     src, path = _source_path(sid)
-    if _looks_binary(path, src.file):
-        return {"file": src.file, "size": src.size, "totalLines": 0, "matches": 0, "offset": offset, "limit": limit,
-                "q": q, "lines": [], "truncatedLine": False, "binary": True, "hint": _BINARY_HINT}
-
-    st = path.stat()
-    key = (str(path), st.st_size, int(st.st_mtime_ns))
+    member = _member_of(sid)
+    binary = {"file": src.file, "size": src.size, "totalLines": 0, "matches": 0, "offset": offset,
+              "limit": limit, "q": q, "lines": [], "truncatedLine": False, "binary": True,
+              "hint": _BINARY_HINT}
+    if member:
+        blob = _member_bytes(sid, src)
+        if Path(src.file.split("!")[-1]).suffix.lower() in _BINARY_EXT or b"\x00" in blob[:8192]:
+            return binary
+        rows, key = _lines_of(blob), (f"{path}!{member}", len(blob), 0)
+    else:
+        if _looks_binary(path, src.file):
+            return binary
+        st = path.stat()
+        rows, key = _read_lines(path), (str(path), st.st_size, int(st.st_mtime_ns))
     with _line_counts_lock:
         known_total = _line_counts.get(key)
 
@@ -379,7 +426,7 @@ def source_raw(sid: str, offset: int = Query(0, ge=0), limit: int = Query(500, g
     total = 0
     walked_all = True
     try:
-        for n, text in _read_lines(path):
+        for n, text in rows:
             total = n
             if needle:
                 if needle not in text.lower():
@@ -412,7 +459,15 @@ def source_raw(sid: str, offset: int = Query(0, ge=0), limit: int = Query(500, g
 
 
 @router.get("/{sid}/download")
-def source_download(sid: str) -> FileResponse:
-    """The original uploaded bytes as an attachment (Content-Disposition carries the original file name)."""
+def source_download(sid: str):
+    """The original uploaded bytes as an attachment (Content-Disposition carries the original file name).
+
+    For a member of a staged archive that is the MEMBER, not the archive: the header names `auth.log`,
+    and handing over the 3 GB zip under that name would be a different file than the one asked for.
+    """
     src, path = _source_path(sid)
-    return FileResponse(str(path), media_type="application/octet-stream", filename=os.path.basename(src.file) or "upload.bin")
+    name = os.path.basename(src.file.split("!")[-1]) or "upload.bin"
+    if _member_of(sid):
+        return Response(content=_member_bytes(sid, src), media_type="application/octet-stream",
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
+    return FileResponse(str(path), media_type="application/octet-stream", filename=name)

@@ -525,6 +525,9 @@ function ParsingCell({ source }: { source: Source }) {
       </span>
       {p && p.bytesTotal > 0 && <Bar pct={p.pct} color="var(--accent)" />}
       {detail && <span className="parsing-cell__detail ellipsis">{detail}</span>}
+      {/* No tracker row: say so. A bar at 0 % for a source nothing is working on is the exact reading
+          that made a settled workspace look like a hang. */}
+      {!p && <span className="parsing-cell__detail">no progress reported yet</span>}
     </div>
   );
 }
@@ -537,6 +540,10 @@ function JobRow({ job, pct }: { job: UploadJob; pct?: number }) {
   // tell it apart from a hang. job.progress is the server's real answer — bytes consumed, rate and ETA.
   const inFlight = job.state === 'uploading' || job.state === 'queued';
   const prog = job.state === 'parsing' ? job.progress : null;
+  // A `parsing` job with NO progress row is the server saying "parsing, no detail" — the parse thread
+  // has not registered, or the work is waiting on something. Drawing a full bar for that claims the
+  // file is done, and drawing 0 % claims it is stuck; the bar is simply not drawn.
+  const noDetail = job.state === 'parsing' && !prog;
   const shown = inFlight ? (pct ?? (job.size ? Math.round((job.received / job.size) * 100) : 0))
     : prog ? prog.pct : 100;
   const label = job.state === 'error' ? (job.interrupted ? 'interrupted' : 'failed')
@@ -566,7 +573,8 @@ function JobRow({ job, pct }: { job: UploadJob; pct?: number }) {
         {(job.state === 'uploading' || job.state === 'parsing') && <span className="spinner" />}
         {label}
       </span>
-      <Bar pct={shown} color={job.state === 'error' ? 'var(--bad)' : job.state === 'ready' ? 'var(--ok)' : 'var(--accent)'} />
+      {noDetail ? <span className="muted" style={{ fontSize: 12 }}>no progress reported yet</span>
+        : <Bar pct={shown} color={job.state === 'error' ? 'var(--bad)' : job.state === 'ready' ? 'var(--ok)' : 'var(--accent)'} />}
       {detail && <span className="muted" style={{ gridColumn: '1 / -1', fontSize: 12 }}>{detail}</span>}
       {job.error && <span style={{ gridColumn: '1 / -1', color: 'var(--bad)' }}>{job.error}</span>}
     </div>

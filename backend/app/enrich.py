@@ -38,11 +38,13 @@ What must stay true, and why each one is load-bearing:
 """
 from __future__ import annotations
 
+import codecs
 import contextlib
 import logging
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterable, Optional
 
 from . import jobs
@@ -63,6 +65,56 @@ MAX_RAW_PREVIEW = 200
 # imports config only, and reaches the store lazily inside functions.
 
 
+# How much of the file phase 1 decodes at a time. Big enough that the per-chunk bookkeeping is noise,
+# small enough that a 1.9 GB capture never exists in this process as one Python str. See `_iter_lines`.
+CHUNK_BYTES = 4 * 1024 * 1024
+
+
+def _iter_lines(chunks: Iterable[bytes]) -> Iterable[str]:
+    """Decode a byte stream and yield its lines, preserving `str.splitlines()` semantics exactly.
+
+    Phase 1 used to hold the file THREE times over: `data` itself, `data.decode()` as one Python str,
+    and `text.splitlines()` as a list holding every line as its own object. On the analyst's 639 MB
+    binetflow export that is roughly 2 GB of transient allocation just to produce the events, on a VM
+    that segfaults under exactly that kind of pressure — and all of it is avoidable, because nothing in
+    phase 1 ever looks at more than one line at a time.
+
+    Two things make the chunked version give the SAME answer as the whole-buffer one, and both have to
+    be right or this is an evidence bug rather than a memory optimisation:
+
+      * **Decoding.** A UTF-8 sequence can straddle a chunk boundary, and decoding the halves separately
+        would put two replacement characters where the whole buffer produces one character. An
+        incremental decoder carries the partial sequence across, so the text is identical.
+      * **Line breaks.** `splitlines()` breaks on far more than LF — CR, VT, FF, the file/group/record
+        separators, NEL, LINE SEPARATOR, PARAGRAPH SEPARATOR — and treats CRLF as ONE break. So the last
+        element of each chunk's split is held back as a remainder, because only the next chunk can say
+        whether it was a whole line or the start of one; and a chunk ending in a bare CR is held back
+        too, or a CRLF straddling the boundary would become two line breaks instead of one.
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    rest = ""
+    for chunk in chunks:
+        text = rest + decoder.decode(chunk)
+        rest = ""
+        if not text:
+            continue
+        if text.endswith("\r"):
+            # may be the first half of a CRLF; only the next chunk can say
+            text, rest = text[:-1], "\r"
+        parts = text.splitlines()
+        if parts:
+            # `splitlines()` cannot tell "ended on a break" from "ended mid-line", and only the first
+            # means the final part is a complete line. Splitting again WITH the ends answers it: the
+            # last element differs from its stripped form exactly when a break terminated it.
+            kept = text.splitlines(keepends=True)
+            if kept[-1] == parts[-1]:
+                rest = parts.pop() + rest
+        yield from parts
+    rest += decoder.decode(b"", final=True)
+    if rest:
+        yield from rest.splitlines()
+
+
 def raw_events(sid: str, filename: str, family: str, data: bytes, prefix: str,
                first_id: int = 1, progress: Optional[Callable[[int, int], None]] = None) -> list[Event]:
     """Phase 1: bytes -> the plainest events that are still true.
@@ -70,7 +122,38 @@ def raw_events(sid: str, filename: str, family: str, data: bytes, prefix: str,
     `family` is the sniffer's guess and is recorded so source chips and per-parser filters work before
     enrichment; it does NOT mean the file has been parsed. Nothing here inspects the line's content.
     """
-    text = data.decode("utf-8", "replace")
+    return _raw_events(sid, filename, family, (data,), len(data), prefix, first_id, progress)
+
+
+def raw_events_from_file(sid: str, filename: str, family: str, path: Path, prefix: str,
+                         first_id: int = 1, progress: Optional[Callable[[int, int], None]] = None,
+                         total: int = 0) -> list[Event]:
+    """`raw_events` over a file on disk, never holding more than one chunk of it in memory.
+
+    This is the point of streaming phase 1: the EVENTS are memory an evidence tool is supposed to spend,
+    and the file they were read from is not. Output is identical to `raw_events` over the same bytes —
+    `tests/test_raw_stream.py` pins that on the cases where a chunked reader usually goes wrong (a
+    multi-byte character on the boundary, a CRLF on the boundary, no trailing newline, a lone CR).
+    """
+    if not total:
+        try:
+            total = path.stat().st_size
+        except OSError:
+            total = 0
+
+    def chunks() -> Iterable[bytes]:
+        with open(path, "rb") as fh:
+            while True:
+                block = fh.read(CHUNK_BYTES)
+                if not block:
+                    return
+                yield block
+
+    return _raw_events(sid, filename, family, chunks(), total, prefix, first_id, progress)
+
+
+def _raw_events(sid: str, filename: str, family: str, chunks: Iterable[bytes], total: int, prefix: str,
+                first_id: int, progress: Optional[Callable[[int, int], None]]) -> list[Event]:
     out: list[Event] = []
     append = out.append
     n = first_id
@@ -89,9 +172,9 @@ def raw_events(sid: str, filename: str, family: str, data: bytes, prefix: str,
     # ...and a BYTE step as well, because a record count alone never fires on a small file: at
     # 20,000 records a 5,000-line log published nothing at all and its bar read 0 % start to
     # finish. Whichever comes first wins. See jobs.progress_step.
-    step = jobs.progress_step(len(data))
+    step = jobs.progress_step(total)
     next_at = step
-    for line in text.splitlines():
+    for line in _iter_lines(chunks):
         done += len(line) + 1
         if not line.strip():
             continue
@@ -108,7 +191,7 @@ def raw_events(sid: str, filename: str, family: str, data: bytes, prefix: str,
         # 0% or 100% is the same "is it hung?" question this whole change exists to answer
         if progress is not None and (done >= next_at or not len(out) % every):
             next_at = done + step
-            progress(min(done, len(data)), len(out))
+            progress(min(done, total) if total else done, len(out))
     return out
 
 

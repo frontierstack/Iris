@@ -45,6 +45,11 @@ from .parsers.delimited import DelimitedParser
 from .parsers.registry import fingerprint, state_for
 
 SYNC_LIMIT = 50 * 1024 * 1024
+# How much of a file the SNIFFER is shown when the bytes are being streamed rather than held. Every
+# fingerprint rule reads a magic number, an extension or the first few lines; `probe_upload` has always
+# passed a 2 MB prefix for the same reason. Reading a 1.9 GB capture to decide it is a pcap is exactly
+# the cost the streaming path exists to remove.
+SNIFF_HEAD_BYTES = 2 * 1024 * 1024
 # Line-oriented text families that can be shown RAW before they are parsed (see app/enrich.py). A parser
 # marked `chunkable` already qualifies by definition — it can be split on newlines — and these are the
 # line formats that are not chunkable for other reasons. Anything binary or container-shaped is absent on
@@ -248,6 +253,13 @@ class Store:
         self.created_at = datetime.now(UTC)
         self.sources: dict[str, Source] = {}
         self.source_paths: dict[str, Path] = {}
+        # sid -> the member's provenance path INSIDE its container ("bundle.zip!var/log/auth.log"),
+        # for the sources whose `source_paths` entry is a container rather than their own bytes. That
+        # only happens for a library-staged archive, where every member shares the one staged file —
+        # and it is exactly what made phase 2 re-read the ARCHIVE and replace a parsed syslog member
+        # with lines of decoded zip binary, reporting the source `enriched` afterwards. Absent means
+        # the path IS the source; `source_bytes()` is the one place that has to know the difference.
+        self.source_member: dict[str, str] = {}
         self.source_parsers: dict[str, BaseParser] = {}
         self.source_order: list[str] = []
         # sid -> 'case' | 'library'. A library source belongs to no case: it is parsed into the pool but
@@ -504,6 +516,7 @@ class Store:
                         pass
             self.sources = {k: v for k, v in self.sources.items() if k in keep}
             self.source_paths = {k: v for k, v in self.source_paths.items() if k in keep}
+            self.source_member = {k: v for k, v in self.source_member.items() if k in keep}
             self.source_parsers = {k: v for k, v in self.source_parsers.items() if k in keep}
             self.source_origin = {k: v for k, v in self.source_origin.items() if k in keep}
             self.source_library = {k: v for k, v in self.source_library.items() if k in keep}
@@ -988,34 +1001,93 @@ class Store:
             return cls.library_sid(file_name)
         return uuid.uuid5(uuid.NAMESPACE_URL, f"iris-library/{file_name}#{index}").hex[:8]
 
-    def _add_library_members(self, name: str, display: str, data: bytes, background_ok: bool) -> list[Source]:
+    def _add_library_members(self, name: str, display: str, data: Optional[bytes],
+                             background_ok: bool) -> list[Source]:
         """Parse a staged library file (expanding containers) into the pool as library-origin sources.
 
         Deterministic: member order and per-member ids come from the file name + index, so a restart
         rebuilds exactly the same sources with exactly the same event ids — which is what lets
         restore_library() skip work instead of duplicating it.
+
+        `data=None` is the streaming path and the one that matters for a big upload: the container is
+        expanded FROM DISK (`archives.expand_path`), and a file that is not a container at all is never
+        read here — it comes back `passthrough` and `add_file` streams it. The 3.35 GB capture bundle is
+        why: `expand(filename, data)` cannot look at the first member without the whole archive in RAM.
         """
-        expanded = self.expand_upload_ex(display or name, data)
+        path = config.LIBRARY_DIR / name
+        if data is None:
+            expanded = archives.expand_path(display or name, path)
+        else:
+            expanded = self.expand_upload_ex(display or name, data)
         members = expanded.members
         if expanded.errors:
             # a container Iris refuses to open stays a staged blob: parsing it as binary strings would
             # put noise in the pool. It is still attachable, where ingest reports the refusal properly.
             return []
         out: list[Source] = []
-        path = config.LIBRARY_DIR / name
+        if expanded.passthrough:
+            # not a container: this file IS the single source, and its bytes stay on disk
+            sid = self._member_sid(name, 0)
+            with self.lock:
+                exists = sid in self.sources
+            if exists:
+                return []
+            src = self.add_file(display or name, None, background_ok=background_ok, sid=sid, path=path,
+                                origin="library", library_name=name, id_prefix=f"l{sid}")
+            pool_store.save_manifest(name, [src.id])
+            return [src]
         for i, (member_name, blob) in enumerate(members):
             sid = self._member_sid(name, i)
             with self.lock:
                 if sid in self.sources:
                     continue
+            # A single member carrying the file's own name is the file itself (the byte path's way of
+            # saying "not a container"); anything else is a real member and records where it came from
+            # so `source_bytes` can read it back out of the container instead of re-reading the archive.
+            is_self = len(members) == 1 and member_name == (display or name)
             out.append(self.add_file(member_name, blob, background_ok=background_ok, sid=sid, path=path,
-                                     origin="library", library_name=name, id_prefix=f"l{sid}"))
+                                     origin="library", library_name=name, id_prefix=f"l{sid}",
+                                     member="" if is_self else member_name))
         if out:
             # Which members this file expands into. Written here because this is the only place that
             # knows: an archive's member list needs the archive expanded, which is what a cache HIT
             # exists to avoid doing again.
             pool_store.save_manifest(name, [s.id for s in out])
         return out
+
+    def source_bytes(self, sid: str) -> bytes:
+        """The bytes of THIS source — never its container's.
+
+        Everything that re-reads a source (phase 2, a remap, the raw viewer, field suggestions) used to
+        do `source_paths[sid].read_bytes()`, which is right for every source except one: a member of a
+        library-staged archive, whose recorded path is the archive. `tests/test_archive_members.py`
+        pins what that cost — 20 clean syslog lines replaced by 21 lines of decoded zip binary, on a
+        source still reporting READY / enriched.
+
+        Reading the member back out of the container is also the BOUNDED thing to do: one member is
+        capped at `archives.MAX_MEMBER_BYTES`, while the container it lives in is not capped at all.
+        """
+        with self.lock:
+            path = self.source_paths.get(sid)
+            member = self.source_member.get(sid, "")
+        if path is None:
+            raise FileNotFoundError(f"source {sid} has no file on disk")
+        if not member:
+            return path.read_bytes()
+        return archives.read_member(path, member)
+
+    def source_head(self, sid: str, limit: int) -> bytes:
+        """A bounded prefix of `source_bytes`, for callers that only sniff (field suggestions, a binary
+        check). A member is still read whole — a container cannot be sliced — but it is one member."""
+        with self.lock:
+            path = self.source_paths.get(sid)
+            member = self.source_member.get(sid, "")
+        if path is None:
+            raise FileNotFoundError(f"source {sid} has no file on disk")
+        if member:
+            return archives.read_member(path, member)[:limit]
+        with open(path, "rb") as fh:
+            return fh.read(limit)
 
     def _room_for(self, source_bytes: int) -> bool:
         """Is there live memory for a source of this size? Never blocks a small file.
@@ -1148,24 +1220,23 @@ class Store:
                                          events=sum(s.events for s in cached))
                     continue
                 try:
-                    data = path.read_bytes()
+                    # The file is NOT read here any more — a restart used to pull every staged log into
+                    # memory whole, and this library is 4.9 GB. Prove it is readable and take its size;
+                    # `_add_library_members` streams the rest (or reads one archive member at a time).
+                    nbytes = path.stat().st_size
+                    with open(path, "rb") as probe:
+                        probe.read(1)
                 except OSError as exc:
                     # not a budget problem and not a parser problem — the bytes themselves are unreachable.
                     # Reported as its own reason, because the fix is on disk, not in the settings.
-                    try:
-                        size = path.stat().st_size
-                    except OSError:
-                        size = 0
-                    self.note_pool_skip(name, display, size, "unreadable",
+                    self.note_pool_skip(name, display, 0, "unreadable",
                                         f"could not be read from the library on disk ({config.safe_os_error(exc)}) — its events are NOT searchable")
                     with self.lock:
                         self.pool_pending = max(0, self.pool_pending - 1)
                         self._plan_state(name, "error")
                     continue
-                nbytes = len(data)
-                sids = self._add_library_members(name, display, data, background_ok=False)
+                sids = self._add_library_members(name, display, None, background_ok=False)
                 added += len(sids)
-                del data  # never hold the raw bytes and the parsed events of the NEXT file at once
                 with self.lock:
                     self.pool_pending = max(0, self.pool_pending - 1)
                     self.pool_loaded += 1
@@ -1280,23 +1351,25 @@ class Store:
         the parse fails the source lands in the pool in state ERROR carrying the reason.
         """
         path = config.LIBRARY_DIR / Path(name).name
-        data = path.read_bytes()          # OSError is the caller's to report
-        try:
-            with self.bulk_load():
-                added = self._add_library_members(path.name, display or path.name, data, background_ok=True)
-        finally:
-            del data
+        with open(path, "rb") as probe:   # OSError is the caller's to report, before anything changes
+            probe.read(1)
+        with self.bulk_load():
+            added = self._add_library_members(path.name, display or path.name, None, background_ok=True)
         self.clear_pool_skip(path.name)
         with self._detect_lock:
             self._run_detections()
         self.bump()
         return added
 
-    def add_library_file(self, name: str, display: str, data: bytes) -> list[Source]:
+    def add_library_file(self, name: str, display: str, data: "Optional[bytes]" = None) -> list[Source]:
         """Parse a freshly staged library file into the pool (the bytes are already on disk).
 
         Never materialises a case and never writes into cases/ — that guarantee is the whole point of
         staging: an upload must not conjure a case the analyst did not create.
+
+        `data` is optional and callers should leave it out: the bytes ARE on disk by the time this runs,
+        so handing them in as well is a second full copy of the upload for no benefit. It stays
+        accepted for the callers that legitimately hold bytes with no file behind them (tests).
         """
         return self._add_library_members(name, display, data, background_ok=True)
 
@@ -1477,7 +1550,36 @@ class Store:
             out.append(self.add_error_source(filename, data, " ".join(expanded.errors)[:2000]))
         return out
 
-    def add_error_source(self, filename: str, data: bytes, message: str) -> Source:
+    def ingest_upload_path(self, filename: str, staged: Path) -> list[Source]:
+        """`ingest_upload` starting from bytes ALREADY ON DISK, which is where an upload now lands.
+
+        Same contract: expand the container, ingest what came out, and surface what did NOT as an ERROR
+        source. What changes is that a file which is not a container is never read — it is already at
+        `staged`, so the source simply points there and phase 1 streams it. `expand_path` answers "is
+        this an archive?" from a 64 KB head, so deciding that a 1.9 GB capture is not one costs 64 KB.
+        """
+        expanded = archives.expand_path(filename, staged)
+        if expanded.passthrough:
+            return [self.add_file(filename, None, path=staged)]
+        members = expanded.members
+        if expanded.errors:
+            # A container we could not open comes back as itself; ingesting that as binary strings on
+            # top of the ERROR notice would just be noise.
+            members = [(n, b) for n, b in members if n != filename]
+        out = [self.add_file(name, blob) for name, blob in members]
+        if expanded.errors:
+            # the refusal names the file the analyst uploaded, and its bytes stay where they were staged
+            out.append(self.add_error_source(filename, None, " ".join(expanded.errors)[:2000], path=staged))
+        elif not out:
+            # an empty container: keep the upload visible rather than reporting nothing at all
+            out = [self.add_file(filename, None, path=staged)]
+        else:
+            # the members were written to their own files; the staged copy has no reader left
+            staged.unlink(missing_ok=True)
+        return out
+
+    def add_error_source(self, filename: str, data: Optional[bytes], message: str,
+                         path: Optional[Path] = None) -> Source:
         """Register a source that could NOT be ingested, so the failure is visible in the UI.
 
         Used for archives Iris refuses to expand (password protected, bomb caps tripped, unsupported
@@ -1485,14 +1587,22 @@ class Store:
         """
         self._materialise()
         sid = uuid.uuid4().hex[:8]
-        path = self.upload_dir / f"{sid}_{re.sub(r'[^A-Za-z0-9._-]', '_', filename)}"
-        try:
-            self.upload_dir.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
-        except OSError:
-            pass
+        if path is None:
+            path = self.upload_dir / f"{sid}_{re.sub(r'[^A-Za-z0-9._-]', '_', filename)}"
+            try:
+                self.upload_dir.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data or b"")
+            except OSError:
+                pass
+        if data is None:
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = 0
+        else:
+            size = len(data)
         src = Source(id=sid, file=filename, parser="archive", events=0, range=None, confidence=0.0,
-                     state="ERROR", size=len(data), sample=f"<{len(data):,} bytes>", error=message)
+                     state="ERROR", size=size, sample=f"<{size:,} bytes>", error=message)
         with self.lock:
             self.sources[sid] = src
             self.source_paths[sid] = path
@@ -1501,13 +1611,19 @@ class Store:
             self.bump()
         return src
 
-    def add_file(self, filename: str, data: bytes, background_ok: bool = True,
+    def add_file(self, filename: str, data: Optional[bytes] = None, background_ok: bool = True,
                  sid: Optional[str] = None, path: Optional[Path] = None, origin: str = "case",
-                 library_name: str = "", id_prefix: str = "") -> Source:
+                 library_name: str = "", id_prefix: str = "", member: str = "") -> Source:
         """Register and parse a raw file into the pool. Files above SYNC_LIMIT parse in a background thread.
 
         origin='library' means the bytes live in $IRIS_DATA_DIR/library/ and belong to no case: the source
         is parsed and searchable, but it is never written into case.json and a pending case stays pending.
+
+        **`data=None` means "the bytes are the file at `path`"** and is how a large upload avoids ever
+        existing in memory: the sniff reads a bounded head, the size comes from `stat()`, and phase 1
+        streams the file a chunk at a time. Pass `data` only when the caller genuinely holds bytes that
+        are NOT simply the contents of `path` — which is one case, an expanded archive member, and that
+        one passes `member` too so `source_bytes()` can find it again.
         """
         if origin != "library":
             self._materialise()
@@ -1516,15 +1632,27 @@ class Store:
             path = self.upload_dir / f"{sid}_{re.sub(r'[^A-Za-z0-9._-]', '_', filename)}"
             try:
                 self.upload_dir.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(data)
+                path.write_bytes(data or b"")
             except OSError:
                 pass
-        fp = fingerprint(filename, data)
+        streamed = data is None
+        if streamed:
+            # Never read the whole file to answer "what is this?" — the sniffer only ever looks at a
+            # prefix, and this branch exists precisely because the file can be gigabytes.
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = 0
+            with open(path, "rb") as fh:
+                head = fh.read(SNIFF_HEAD_BYTES)
+        else:
+            size, head = len(data), data
+        fp = fingerprint(filename, head)
         parser = fp.parser
         if isinstance(parser, DelimitedParser):
             parser = DelimitedParser(family=self._family_for_delimited(filename))
         src = Source(id=sid, file=filename, parser=parser.name, events=0, range=None, confidence=fp.confidence,
-                     state="PARSING", size=len(data), sample=fp.sample,
+                     state="PARSING", size=size, sample=fp.sample,
                      origin="library" if origin == "library" else "case")  # type: ignore[arg-type]
         with self.lock:
             self.sources[sid] = src
@@ -1535,11 +1663,13 @@ class Store:
                 self.source_library[sid] = library_name
             if id_prefix:
                 self.source_prefix[sid] = id_prefix
+            if member:
+                self.source_member[sid] = member
             self.source_order.append(sid)
         if self._raw_first_ok(parser):
             # Phase 1: the lines land in the pool and the index NOW; the parse and the normalization that
             # cost 85% of ingest are queued behind it. See app/enrich.py for the measurements.
-            self._raw_source(sid, data, fp.state, fp.confidence)
+            self._raw_source(sid, data, fp.state, fp.confidence, path=path if streamed else None, size=size)
             if origin == "library" and pool_store.was_skipped(sid):
                 # The analyst declined phase 2 for this file before the restart. Re-asking would undo
                 # the decision, and on a big workspace it is the decision that unblocked their screen.
@@ -1548,7 +1678,9 @@ class Store:
             elif settings_auto_enrich():
                 self.queue_enrichment(sid)
             return self.sources[sid]
-        if background_ok and len(data) > SYNC_LIMIT:
+        # `data=None` reaches _parse_source, which loads the bytes itself — on the PARSE thread for a
+        # big file, so the request that started the ingest never holds them.
+        if background_ok and size > SYNC_LIMIT:
             threading.Thread(target=self._parse_source, args=(sid, data, fp.state, fp.confidence), daemon=True).start()
         else:
             self._parse_source(sid, data, fp.state, fp.confidence)
@@ -1566,22 +1698,35 @@ class Store:
             return False
         return bool(getattr(parser, "chunkable", False)) or getattr(parser, "family", "") in _RAW_FIRST_FAMILIES
 
-    def _raw_source(self, sid: str, data: bytes, state: str, confidence: float) -> None:
-        """Phase 1 of a two-phase ingest: raw lines into the pool, nothing interpreted."""
+    def _raw_source(self, sid: str, data: Optional[bytes], state: str, confidence: float,
+                    path: Optional[Path] = None, size: int = 0) -> None:
+        """Phase 1 of a two-phase ingest: raw lines into the pool, nothing interpreted.
+
+        `path` (with `data=None`) reads the file a chunk at a time instead of holding it — see
+        `enrich.raw_events_from_file`. The events are identical either way; what changes is that a
+        1.9 GB capture is no longer in this process as bytes AND as a decoded str AND as a list of
+        every line, on top of the events themselves.
+        """
         from .jobs import PARSE_PROGRESS
 
         src = self.sources[sid]
         parser = self.source_parsers[sid]
-        PARSE_PROGRESS.start(sid, src.file, len(data))
+        total = size if data is None else len(data)
+        PARSE_PROGRESS.start(sid, src.file, total)
         with self.lock:
             prefix = self.source_prefix.get(sid, "")
             base = self._event_seq
         def tick(done: int, n: int) -> None:
             PARSE_PROGRESS.advance(sid, done=done, events=n, phase="reading")
 
-        events = enrich.raw_events(sid, src.file, parser.family, data, prefix,
-                                   first_id=(1 if prefix else base + 1), progress=tick)
-        PARSE_PROGRESS.advance(sid, done=len(data), events=len(events), phase="merging")
+        first_id = 1 if prefix else base + 1
+        if data is None and path is not None:
+            events = enrich.raw_events_from_file(sid, src.file, parser.family, path, prefix,
+                                                 first_id=first_id, progress=tick, total=total)
+        else:
+            events = enrich.raw_events(sid, src.file, parser.family, data or b"", prefix,
+                                       first_id=first_id, progress=tick)
+        PARSE_PROGRESS.advance(sid, done=total, events=len(events), phase="merging")
         if not prefix:
             with self.lock:
                 self._event_seq += len(events)
@@ -1597,7 +1742,7 @@ class Store:
         del events
         PARSE_PROGRESS.finish(sid)
         self.bump()
-        metrics.finish_progress(sid, n, len(data))
+        metrics.finish_progress(sid, n, total)
 
     def queue_enrichment(self, sid: str) -> bool:
         """Mark a source as waiting for phase 2 and hand it to the worker.
@@ -1686,10 +1831,13 @@ class Store:
         with self.lock:
             src.enrich = "enriching"  # type: ignore[assignment]
         try:
-            data = path.read_bytes()
+            # THE bug this accessor exists for. `path` is the staged CONTAINER when this source is an
+            # archive member, so reading it here replaced a parsed syslog member with lines of decoded
+            # zip binary — and left the source reporting READY / enriched over the top of it.
+            data = self.source_bytes(sid)
             PARSE_PROGRESS.start(sid, src.file, len(data))
             PARSE_PROGRESS.advance(sid, done=0, phase="enriching")
-        except OSError as exc:
+        except (OSError, KeyError, ValueError) as exc:
             with self.lock:
                 src.enrich, src.enrichError = "error", str(exc)  # type: ignore[assignment]
             return enrich.EnrichResult(sid=sid, ok=False, error=str(exc))
@@ -1987,8 +2135,10 @@ class Store:
     def remap_source(self, sid: str, fields: list[str], delimiter: Optional[str]) -> Source:
         with self.lock:
             src = self.sources[sid]
-            path = self.source_paths[sid]
-        data = path.read_bytes()
+        # source_bytes, not source_paths[sid].read_bytes(): for a member of a staged archive the
+        # recorded path is the CONTAINER, and re-parsing that as the member is how a mapping accepted
+        # on a log inside a zip used to fill the pool with the zip's own bytes.
+        data = self.source_bytes(sid)
         parser = DelimitedParser(fields=fields, delimiter=delimiter, family=self._family_for_delimited(src.file))
         with self.lock:
             self.source_parsers[sid] = parser
@@ -2000,18 +2150,31 @@ class Store:
         self._parse_source(sid, data, "READY", 0.95)
         return self.sources[sid]
 
-    def _parse_source(self, sid: str, data: bytes, state: str, confidence: float) -> None:
+    def _parse_source(self, sid: str, data: Optional[bytes], state: str, confidence: float) -> None:
         """Parse one source into the pool.
 
         Deliberately does as little as possible while holding `self.lock`. Tokenizing, normalizing, the
         merge/sort of the pool and the detection pass are all O(file) or O(pool) and used to run inside
         the lock, so `GET /api/case` (which takes the same lock) blocked for 15 s at a time while a big
         file was ingesting. The only critical section left here is the source-metadata update.
+
+        `data=None` means "read them yourself". That matters for WHEN as much as for how much: this
+        runs on the parse thread for anything over SYNC_LIMIT, so the request that started the ingest
+        has already returned and is not holding a gigabyte while it does.
         """
         from .jobs import PARSE_PROGRESS
 
         parser = self.source_parsers[sid]
         src = self.sources[sid]
+        if data is None:
+            try:
+                data = self.source_bytes(sid)
+            except (OSError, KeyError, ValueError) as exc:
+                with self.lock:
+                    src.state = "ERROR"
+                    src.error = f"could not read the file back: {type(exc).__name__}: {exc}"
+                self.bump()
+                return
         PARSE_PROGRESS.start(sid, src.file, len(data))
         try:
             batches = self._parse_batches(sid, src, parser, data)
@@ -2410,6 +2573,7 @@ class Store:
             self.source_order = [s for s in self.source_order if s != sid]
             self.skews.pop(sid, None)
             self.source_parse_errors.pop(sid, None)
+            self.source_member.pop(sid, None)
             path = self.source_paths.pop(sid, None)
             # members of one expanded container share a file on disk — never unlink it while a sibling
             # source still reads from it

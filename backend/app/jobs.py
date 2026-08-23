@@ -56,6 +56,9 @@ MAX_JOBS = 200            # hard cap, oldest first — jobs.json must not grow w
 # is still intended, so it says so (POST /api/jobs/heartbeat) and this stays the watchdog for the case it
 # was written for: nobody is coming back for this one.
 STALE_UPLOAD_SEC = 600
+# How long a `parsing` job with no tracker row may show a 0 % bar. Past this it reports no progress at
+# all rather than a percentage nobody is producing — "parsing, no detail" is honest, "0 %" is not.
+PROGRESS_PLACEHOLDER_SEC = 30
 
 # Detection at library-stage time reads a BOUNDED prefix: fingerprinting a 263 MB file must not cost a
 # full pass. registry.fingerprint() only ever looks at the first 256 KB of text anyway.
@@ -242,10 +245,24 @@ class Job:
         keys: Iterable[str] = self.sourceIds or list(adopted)
         prog = PARSE_PROGRESS.merge(keys) if self.state == "parsing" else None
         if prog is None and self.state == "parsing" and self.size:
-            # the parse thread has not registered yet (or the file is still being staged)
-            prog = {"bytesDone": 0, "bytesTotal": self.size, "pct": 0.0, "events": 0, "workers": 1,
-                    "phase": "parsing", "bytesPerSec": 0, "etaSec": None, "elapsedSec": 0}
+            # The parse thread has not registered yet (or the file is still being staged). That is a
+            # real state and it is BRIEF — so the placeholder is brief too. Left unbounded it is
+            # indistinguishable from a stalled parse, which is exactly what the analyst saw: a spinner
+            # at 0 % for hours on files that had finished phase 1 and were waiting for a person.
+            if time.time() - self.updated_ts < PROGRESS_PLACEHOLDER_SEC:
+                prog = {"bytesDone": 0, "bytesTotal": self.size, "pct": 0.0, "events": 0, "workers": 1,
+                        "phase": "parsing", "bytesPerSec": 0, "etaSec": None, "elapsedSec": 0}
         return self.public(prog)
+
+
+def _auto_enrich() -> bool:
+    """Is phase 2 automatic? With it off, a `raw` source is settled — only the analyst moves it."""
+    try:
+        from .config import get_settings
+
+        return bool(getattr(get_settings(), "ingest", None) and get_settings().ingest.autoEnrich)
+    except Exception:
+        return True   # unknown means "assume work is coming", which only ever delays a resolution
 
 
 def _store_snapshot() -> tuple[str, dict[str, tuple[str, int, str, str, str]]]:
@@ -550,7 +567,24 @@ class JobRegistry:
                     # timestamps, no fields and no detections yet — and a parse that fails in phase 2
                     # would land after the job had already claimed success. 'skipped' is a settled
                     # state (the analyst declined enrichment), so it resolves.
-                    if any(r[4] in ("raw", "queued", "enriching") for r in rows):
+                    #
+                    # `raw` is the one that needs a question asked of it: it means "phase 2 has not
+                    # started". Whether that is WORK IN FLIGHT depends entirely on whether anything is
+                    # going to start it. With `ingest.autoEnrich` off nothing ever will — phase 2 is
+                    # strictly on demand — so the job sat in `parsing` forever, and `Job.live()`
+                    # synthesised a 0 % bar to go with it. Seven of the analyst's captures were in
+                    # exactly that state: 11.2 M events already in the pool and searchable, every
+                    # source settled, and a panel spinning at 0 % reporting "7 in progress". Nothing
+                    # was hanging; the row was describing work that did not exist.
+                    #
+                    # Iris already draws this distinction for the analyst — CaseEnrichment.pending
+                    # (queued + enriching, "work in flight") versus .outstanding (plus raw, "my answer
+                    # is incomplete") — and a job is asking the first question, not the second.
+                    if any(r[4] in ("queued", "enriching") for r in rows):
+                        continue
+                    if any(r[4] == "raw" for r in rows) and _auto_enrich():
+                        # autoEnrich is on, so `raw` is the split second between add_file() landing the
+                        # lines and queue_enrichment() taking them. It is about to move; wait for it.
                         continue
                     errs = [r[3] for r in rows if r[0] == "ERROR" and r[3]]
                     job.events = sum(r[1] for r in rows)

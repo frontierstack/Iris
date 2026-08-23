@@ -459,6 +459,32 @@ def _probe_file(path: Path, display: str, size: int) -> dict:
     return probe_upload(display, head, total_size=size)
 
 
+# How much of an upload is moved at a time. The bytes are already on disk by the time a handler runs
+# (Starlette spools the multipart body), so this copy is disk-to-disk — but `await f.read()` turned it
+# into a full RAM copy on top, and a 3.35 GB capture bundle is 3.6 GB of allocation on a VM that
+# segfaults under exactly that pressure.
+UPLOAD_CHUNK = 4 * 1024 * 1024
+
+
+async def _spool(f: UploadFile, dest: Path) -> int:
+    """Copy an upload to `dest` a chunk at a time. Returns the bytes written.
+
+    Both halves go off the event loop: the write is a bind-mount write on Windows (measured in seconds,
+    not milliseconds) and `UploadFile.read` on a spooled file is a blocking disk read behind an async
+    signature. An `async def` route that does either inline stalls every other request in the process —
+    that is the whole lesson of `tests/test_upload_does_not_block.py`.
+    """
+    total = 0
+    with open(dest, "wb") as out:
+        while True:
+            chunk = await f.read(UPLOAD_CHUNK)
+            if not chunk:
+                break
+            await asyncio.to_thread(out.write, chunk)
+            total += len(chunk)
+    return total
+
+
 async def stage_files(files: list[UploadFile], job_ids: list[str] | None = None) -> list[LibraryFile]:
     """Write uploads into LIBRARY_DIR, register them in the library index, and PARSE them into the pool.
 
@@ -483,24 +509,29 @@ async def stage_files(files: list[UploadFile], job_ids: list[str] | None = None)
         original = f.filename or "upload.log"
         safe = re.sub(r"[^A-Za-z0-9._-]", "_", Path(original).name) or "upload.log"
         name = f"{uuid.uuid4().hex[:8]}_{safe}"
-        data = await f.read()
-        jid = resolve_job(ids[i] if i < len(ids) else None, original, len(data), "library", UNATTACHED)
-        REGISTRY.begin_parse(jid, len(data))
-        # EVERYTHING below is blocking work — a 44 MB write through the Docker bind mount, a sniff, and
-        # then the PARSE, which for anything under SYNC_LIMIT (50 MB) runs inline. This handler is
+        dest = config.LIBRARY_DIR / name
+        jid = resolve_job(ids[i] if i < len(ids) else None, original, 0, "library", UNATTACHED)
+        # EVERYTHING below is blocking work — a write through the Docker bind mount, a sniff, and then
+        # the PARSE, which for anything under SYNC_LIMIT (50 MB) runs inline. This handler is
         # `async def`, so doing that here ran it ON THE EVENT LOOP: every other request in the process,
         # `/api/health` included, froze until the parse finished. Measured: 17.6 s on one 44 MB file.
         # That was "the whole app locks up when ingesting". A thread is the whole fix.
         try:
-            await asyncio.to_thread((config.LIBRARY_DIR / name).write_bytes, data)
+            size = await _spool(f, dest)
         except OSError as exc:
+            dest.unlink(missing_ok=True)
             REGISTRY.fail(jid, f"could not write the file ({config.safe_os_error(exc)})")
             raise HTTPException(500, f"could not store {original}: {config.safe_os_error(exc)}")
-        probe = await asyncio.to_thread(probe_upload, original, data)
-        idx[name] = {"file": original, "size": len(data), "uploadedAt": now, **probe}
+        REGISTRY.begin_parse(jid, size)
+        # Sniff from DISK and from a bounded prefix. `probe_upload` only ever looks at the first
+        # PROBE_BYTES anyway; handing it the whole file was the last place a gigabyte was materialised
+        # just to read its first two megabytes.
+        probe = await asyncio.to_thread(_probe_file, dest, original, size)
+        idx[name] = {"file": original, "size": size, "uploadedAt": now, **probe}
         # Parse it into the workspace pool. This is the one thing staging must do WITHOUT touching a
         # case: add_library_file never calls _materialise(), so nothing is written under cases/.
-        srcs = await asyncio.to_thread(STORE.add_library_file, name, original, data)
+        # No bytes are passed: they are on disk, and the store streams them from there.
+        srcs = await asyncio.to_thread(STORE.add_library_file, name, original)
         if srcs:
             from .sources import _report  # local import: sources imports this module
             _report(jid, srcs)            # a >50 MB file is still PARSING in a thread — jobs.sync() finishes it
@@ -508,7 +539,7 @@ async def stage_files(files: list[UploadFile], job_ids: list[str] | None = None)
             # a container Iris refuses to expand is staged unparsed; the sniff is all we can report
             REGISTRY.finish(jid, parser=str(probe.get("parser") or ""), events=0,
                             confidence=float(probe.get("confidence") or 0.0))
-        out.append(LibraryFile(caseId=UNATTACHED, fileName=name, displayName=original, size=len(data),
+        out.append(LibraryFile(caseId=UNATTACHED, fileName=name, displayName=original, size=size,
                                attached=False, inActiveCase=False, uploadedAt=now,
                                parser=str(probe.get("parser") or ""), confidence=float(probe.get("confidence") or 0.0),
                                state=str(probe.get("state") or ""), lines=int(probe.get("lines") or 0),
