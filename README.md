@@ -11,8 +11,10 @@ schema, runs detections, correlates events into incident clusters and an entity 
   Configurable columns, and every value on screen is a one-click include (`+`) or exclude (`−`) filter.
 * **Entity graph** — typed nodes and relations on a canvas, filtered by source, by link strength
   (*min link events*) and by how connected an entity is (*min connections*).
-* **Detections** — 75 Sigma-like built-ins (65 per-event plus 10 that read the entity graph), every constant
-  editable, plus custom rules written as a regex or as
+* **Detections** — 104 Sigma-like built-ins (94 per-event plus 10 that read the entity graph) covering web,
+  identity, Windows, Linux, AWS, Azure/Entra ID, Microsoft 365 and Defender, Kubernetes, mail and packet
+  captures; every constant editable, plus **exclusions** for the known-benign, plus custom rules written as a
+  regex or as
   typed conditions.
 * **AI investigator** — one free-form objective; the assistant drives Iris's own tools and streams what it does.
   Every change it makes is listed and reversible.

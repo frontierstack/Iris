@@ -443,20 +443,30 @@ export function GraphScreen() {
    * back to the analyst for good — re-fitting under someone who has panned somewhere deliberately is the
    * bug this must not become.
    */
-  /* The first nodes to arrive are FITTED into view — on a first load, and when a build that was
-     running while the analyst watched finally lands. Nothing did this before: the canvas kept whatever
-     pan/zoom happened to be there, so a graph that arrived after a long build could be laid out
-     outside the visible area and the screen stayed blank until someone pressed 0, hit Fit, or reloaded
-     the page. Only on the 0 -> N transition, never on a filter tweak: re-fitting under someone who has
-     panned to a corner of their own graph is its own bug. */
-  const hadNodes = useRef(false);
+  /* Nodes are FITTED into view whenever the graph on screen is a DIFFERENT graph — a first load, a build
+     that lands while the analyst watches, and every deliberate re-query: a source selection, a scope
+     switch, a focus, a filter. Fitting only on the 0 -> N transition (what this did before) was too
+     narrow and produced exactly the same symptom it was written to fix: picking sources in the dropdown
+     replaces the whole node set, the simulation lays the new one out in fresh coordinates, and the
+     camera stayed parked where the PREVIOUS layout had been — a blank canvas beside a correct node
+     count, until someone pressed 0, hit Fit, or reloaded the page. Reported twice; the reload is what
+     made it read as a loading bug rather than a camera one.
+
+     What must NOT re-fit is a poll of the SAME query landing under someone who has panned somewhere
+     deliberately — that is the bug this must not become. So the trigger is the QUERY IDENTITY, not the
+     data: `fittedKey` is only stamped once a fit has actually happened with nodes on screen, so a
+     0-node answer never claims the key and the fit still runs when the build finally lands. */
+  const graphKey = useMemo(() => JSON.stringify([scope, srcSel, qDeb, types, relParam, minCount, minDegree,
+                                                 limit, focus, focus ? hops : 0]),
+                           [scope, srcSel, qDeb, types, relParam, minCount, minDegree, limit, focus, hops]);
+  const fittedKey = useRef<string | null>(null);
   useEffect(() => {
-    if (!nodesData.length) { hadNodes.current = false; return; }
-    if (hadNodes.current) return;
-    hadNodes.current = true;
+    if (!nodesData.length) return;          // nothing to frame yet: leave the key unclaimed
+    if (fittedKey.current === graphKey) return;
+    fittedKey.current = graphKey;
     autoFit.current = true;
     fitView(false);   // at once, so the graph is on screen from the first frame it exists
-  }, [nodesData, fitView]);
+  }, [nodesData, graphKey, fitView]);
 
   const panBy = useCallback((dx: number, dy: number) => { stopAutoFit(); const v = viewRef.current; flyTo({ x: v.x + dx, y: v.y + dy, k: v.k }, 120); }, [flyTo, stopAutoFit]);
   const onCanvasKeyDown = (e: ReactKeyboardEvent) => {

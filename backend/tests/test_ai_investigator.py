@@ -331,13 +331,18 @@ def test_tool_surface_is_read_plus_bounded_writes(client):
                       "add_graph_link", "build_case_graph", "delete_graph_link",
                       # the detection catalogue: create/tune/toggle, and delete a CUSTOM rule only
                       "create_detection_rule", "update_detection_rule", "set_detection_rule_enabled",
-                      "set_builtin_rule_params", "delete_detection_rule"}
+                      "set_builtin_rule_params", "delete_detection_rule",
+                      # Exclusions: a suppression is a write because it changes what every rule claims
+                      # about the pool. Removing one is a write too, and it is the safe direction — a
+                      # delete here only ever REVEALS detections. `preview_detection_rule` is
+                      # deliberately not a write: a dry run saves nothing and tags nothing.
+                      "add_exclusion", "delete_exclusion"}
     # nothing that destroys evidence or wipes the built-in catalogue is reachable, by name or by intent
     assert not any(w in n for n in names for w in ("clear", "reset", "wipe", "restore_default"))
     # Curation IS deletable — an agent that can only append leaves its mistakes for the analyst. What
     # must never be deletable is EVIDENCE: the case itself, a source, the pool, a built-in rule.
     assert {n for n in names if "delete" in n} == {"delete_detection_rule", "delete_ioc", "delete_note",
-                                                   "delete_graph_link"}
+                                                   "delete_graph_link", "delete_exclusion"}
     assert not any(n in names for n in ("delete_case", "delete_source", "delete_event", "delete_events"))
     assert body["limits"]["maxSteps"] <= investigator.MAX_STEPS_CAP
     assert body["limits"]["maxCompactions"] >= 1

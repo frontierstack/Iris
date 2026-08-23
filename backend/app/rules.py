@@ -1002,7 +1002,7 @@ class RulesStore:
             self._compiled[r.id] = (key[0], key[1], rx)
             return rx
 
-    def apply_rule(self, r: Rule, events: list[Event]) -> int:
+    def apply_rule(self, r: Rule, events: list[Event], exclude: Optional[Any] = None) -> int:
         """Tag every matching event with this rule (idempotent). Returns hits; records timeout errors on the rule.
 
         Both custom shapes run through the SAME sandbox: the predicate (regex or composed conditions, plus
@@ -1029,12 +1029,23 @@ class RulesStore:
             return 0
         self.errors.pop(r.id, None)
         r.error = None
+        # Exclusions apply to CUSTOM rules exactly as they do to built-ins (detect._tag). An analyst who
+        # excludes a resolver and then writes their own rule would otherwise find the suppression quietly
+        # did not cover it — "applies to all rules" has to mean all of them.
+        if exclude is None:
+            from .exclusions import EXCLUSIONS
+            exclude = EXCLUSIONS.matcher()
+        ex = exclude
+        hits = 0
         for i in idx:
             e = events[i]
+            if not ex.empty and ex.excluded(e, r.id):
+                continue
+            hits += 1
             if not any(d.id == r.id for d in e.detections):
                 e.add_detection(Detection(name=r.name, id=r.id, level=r.sev))
                 e.sev = max_sev(e.sev, r.sev)  # type: ignore[assignment]
-        return len(idx)
+        return hits
 
     @staticmethod
     def _threshold_hits(r: Rule, events: list[Event], pred: Callable[[Event], bool]) -> list[int]:
@@ -1064,10 +1075,13 @@ class RulesStore:
             events[anchor].set_field("burst.window", f"{th.window}s")
         return sorted(set(hits))
 
-    def apply_all(self, events: list[Event]) -> int:
+    def apply_all(self, events: list[Event], exclude: Optional[Any] = None) -> int:
+        """Every enabled custom rule. `exclude` is the pass's ONE compiled exclusion set — shared with
+        the built-in pass so the suppression counts land in a single place and each rule does not
+        recompile the same conditions."""
         total = 0
         for r in self.enabled_custom():
-            total += self.apply_rule(r, events)
+            total += self.apply_rule(r, events, exclude)
         return total
 
     @staticmethod

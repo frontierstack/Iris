@@ -31,9 +31,14 @@ _MS: int = 0
 
 
 def _key(scope: str) -> str:
+    # The graph, the RULE catalogue and the EXCLUSION list all decide what the findings are, so all
+    # three are in the key. Adding an exclusion for a public resolver has to remove its finding on the
+    # very next read, and relying on a call site to invalidate is how that silently stops happening.
+    from .exclusions import EXCLUSIONS
     from .rules import RULES_STORE
     from .store import STORE
-    return f"{scope}:{STORE._derived_key(scope)}:{RULES_STORE.rev}"
+    EXCLUSIONS.load()
+    return f"{scope}:{STORE._derived_key(scope)}:{RULES_STORE.rev}:{EXCLUSIONS.rev}"
 
 
 def _evaluate(scope: str, builder: Any) -> list[GraphFinding]:

@@ -98,6 +98,8 @@ const WRITE_TOOLS = new Set([
   'add_graph_link', 'delete_graph_link',
   'create_detection_rule', 'update_detection_rule', 'delete_detection_rule',
   'set_detection_rule_enabled', 'set_builtin_rule_params',
+  'add_exclusion', 'delete_exclusion',
+  // NOT preview_detection_rule: a dry run saves nothing and changes nothing on the case.
 ]);
 
 function focusOf(t: AiTarget): string | undefined {

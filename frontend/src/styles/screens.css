@@ -1816,6 +1816,64 @@
   gap: 2px;
   min-width: 0;
 }
+/* Exclusions. The two columns that matter are what it suppresses (its conditions, as chips, because a
+   generated sentence is longer than the row) and HOW MUCH it has hidden — a suppression nobody can see
+   is how evidence goes missing quietly. A disabled row is dimmed, never removed. */
+.excl-grid {
+  grid-template-columns:
+    minmax(44px, 0.3fr) minmax(160px, 1.3fr) minmax(220px, 2fr) minmax(58px, 0.4fr)
+    minmax(120px, 0.8fr) minmax(110px, 0.7fr);
+}
+.excl-grid.is-off {
+  opacity: 0.55;
+}
+.excl__name {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.excl__logic {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+.excl__go {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  opacity: 0.72;
+}
+.excl-grid:hover .excl__go {
+  opacity: 1;
+}
+.excl-suggest {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.excl-suggest__row {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  background: var(--surface-2);
+}
+.excl-suggest__row + .excl-suggest__row {
+  border-top: 1px solid var(--line);
+}
+.excl-suggest__row .cell-dim {
+  font-size: var(--fs-xs);
+  line-height: 1.45;
+  max-width: 70ch;
+}
+
 /* Graph findings. The SUMMARY column is the wide one on purpose: the row's job is to state the shape in
    one sentence ("10.9.9.9 authenticated as 8 different accounts"), and a rule name plus a number cannot
    say that. The two links are the point of the row, so they are dimmed, never hover-hidden. */

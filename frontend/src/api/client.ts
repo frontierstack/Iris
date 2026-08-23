@@ -5,7 +5,7 @@ import type {
 } from './types';
 import type { FieldFacetsQuery, FieldFacetsResponse, JobsResponse, RawLogPage, UploadJob } from './types';
 import type { AiInvestigateRequest, AiRun, AiRunEvent, AiThread, AiToolsResponse, AiUndoResult, IocMarkers } from './types';
-import type { AuthStatus, GraphFindingsResponse, McpStatus, RulePreviewResult } from './types';
+import type { AuthStatus, Exclusion, ExclusionInput, ExclusionsResponse, GraphFindingsResponse, McpStatus, RulePreviewResult } from './types';
 
 export class ApiError extends Error {
   status: number;
@@ -311,6 +311,18 @@ export const api = {
   /** Dry-run a whole rule definition: what it WOULD flag, without saving it or tagging any event. */
   previewRule: (body: RuleInput, signal?: AbortSignal) =>
     request<RulePreviewResult>('/api/rules/preview', { ...json('POST', body), signal }),
+  // Exclusions — the suppressions that stop a rule claiming evidence already judged benign. Every write
+  // re-runs the catalogue server-side, so the caller invalidates anomalies and rules afterwards.
+  exclusions: () => request<ExclusionsResponse>('/api/exclusions'),
+  createExclusion: (body: ExclusionInput) => request<Exclusion>('/api/exclusions', json('POST', body)),
+  updateExclusion: (id: string, body: ExclusionInput) =>
+    request<Exclusion>(`/api/exclusions/${encodeURIComponent(id)}`, json('PUT', body)),
+  toggleExclusion: (id: string) =>
+    request<Exclusion>(`/api/exclusions/${encodeURIComponent(id)}/toggle`, json('POST')),
+  deleteExclusion: (id: string) =>
+    request<{ ok: true }>(`/api/exclusions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  clearExclusions: () => request<{ ok: true; removed: number }>('/api/exclusions/clear', json('POST')),
+
   /** Detections that read the entity graph (fan-out, pivots, failure-heavy relationships). */
   graphAnomalies: (q: { scope?: 'all' | 'case'; sev?: Severity[]; limit?: number } = {}) => {
     const p = new URLSearchParams();

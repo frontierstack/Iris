@@ -492,6 +492,20 @@ def evaluate(builder: Any) -> list[GraphFinding]:
     emit("SIGMA-GRAPH-0030", rows30)
     emit("SIGMA-GRAPH-0042", rows42)
 
+    # Exclusions apply here too, but ONLY the ones that can be evaluated against a node — a node has a
+    # type and a value and no fields, so an exclusion reading `dst_port` cannot be checked against one.
+    # `Matcher.excluded_node` skips those rather than half-applying them (exclusions.appliesToGraph says
+    # so on the row), because suppressing a finding on a condition nobody checked is the worst outcome
+    # available here. The suggested "public DNS resolvers" exclusion is exactly why this exists: 8.8.8.8
+    # is the biggest fan-out in most workspaces and it is not a finding.
+    try:
+        from .exclusions import EXCLUSIONS
+        ex = EXCLUSIONS.matcher()
+    except Exception:  # noqa: BLE001 - a graph roll-up must not fail over a suppression list
+        ex = None
+    if ex is not None and not ex.empty:
+        found = [f for f in found if not ex.excluded_node(f.nodeType, f.nodeValue, f.ruleId)]
+
     order = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
     found.sort(key=lambda f: (-order.get(f.sev, 0), -f.metric, f.ruleId, f.nodeId))
     return found

@@ -431,6 +431,37 @@ GraphFinding = { ruleId, name, sev, nodeId, nodeType, nodeValue, summary, metric
 * The rules are ordinary built-ins on `GET /api/rules` with `mechanism: "graph"` — same toggle, same
   parameter overrides, same restore. Their `hits` is `null` (not `0`) until a roll-up exists.
 
+## Exclusions
+`GET /api/exclusions` · `POST /api/exclusions` · `PUT /api/exclusions/{id}` ·
+`POST /api/exclusions/{id}/toggle` · `DELETE /api/exclusions/{id}` · `POST /api/exclusions/clear`
+
+A suppression: evidence matching it is not TAGGED by the rules it is scoped to. It never touches the
+event — the line stays in the pool, in search, in the raw viewer and on the timeline; only the rule's
+claim about it is dropped.
+
+```
+Exclusion = { id, name, conditions: RuleCondition[], combinator: 'and'|'or',
+              ruleIds: string[],        // empty = EVERY rule
+              note, enabled, createdBy, createdAt, updatedAt,
+              suppressed: int | null,   // detections removed on the LAST pass; null = not evaluated
+              appliesToGraph: bool,     // can its conditions be checked against a graph node?
+              logic }                   // generated, read-only sentence
+GET -> { exclusions: Exclusion[], suggestions: ExclusionSuggestion[], suppressed: <total> }
+```
+* **Conditions use the same typed vocabulary as a custom rule** (`detect.parse_condition`), so there is
+  one condition language in the app. `_ip` matches any address field on the event.
+* **Nothing is excluded by default.** `suggestions` is a ready-made library (public resolvers, loopback,
+  NTP, machine accounts, Kubernetes system identities, health checkers), each with a `why`. Adding one
+  is a deliberate POST. Shipping suppressions enabled would mean an analyst's first search silently
+  omitted evidence they never chose to omit.
+* **`suppressed: null` is not `0`.** Null means no detection pass has run since the exclusion changed;
+  zero means it ran and this exclusion matched nothing (which usually means it is wrong).
+* **`appliesToGraph`** is false when any condition reads an event FIELD: a graph node has a type and a
+  value and nothing else, so such an exclusion is left out of graph findings rather than half-applied.
+* Every write re-runs the catalogue over the pool (O(pool)) — a suppression that has not been applied is
+  worse than none. Exclusions are configuration, so `POST /api/admin/clear-all` KEEPS them, like
+  `rules.json` and `settings.json`.
+
 ## Supported input types (parsers)
 Text logs: nginx/apache access, syslog, EVTX (.evtx binary + .xml export), CloudTrail JSON, k8s audit JSONL, generic JSON / JSONL / JSON arrays,
 CSV/TSV/pipe-delimited (header row auto-detected → field names), plaintext (timestamp regex). Documents: PDF (text extraction per page → lines),

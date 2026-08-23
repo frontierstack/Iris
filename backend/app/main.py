@@ -19,7 +19,7 @@ from . import compute, metrics
 faulthandler.enable(all_threads=True)
 from . import security
 from .config import VERSION, load_settings
-from .routers import (admin, ai, anomalies, attachments, auth as auth_router, case, case_set, cases, compute as compute_router, events, graph, iocs, jobs, library, mcp, parsers,
+from .routers import (admin, ai, anomalies, attachments, auth as auth_router, case, case_set, cases, compute as compute_router, events, exclusions as exclusions_router, graph, iocs, jobs, library, mcp, parsers,
                       report, rules, settings, sources, timeline)
 
 FRONTEND_DIST = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
@@ -126,7 +126,7 @@ def health() -> dict:
     return {"ok": True, "version": VERSION}
 
 
-for r in (case, cases, attachments, sources, events, timeline, graph, case_set, iocs, jobs, library, report, settings, compute_router, ai, admin, parsers, rules, anomalies, mcp, auth_router):
+for r in (case, cases, attachments, sources, events, timeline, graph, case_set, iocs, jobs, library, report, settings, compute_router, ai, admin, parsers, rules, exclusions_router, anomalies, mcp, auth_router):
     api.include_router(r.router)
 app.include_router(api)
 

@@ -432,6 +432,27 @@ four separate pieces: an analyst-editable **description** (prose, matches nothin
 the engine actually evaluates), its **mechanism**, and **params** — every constant in the condition, editable and
 validated. Custom rules are a raw regex or a list of typed conditions with an optional threshold.
 
+#### Exclusions
+Some things are never the finding. A public DNS resolver answers for every host you own, a monitoring
+probe hits the same path forever, and a Windows machine account authenticates all day — and a rule that
+reports them on every ingest teaches you to skim past that rule, which is the day it stops working.
+
+**Anomalies → Exclusions** manages them. An exclusion is a name plus conditions (the same field / operator
+/ value builder custom rules use), scoped either to **every rule** or to the rules you choose. It
+suppresses the **detection**, never the event: the line stays in the pool, in search, in the raw viewer
+and on the timeline.
+
+* **Nothing is excluded until you add it.** Iris offers a suggested list — public resolvers, loopback,
+  NTP, machine accounts, Kubernetes system identities, health checkers — each with the reason stated.
+  Adding one is a click; none is applied for you. (A resolver being benign infrastructure is exactly what
+  makes it useful for DNS tunnelling, so that judgement is yours.)
+* **Every row says how much it hid.** The count is detections suppressed on the last pass; `—` means
+  nothing has been re-evaluated since it changed. An exclusion suppressing nothing is usually wrong.
+* Exclusions marked *events only* cannot be applied to entity-graph findings, because their conditions
+  read event fields and a graph node has only a type and a value. That is stated, never guessed.
+* The AI assistant can manage them too (`list_exclusions`, `add_exclusion`, `delete_exclusion`), and every
+  change it makes is undoable with that run.
+
 #### Entity-graph rules
 Some findings cannot be phrased as "is this line suspicious?" — one address authenticating as fourteen
 different accounts is a property of the **shape** of the relationships, and every one of those lines is

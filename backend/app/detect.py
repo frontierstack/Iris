@@ -499,6 +499,218 @@ R = {
         trigger="The raw line of ANY source matches the ransomware regex (ransom note filenames, known encrypted "
                 "extensions).",
         mechanism="regex"),
+    # ---------------------------------------------------------------- identity (continued)
+    "AUTH-0240": Rule(
+        "SIGMA-AUTH-0240", "Account used from many addresses", "high",
+        description="One account authenticating from many DIFFERENT addresses in a short window. Either the "
+                    "person is behind a rotating proxy, or the credential is in more than one pair of hands - "
+                    "and the second is what a stolen password looks like the day it is used.",
+        trigger="Counts DISTINCT source addresses per account across web logins, syslog auth, Windows 4624/4625 "
+                "and cloud sign-ins. Fires when one account reaches the distinct-address threshold inside the "
+                "window.",
+        mechanism="threshold"),
+    # ---------------------------------------------------------------- Windows (continued)
+    "WIN-0200": Rule(
+        "SIGMA-WIN-0200", "Logon with explicit credentials", "medium",
+        description="Someone ran something AS somebody else without logging out - runas, a scheduled task with "
+                    "stored credentials, or a tool passing a captured password. It is the event that links the "
+                    "account that was used to the account that used it.",
+        trigger="Security event 4648, ignoring the machine and system accounts.",
+        mechanism="fields"),
+    "WIN-0205": Rule(
+        "SIGMA-WIN-0205", "Account locked out", "medium",
+        description="An account crossed the lockout threshold. On its own it is a bad password; next to a spray "
+                    "or a burst of 4625s it is the account somebody was working on.",
+        trigger="Security event 4740.",
+        mechanism="fields"),
+    "WIN-0210": Rule(
+        "SIGMA-WIN-0210", "Directory object modified", "medium",
+        description="A directory object was changed - group policy, a user attribute, an ACL. Persistence and "
+                    "privilege escalation in a domain both end here, and the change outlives the session.",
+        trigger="Security event 5136 or 5137 (directory service object modified or created).",
+        mechanism="fields"),
+    "WIN-0215": Rule(
+        "SIGMA-WIN-0215", "Credential caching re-enabled (WDigest)", "high",
+        description="A registry change that puts plaintext passwords back in memory. Nothing legitimate turns "
+                    "WDigest back on in 2026; it is done so that a dump of LSASS yields passwords rather than "
+                    "hashes.",
+        trigger="Security event 4657 (registry value modified) whose object name or command line matches the "
+                "credential-caching regex (UseLogonCredential, WDigest, RunAsPPL disabled).",
+        mechanism="regex"),
+    "WIN-0220": Rule(
+        "SIGMA-WIN-0220", "Suspicious PowerShell script block", "high",
+        description="Script block logging captured the code itself, and the code is doing something a script "
+                    "block does not normally do: downloading and executing, hiding its window, reaching into "
+                    "memory, or disabling the very logging that recorded it.",
+        trigger="PowerShell operational event 4104 whose ScriptBlockText matches the suspicious-script regex.",
+        mechanism="regex"),
+    "WIN-0225": Rule(
+        "SIGMA-WIN-0225", "Remote desktop logon from a public address", "high",
+        description="An interactive remote session from off the network. RDP exposed to the internet is how a "
+                    "large share of ransomware starts, and a successful one is somebody at the keyboard.",
+        trigger="Security event 4624 with LogonType 10 or 7 whose IpAddress is a public address.",
+        mechanism="fields"),
+    "WIN-0230": Rule(
+        "SIGMA-WIN-0230", "Host firewall rule changed", "medium",
+        description="A local firewall rule was added, changed or deleted. Attackers open a port to keep a "
+                    "listener reachable - and close logging paths on the way out.",
+        trigger="A Windows event whose EventID is one of the firewall change ids (2004, 2005, 2006, 2033, 4946, "
+                "4947, 4948, 4950).",
+        mechanism="fields"),
+    "WIN-0235": Rule(
+        "SIGMA-WIN-0235", "Event log cleared (non-security)", "high",
+        description="A log other than Security was wiped. SIGMA-WIN-0104 covers the Security log; this covers "
+                    "System, Application and PowerShell, which is where the tooling actually leaves traces.",
+        trigger="A Windows event whose EventID is 104 (log file cleared) on any channel.",
+        mechanism="fields"),
+    "WIN-0250": Rule(
+        "SIGMA-WIN-0250", "Administrative share accessed", "high",
+        description="A connection to ADMIN$, C$ or IPC$. That is how a remote-execution tool moves a payload "
+                    "onto a machine, and normal use of a file server does not touch these shares.",
+        trigger="Security event 5140 or 5145 whose ShareName matches the admin-share regex.",
+        mechanism="regex"),
+    "WIN-0255": Rule(
+        "SIGMA-WIN-0255", "LSASS memory accessed", "critical",
+        description="A process opened the memory of the component that holds every credential on the machine. "
+                    "This is credential dumping, whatever tool wrote it.",
+        trigger="Security event 4656, 4663 or 4690 whose ObjectName matches the target-process regex "
+                "(lsass.exe and its full device path).",
+        mechanism="regex"),
+    # ---------------------------------------------------------------- Azure / Entra ID
+    "AZURE-0010": Rule(
+        "SIGMA-AZURE-0010", "Risky sign-in", "high",
+        description="Entra ID scored this sign-in as risky at the moment it happened - leaked credentials, an "
+                    "anonymous IP, an impossible journey. The platform is telling you it does not believe this "
+                    "was the account owner.",
+        trigger="An Azure sign-in event whose riskLevelDuringSignIn (or riskLevelAggregated / riskState) is one "
+                "of the risk levels watched.",
+        mechanism="fields"),
+    "AZURE-0014": Rule(
+        "SIGMA-AZURE-0014", "Legacy authentication used", "high",
+        description="A sign-in over a protocol that cannot present a second factor. Legacy auth is the standard "
+                    "way around MFA, which is why password spraying still targets it.",
+        trigger="An Azure sign-in whose clientAppUsed is one of the legacy protocols (IMAP4, POP3, SMTP AUTH, "
+                "MAPI, Exchange ActiveSync, Other clients).",
+        mechanism="fields"),
+    "AZURE-0018": Rule(
+        "SIGMA-AZURE-0018", "MFA challenge failed or denied", "medium",
+        description="The password was right and the second factor was not satisfied. A burst of these is an "
+                    "attacker holding valid credentials and hammering the prompt - MFA fatigue.",
+        trigger="An Azure sign-in whose resultType is one of the MFA failure codes (500121, 50074, 50076, "
+                "50079, 50072).",
+        mechanism="fields"),
+    "AZURE-0022": Rule(
+        "SIGMA-AZURE-0022", "Conditional access blocked a sign-in", "medium",
+        description="Policy refused the sign-in. Each one is a control working; a run of them from one identity "
+                    "is somebody probing for the gap in the policy.",
+        trigger="An Azure sign-in whose conditionalAccessStatus is failure, or whose resultType is 53003 "
+                "(blocked by conditional access).",
+        mechanism="fields"),
+    "AZURE-0026": Rule(
+        "SIGMA-AZURE-0026", "Azure sign-in failure burst", "high",
+        description="Sustained failed sign-ins against one identity or from one address - the cloud equivalent "
+                    "of a 4625 burst, and it happens where no endpoint agent can see it.",
+        trigger="Counts Azure sign-in events whose resultType is not 0, grouped by the identity. Fires on a "
+                "5-minute window holding 10 or more.",
+        mechanism="threshold"),
+    "AZURE-0030": Rule(
+        "SIGMA-AZURE-0030", "Application consent granted", "high",
+        description="Someone granted an application permission to act on their behalf. Illicit consent is "
+                    "persistence that survives a password reset and an MFA re-enrolment, because it is not the "
+                    "password that is being used.",
+        trigger="An Azure audit event whose operationName mentions consent to application, add OAuth2 "
+                "permission grant, or add app role assignment.",
+        mechanism="fields"),
+    "AZURE-0034": Rule(
+        "SIGMA-AZURE-0034", "Privileged role assigned", "critical",
+        description="An account was put into a privileged directory role - Global Administrator and its "
+                    "relatives. From there every mailbox, every policy and every other role is reachable.",
+        trigger="An Azure audit event whose operationName adds a member to a role and whose body names one of "
+                "the privileged roles watched.",
+        mechanism="fields"),
+    "AZURE-0038": Rule(
+        "SIGMA-AZURE-0038", "Service principal or credential added", "high",
+        description="A new service principal, or a new secret or certificate on an existing one. That is a "
+                    "non-human identity with its own key - the cloud's version of a local account nobody "
+                    "notices.",
+        trigger="An Azure audit event whose operationName adds a service principal or adds service principal "
+                "credentials.",
+        mechanism="fields"),
+    "AZURE-0042": Rule(
+        "SIGMA-AZURE-0042", "Sign-in from many countries", "high",
+        description="One identity signing in from several countries in one window. Travel does not work like "
+                    "that, and this is the shape a shared or stolen credential makes.",
+        trigger="Counts DISTINCT countries in Azure sign-in events grouped by the identity. Fires when one "
+                "identity reaches the distinct-country threshold inside the window.",
+        mechanism="threshold"),
+    "AZURE-0046": Rule(
+        "SIGMA-AZURE-0046", "Security defaults or policy weakened", "critical",
+        description="A conditional access policy, security defaults or an MFA requirement was changed or "
+                    "removed. This is the control being taken down, and it is usually done from a session that "
+                    "should not have been able to do it.",
+        trigger="An Azure audit event whose operationName deletes or updates a conditional access policy, "
+                "disables security defaults, or updates the authentication methods policy.",
+        mechanism="fields"),
+    # ---------------------------------------------------------------- Microsoft 365 / Defender
+    "M365-0010": Rule(
+        "SIGMA-M365-0010", "Defender alert", "high",
+        description="Microsoft Defender raised an alert of its own. Iris does not re-detect what the platform "
+                    "already found - it places it on the same timeline as everything else, which is the thing "
+                    "the portal cannot do.",
+        trigger="An event carrying a Defender alert shape (AlertId / Title with Severity, or "
+                "ProviderName = Microsoft Defender) whose severity is one of the levels watched.",
+        mechanism="fields"),
+    "M365-0014": Rule(
+        "SIGMA-M365-0014", "Inbox rule created or changed", "high",
+        description="A mailbox rule was created. In business e-mail compromise this is the step that hides the "
+                    "conversation from its owner - replies moved to Deleted Items or RSS Feeds while the "
+                    "attacker talks to the finance team.",
+        trigger="A Microsoft 365 audit event whose Operation is New-InboxRule, Set-InboxRule or "
+                "UpdateInboxRules.",
+        mechanism="fields"),
+    "M365-0018": Rule(
+        "SIGMA-M365-0018", "Mail forwarding configured", "critical",
+        description="Mail is being copied out of the tenant. Forwarding survives a password reset and is quiet: "
+                    "the owner sees nothing, and the attacker keeps reading.",
+        trigger="A Microsoft 365 audit event whose Operation is one of the forwarding operations AND whose raw "
+                "body matches the forwarding regex (ForwardingSmtpAddress, ForwardTo, RedirectTo, "
+                "DeliverToMailboxAndForward).",
+        mechanism="regex"),
+    "M365-0022": Rule(
+        "SIGMA-M365-0022", "eDiscovery or content search", "high",
+        description="Somebody searched or exported tenant-wide content. It is a legitimate compliance tool and "
+                    "an excellent exfiltration tool, and the two look identical apart from who ran it.",
+        trigger="A Microsoft 365 audit event whose Operation is one of the eDiscovery operations "
+                "(SearchStarted, SearchExported, ViewedSearchExported, New-ComplianceSearch).",
+        mechanism="fields"),
+    "M365-0026": Rule(
+        "SIGMA-M365-0026", "Anonymous sharing link created", "high",
+        description="A file or site was shared with a link that needs no sign-in. Anyone who gets the URL has "
+                    "the data, and the link keeps working after the person who made it leaves.",
+        trigger="A Microsoft 365 audit event whose Operation is AnonymousLinkCreated, "
+                "AnonymousLinkUsed, AddedToSecureLink or SharingInvitationCreated with an external target.",
+        mechanism="fields"),
+    "M365-0030": Rule(
+        "SIGMA-M365-0030", "Bulk file download or sync", "high",
+        description="One identity pulling files in bulk from SharePoint or OneDrive. This is what staged "
+                    "exfiltration looks like from the audit log's side.",
+        trigger="Counts Microsoft 365 audit events whose Operation is FileDownloaded, FileSyncDownloadedFull "
+                "or FileSyncUploadedFull, grouped by the user. Fires on a 10-minute window holding 100 or more.",
+        mechanism="threshold"),
+    "M365-0034": Rule(
+        "SIGMA-M365-0034", "Phishing or malware verdict", "high",
+        description="Defender for Office judged a message malicious. Whether it was delivered or not, somebody "
+                    "aimed it at this tenant, and the ones that got through are the start of a timeline.",
+        trigger="An event one of whose verdict fields (ThreatType, Verdict, DeliveryAction, DetectionMethod) "
+                "matches the threat-verdict regex - phish, malware, spam, quarantined or zapped.",
+        mechanism="regex"),
+    "M365-0038": Rule(
+        "SIGMA-M365-0038", "Audit logging disabled", "critical",
+        description="Tenant audit logging was switched off or narrowed. Anti-forensics against the only record "
+                    "that would show what happened next.",
+        trigger="A Microsoft 365 audit event whose Operation is Set-AdminAuditLogConfig, "
+                "Set-MailboxAuditBypassAssociation, or a mailbox audit disable.",
+        mechanism="fields"),
 }
 
 RULES: list[Rule] = list(R.values())
@@ -547,6 +759,23 @@ _ENCODED_CMD = re.compile(r"powershell(\.exe)?[^\n]*\s-(?:e|en|enc|enco|encod|en
 _RANSOM = re.compile(r"\b(READ_?ME|HOW[_ ]?TO[_ ]?DECRYPT|DECRYPT[_-]?(FILES|INSTRUCTION)|RECOVER[_-]?(FILES|YOUR)|RESTORE[-_]?FILES|"
                      r"YOUR[_-]?FILES[_-]?ARE[_-]?ENCRYPTED)[^\n]{0,40}\.(txt|html|hta)\b"
                      r"|\.(locky|crypt|cryptolocker|encrypted|enc|lockbit|conti|ryuk|revil|sodinokibi|djvu|wannacry|wncry|onion|makop|phobos|cerber)\b", re.I)
+
+# ---- regexes for the Windows / Azure / Microsoft 365 tranche. Same rule as every other pattern here:
+#      each is the SHIPPED DEFAULT of a regex Param, never a bare constant read by run_rules.
+_WDIGEST = re.compile(r"UseLogonCredential|\\WDigest\\|SecurityProviders\\\\WDigest|RunAsPPL|LsaCfgFlags"
+                      r"|DisableRestrictedAdmin|AllowProtectedCreds", re.I)
+_PS_SCRIPT = re.compile(r"(?:Invoke-(?:Expression|WebRequest|RestMethod|Mimikatz|Shellcode|DllInjection)|IEX\s*\(|"
+                        r"DownloadString|DownloadFile|FromBase64String|Net\.WebClient|Start-BitsTransfer|"
+                        r"-w(?:indowstyle)?\s+hidden|-nop\b|-noni\b|Set-MpPreference\s+-Disable|"
+                        r"Add-MpPreference\s+-ExclusionPath|Bypass\s+-Scope|EncodedCommand|"
+                        r"System\.Reflection\.Assembly|VirtualAlloc|WriteProcessMemory|"
+                        r"Get-Credential|ConvertTo-SecureString|LogPipelineExecutionDetails)", re.I)
+_ADMIN_SHARE = re.compile(r"\\\\?(ADMIN|IPC|[A-Z])\$$|^(ADMIN|IPC|[A-Z])\$$", re.I)
+_LSASS = re.compile(r"lsass\.exe|\\Device\\HarddiskVolume\d+\\Windows\\System32\\lsass", re.I)
+_FORWARDING = re.compile(r"ForwardingSmtpAddress|ForwardingAddress|DeliverToMailboxAndForward|"
+                         r"\bForwardTo\b|\bRedirectTo\b|BlindCopyTo", re.I)
+_THREAT_VERDICT = re.compile(r"\b(phish|malware|spam|malicious|highconfidencephish|ransomware|"
+                             r"blocked|quarantined|zap|replaced|delivered\s*to\s*junk)\b", re.I)
 
 # ------------------------------------------------------------ editable condition parameters
 # Every constant that decides whether a built-in fires lives here rather than inline in run_rules, so
@@ -835,6 +1064,155 @@ PARAMS: dict[str, tuple[Param, ...]] = {
     "SIGMA-APP-0080": (
         P("pattern", "Ransomware indicator", "regex", _RANSOM.pattern, "raw", "Matched against the raw line of every event, whatever its source."),
     ),
+    "SIGMA-AUTH-0240": (
+        P("window", "Time window", "seconds", "3600", "", "Length of the sliding window the addresses are counted in."),
+        P("distinctIps", "Distinct addresses to fire", "int", "5", "src_ip",
+          "How many DIFFERENT source addresses one account must be used from."),
+        P("ignoreAccounts", "Accounts ignored", "values", "-, anonymous, system, network service, local service", "user",
+          "Accounts that are not people and would otherwise dominate the count."),
+    ),
+    "SIGMA-WIN-0200": (
+        P("eventId", "Event ID", "text", "4648", "EventID", "Windows Security event id for a logon with explicit credentials."),
+        P("ignoreAccounts", "Accounts ignored", "values", "system, local service, network service, -", "SubjectUserName",
+          "Subjects that are the machine itself rather than a person."),
+    ),
+    "SIGMA-WIN-0205": (
+        P("eventId", "Event ID", "text", "4740", "EventID", "Windows Security event id for an account lockout."),
+    ),
+    "SIGMA-WIN-0210": (
+        P("eventIds", "Event IDs", "values", "5136, 5137, 5141", "EventID", "Directory service change event ids."),
+    ),
+    "SIGMA-WIN-0215": (
+        P("eventIds", "Event IDs", "values", "4657, 4688, 13", "EventID", "Registry-modification event ids to inspect."),
+        P("pattern", "Credential caching", "regex", _WDIGEST.pattern, "ObjectName",
+          "Matched against the registry object name and the command line."),
+    ),
+    "SIGMA-WIN-0220": (
+        P("eventId", "Event ID", "text", "4104", "EventID", "PowerShell operational event id carrying the script block."),
+        P("pattern", "Suspicious script", "regex", _PS_SCRIPT.pattern, "ScriptBlockText",
+          "Matched against the captured script block text."),
+    ),
+    "SIGMA-WIN-0225": (
+        P("eventId", "Event ID", "text", "4624", "EventID", "Windows Security event id for a successful logon."),
+        P("logonTypes", "Logon types", "values", "10, 7", "LogonType", "Logon types that mean a remote interactive session."),
+    ),
+    "SIGMA-WIN-0230": (
+        P("eventIds", "Event IDs", "values", "2004, 2005, 2006, 2033, 4946, 4947, 4948, 4950", "EventID",
+          "Windows Firewall rule-change event ids."),
+    ),
+    "SIGMA-WIN-0235": (
+        P("eventId", "Event ID", "text", "104", "EventID", "Event id logged when a channel other than Security is cleared."),
+    ),
+    "SIGMA-WIN-0250": (
+        P("eventIds", "Event IDs", "values", "5140, 5145", "EventID", "Network share access event ids."),
+        P("pattern", "Administrative share", "regex", _ADMIN_SHARE.pattern, "ShareName",
+          "Matched against the share name of the access."),
+    ),
+    "SIGMA-WIN-0255": (
+        P("eventIds", "Event IDs", "values", "4656, 4663, 4690", "EventID", "Object access event ids."),
+        P("pattern", "Target process", "regex", _LSASS.pattern, "ObjectName",
+          "Matched against the name of the object that was opened."),
+    ),
+    "SIGMA-AZURE-0010": (
+        P("riskFields", "Risk fields", "values", "riskLevelDuringSignIn, riskLevelAggregated, riskState, properties.riskLevelDuringSignIn",
+          "riskLevelDuringSignIn", "Fields Entra ID publishes its risk verdict in."),
+        P("riskLevels", "Risk levels", "values", "high, medium, atRisk, confirmedCompromised", "riskLevelDuringSignIn",
+          "Verdicts treated as risky."),
+    ),
+    "SIGMA-AZURE-0014": (
+        P("clientApps", "Legacy client apps", "values",
+          "IMAP4, POP3, SMTP AUTH, MAPI Over HTTP, Exchange ActiveSync, Exchange Online PowerShell, Other clients, Authenticated SMTP",
+          "clientAppUsed", "Client app values that cannot present a second factor."),
+    ),
+    "SIGMA-AZURE-0018": (
+        P("resultTypes", "Result codes", "values", "500121, 50074, 50076, 50079, 50072", "resultType",
+          "Entra ID result codes that mean the second factor was not satisfied."),
+    ),
+    "SIGMA-AZURE-0022": (
+        P("statusValues", "Conditional access status", "values", "failure", "conditionalAccessStatus",
+          "Values that mean policy refused the sign-in."),
+        P("resultTypes", "Result codes", "values", "53003, 53000, 53001, 53004", "resultType",
+          "Result codes that mean the same thing when the status field is absent."),
+    ),
+    "SIGMA-AZURE-0026": (
+        P("successResult", "Success result code", "text", "0", "resultType",
+          "The result code that means the sign-in worked; anything else is counted as a failure."),
+        P("window", "Time window", "seconds", "300", "", "Length of the sliding window the failures are counted in."),
+        P("threshold", "Events to fire", "int", "10", "", "How many failures inside one window before the rule fires."),
+    ),
+    "SIGMA-AZURE-0030": (
+        P("operations", "Audit operations", "values",
+          "Consent to application, Add OAuth2PermissionGrant, Add app role assignment grant to user, Add delegated permission grant",
+          "operationName", "Audit operations that grant an application access to data."),
+    ),
+    "SIGMA-AZURE-0034": (
+        P("operations", "Audit operations", "values", "Add member to role, Add eligible member to role, Add member to role in PIM requested",
+          "operationName", "Audit operations that put an account into a directory role."),
+        P("roles", "Privileged roles", "values",
+          "Global Administrator, Company Administrator, Privileged Role Administrator, Privileged Authentication Administrator, "
+          "Security Administrator, Exchange Administrator, SharePoint Administrator, Application Administrator, Cloud Application Administrator, User Administrator",
+          "raw", "Roles worth flagging when one of the operations above names them."),
+    ),
+    "SIGMA-AZURE-0038": (
+        P("operations", "Audit operations", "values",
+          "Add service principal, Add service principal credentials, Update application - Certificates and secrets management, Add application",
+          "operationName", "Audit operations that create a non-human identity or give one a new key."),
+    ),
+    "SIGMA-AZURE-0042": (
+        P("countryFields", "Country fields", "values", "location.countryOrRegion, countryOrRegion, country, location_country",
+          "location.countryOrRegion", "Fields the sign-in log publishes the country in."),
+        P("window", "Time window", "seconds", "3600", "", "Length of the sliding window the countries are counted in."),
+        P("distinctCountries", "Distinct countries to fire", "int", "2", "", "How many DIFFERENT countries one identity must sign in from."),
+    ),
+    "SIGMA-AZURE-0046": (
+        P("operations", "Audit operations", "values",
+          "Delete conditional access policy, Update conditional access policy, Disable Strong Authentication, "
+          "Update authentication methods policy, Disable security defaults, Update policy",
+          "operationName", "Audit operations that weaken or remove an access control."),
+    ),
+    "SIGMA-M365-0010": (
+        P("severityField", "Severity field", "text", "Severity", "Severity", "Field the alert publishes its severity in."),
+        P("severities", "Severities", "values", "high, medium, informational", "Severity", "Alert severities worth surfacing."),
+        P("markers", "Alert markers", "values", "AlertId, ProviderName, DetectionSource, ThreatFamilyName", "AlertId",
+          "Any of these fields present marks the event as a Defender alert."),
+    ),
+    "SIGMA-M365-0014": (
+        P("operations", "Audit operations", "values", "New-InboxRule, Set-InboxRule, UpdateInboxRules, Enable-InboxRule",
+          "Operation", "Audit operations that create or change a mailbox rule."),
+    ),
+    "SIGMA-M365-0018": (
+        P("operations", "Audit operations", "values", "Set-Mailbox, Set-InboxRule, New-InboxRule, Set-TransportRule, New-TransportRule",
+          "Operation", "Operations that can configure forwarding."),
+        P("pattern", "Forwarding parameters", "regex", _FORWARDING.pattern, "raw",
+          "Matched against the raw event body to confirm forwarding was actually set."),
+    ),
+    "SIGMA-M365-0022": (
+        P("operations", "Audit operations", "values",
+          "SearchStarted, SearchExported, ViewedSearchExported, New-ComplianceSearch, New-ComplianceSearchAction, Start-ComplianceSearch",
+          "Operation", "eDiscovery and content-search operations."),
+    ),
+    "SIGMA-M365-0026": (
+        P("operations", "Audit operations", "values",
+          "AnonymousLinkCreated, AnonymousLinkUsed, SecureLinkCreated, AddedToSecureLink, SharingInvitationCreated, CompanyLinkCreated",
+          "Operation", "Sharing operations that create a link or invite someone outside the tenant."),
+    ),
+    "SIGMA-M365-0030": (
+        P("operations", "Audit operations", "values", "FileDownloaded, FileSyncDownloadedFull, FileSyncUploadedFull, FilePreviewed",
+          "Operation", "Operations counted as pulling files."),
+        P("window", "Time window", "seconds", "600", "", "Length of the sliding window the downloads are counted in."),
+        P("threshold", "Events to fire", "int", "100", "", "How many file operations inside one window before the rule fires."),
+    ),
+    "SIGMA-M365-0034": (
+        P("pattern", "Threat verdict", "regex", _THREAT_VERDICT.pattern, "ThreatType",
+          "Matched against the threat/verdict/delivery fields of a mail security event."),
+        P("fields", "Verdict fields", "values", "ThreatType, Verdict, DeliveryAction, DetectionMethod, PhishConfidenceLevel",
+          "ThreatType", "Fields a mail security product publishes its verdict in."),
+    ),
+    "SIGMA-M365-0038": (
+        P("operations", "Audit operations", "values",
+          "Set-AdminAuditLogConfig, Set-MailboxAuditBypassAssociation, Set-Mailbox -AuditEnabled, Remove-UnifiedAuditLogRetentionPolicy",
+          "Operation", "Operations that switch audit logging off or narrow it."),
+    ),
 }
 del P
 R = {k: replace(v, params=PARAMS.get(v.id, ())) for k, v in R.items()}
@@ -1114,6 +1492,10 @@ def _fmt_bytes(n: float) -> str:
 
 
 _DISABLED: set[str] = set()  # built-in rule ids switched off via /api/rules (set per run_rules call)
+# The compiled EXCLUSIONS for this pass (app/exclusions.py), or None. Handed in by the caller exactly
+# like `disabled` / `overrides` / `params`, so this module still depends on nothing but models+normalize:
+# the engine must be testable without a store, a settings file or a suppression list on disk.
+_EXCLUDE: Optional[object] = None
 _OVERRIDES: dict[str, dict] = {}  # {rule_id: {"name":…, "sev":…}} analyst edits to built-in metadata
 _PARAMS: dict[str, dict[str, str]] = {}  # {rule_id: {param key: value}} analyst-tuned condition
 _RX_CACHE: dict[tuple[str, str, str], "re.Pattern[str]"] = {}  # compiled regex params, keyed by their text
@@ -1167,6 +1549,12 @@ def _prx(rule_id: str, key: str, fallback: "re.Pattern[str]") -> "re.Pattern[str
 
 def _tag(ev: Event, rule: Rule, level: Optional[str] = None) -> None:
     if rule.id in _DISABLED:
+        return
+    # THE ONE CHOKE POINT for a built-in detection, which is why the exclusion check lives here rather
+    # than in each of the sixty-odd call sites. It suppresses the CLAIM, never the event: the line stays
+    # in the pool, in search and on the timeline, and only the rule's assertion about it is dropped.
+    ex = _EXCLUDE
+    if ex is not None and not ex.empty and ex.excluded(ev, rule.id):  # type: ignore[attr-defined]
         return
     ov = _OVERRIDES.get(rule.id)
     # an analyst-set severity wins over the shipped one, including over a per-call escalation
@@ -1288,9 +1676,68 @@ def _screen(patterns: list["re.Pattern[str]"]) -> Optional["re.Pattern[str]"]:
     return rx
 
 
+# ---- shared readers for the cloud rules. Azure, Microsoft 365 and Defender publish the same idea under
+#      several spellings depending on which export produced the file (Monitor, Graph, advanced hunting,
+#      a CSV from the portal), and a rule that only knows one spelling silently covers a fraction of the
+#      evidence. One lookup helper, used by every cloud rule, is the difference between that and this.
+def _cloud_get(fields: dict, *names: str) -> str:
+    for n in names:
+        v = fields.get(n)
+        if v:
+            return str(v)
+    return ""
+
+
+def _cloud_identity(e: Event) -> str:
+    """Who a cloud record is about — the identity, not the record id."""
+    return (_cloud_get(e.fields, "userPrincipalName", "UserPrincipalName", "userId", "UserId", "UserKey",
+                       "identity", "Identity", "initiatedBy.user.userPrincipalName", "actor")
+            or e.user or "")
+
+
+_AUTH_SUCCESS_IDS = ("4624", "4625")
+
+
+def _auth_user(e: Event, ignore: set) -> str:
+    """The account an event authenticated, or '' when it is not an authentication at all.
+
+    Deliberately conservative: a rule that counts DISTINCT ADDRESSES PER ACCOUNT is only meaningful over
+    events that really are sign-ins, and treating every line that happens to carry a user name as one
+    would count a log entry mentioning an account as the account being used.
+    """
+    f = e.fields
+    src = e.source
+    user = ""
+    if src == "windows.evtx":
+        if f.get("EventID", "") in _AUTH_SUCCESS_IDS:
+            user = f.get("TargetUserName", "")
+    elif src == "syslog":
+        if f.get("program", "").lower() == "sshd" and f.get("result", ""):
+            user = f.get("user", "") or e.user
+    elif src == "nginx.access":
+        if f.get("http.status", "").startswith("2") and _LOGIN_PATH.search(f.get("http.path", "")):
+            user = e.user or f.get("user", "")
+    elif src == "aws.cloudtrail":
+        if f.get("eventName", "") == "ConsoleLogin":
+            user = e.user
+    else:
+        if _cloud_get(f, "resultType", "ResultType", "properties.resultType") or f.get("signInEventTypes"):
+            user = _cloud_identity(e)
+    user = (user or "").strip()
+    if not user or user.lower() in ignore or user.endswith("$"):
+        return ""
+    return user.lower()
+
+
+def _auth_ip(e: Event) -> str:
+    return _cloud_get(e.fields, "IpAddress", "src_ip", "sourceIPAddress", "ipAddress", "callerIpAddress",
+                      "ClientIP", "ClientIPAddress", "client_ip") or ""
+
+
 def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] = None,
               overrides: Optional[dict[str, dict]] = None,
-              params: Optional[dict[str, dict[str, str]]] = None) -> dict[str, object]:
+              params: Optional[dict[str, dict[str, str]]] = None,
+              exclude: Optional[object] = None) -> dict[str, object]:
     """Evaluate all built-in rules over the events (in-place). Returns summary info (attacker IPs, fired count).
 
     `disabled` = built-in rule ids that must not fire (toggled off or removed in /api/rules).
@@ -1298,10 +1745,11 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     `params`    = {rule_id: {param key: value}} analyst-tuned CONDITIONS. Every threshold, window, event
                   id, value list and regex below is read from here, falling back to the shipped default.
     """
-    global _DISABLED, _OVERRIDES, _PARAMS
+    global _DISABLED, _OVERRIDES, _PARAMS, _EXCLUDE
     _DISABLED = set(disabled or ())
     _OVERRIDES = dict(overrides or {})
     _PARAMS = {k: dict(v) for k, v in (params or {}).items()}
+    _EXCLUDE = exclude
     for ev in events:
         if ev.detections:  # only pay the assignment where there IS a value; empty means the shared list
             ev.detections = EMPTY_LIST
@@ -1820,5 +2268,180 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
                         _tag(e, rule)
                         e.set_field_default("tactic", tactic)
 
+
+    # ================================================================ Windows / Azure / Microsoft 365
+    # The cloud rules read the fields the JSON exports carry. Azure sign-in and audit logs, Microsoft 365
+    # unified audit and Defender alerts all arrive as JSON (Monitor export, Graph, advanced hunting) or
+    # as a CSV of the same shape, so they are looked for in the app.jsonl bucket AND the delimited one -
+    # and each event is dismissed on ONE dict lookup when it is not that kind of record.
+
+    # --- Windows (continued)
+    w200_id, w200_ignore = _pt("SIGMA-WIN-0200", "eventId"), set(_pl("SIGMA-WIN-0200", "ignoreAccounts")) | _SYSTEM_ACCOUNTS
+    w205_id = _pt("SIGMA-WIN-0205", "eventId")
+    w210_ids = _pl("SIGMA-WIN-0210", "eventIds", lower=False)
+    w215_ids = _pl("SIGMA-WIN-0215", "eventIds", lower=False)
+    rx_wdigest = _prx("SIGMA-WIN-0215", "pattern", _WDIGEST)
+    w220_id = _pt("SIGMA-WIN-0220", "eventId")
+    rx_ps = _prx("SIGMA-WIN-0220", "pattern", _PS_SCRIPT)
+    w225_id, w225_types = _pt("SIGMA-WIN-0225", "eventId"), _pl("SIGMA-WIN-0225", "logonTypes", lower=False)
+    w230_ids = _pl("SIGMA-WIN-0230", "eventIds", lower=False)
+    w235_id = _pt("SIGMA-WIN-0235", "eventId")
+    w250_ids = _pl("SIGMA-WIN-0250", "eventIds", lower=False)
+    rx_share = _prx("SIGMA-WIN-0250", "pattern", _ADMIN_SHARE)
+    w255_ids = _pl("SIGMA-WIN-0255", "eventIds", lower=False)
+    rx_lsass = _prx("SIGMA-WIN-0255", "pattern", _LSASS)
+    for i in win:
+        e = events[i]
+        f = e.fields
+        eid = f.get("EventID", "")
+        if eid == w200_id and f.get("SubjectUserName", "").lower() not in w200_ignore \
+                and not f.get("SubjectUserName", "").endswith("$"):
+            _tag(e, R["WIN-0200"])
+        if eid == w205_id:
+            _tag(e, R["WIN-0205"])
+        if eid in w210_ids:
+            _tag(e, R["WIN-0210"])
+        if eid in w215_ids and rx_wdigest.search(f.get("ObjectName", "") + " " + f.get("CommandLine", "")
+                                                 + " " + f.get("TargetObject", "")):
+            _tag(e, R["WIN-0215"])
+            e.set_field("tactic", "credential access")
+        if eid == w220_id and rx_ps.search(f.get("ScriptBlockText", "") or e.raw):
+            _tag(e, R["WIN-0220"])
+        if eid == w225_id and any(f.get("LogonType", "").startswith(t) for t in w225_types) \
+                and is_public_ip(f.get("IpAddress", "")):
+            _tag(e, R["WIN-0225"])
+            attackers.setdefault(f.get("IpAddress", ""), "remote desktop logon")
+        if eid in w230_ids:
+            _tag(e, R["WIN-0230"])
+        if eid == w235_id:
+            _tag(e, R["WIN-0235"])
+            e.set_field_default("tactic", "defense evasion")
+        if eid in w250_ids and rx_share.search(f.get("ShareName", "") or f.get("RelativeTargetName", "")):
+            _tag(e, R["WIN-0250"])
+            e.set_field_default("tactic", "lateral movement")
+        if eid in w255_ids and rx_lsass.search(f.get("ObjectName", "") or f.get("TargetImage", "")):
+            _tag(e, R["WIN-0255"])
+            e.set_field("tactic", "credential access")
+
+    # --- the cloud bucket: Azure sign-in / audit, Microsoft 365 unified audit, Defender alerts
+    cloud = app + net
+    az10_fields, az10_levels = _pl("SIGMA-AZURE-0010", "riskFields", lower=False), _pl("SIGMA-AZURE-0010", "riskLevels")
+    az14_apps = _pl("SIGMA-AZURE-0014", "clientApps")
+    az18_results = _pl("SIGMA-AZURE-0018", "resultTypes")
+    az22_status, az22_results = _pl("SIGMA-AZURE-0022", "statusValues"), _pl("SIGMA-AZURE-0022", "resultTypes")
+    az30_ops = _pl("SIGMA-AZURE-0030", "operations")
+    az34_ops, az34_roles = _pl("SIGMA-AZURE-0034", "operations"), _pl("SIGMA-AZURE-0034", "roles")
+    az38_ops = _pl("SIGMA-AZURE-0038", "operations")
+    az46_ops = _pl("SIGMA-AZURE-0046", "operations")
+    m10_sev_field, m10_sevs, m10_markers = (_pt("SIGMA-M365-0010", "severityField"),
+                                            _pl("SIGMA-M365-0010", "severities"),
+                                            _pl("SIGMA-M365-0010", "markers", lower=False))
+    m14_ops = _pl("SIGMA-M365-0014", "operations")
+    m18_ops = _pl("SIGMA-M365-0018", "operations")
+    rx_forward = _prx("SIGMA-M365-0018", "pattern", _FORWARDING)
+    m22_ops = _pl("SIGMA-M365-0022", "operations")
+    m26_ops = _pl("SIGMA-M365-0026", "operations")
+    m34_fields = _pl("SIGMA-M365-0034", "fields", lower=False)
+    rx_verdict = _prx("SIGMA-M365-0034", "pattern", _THREAT_VERDICT)
+    m38_ops = _pl("SIGMA-M365-0038", "operations")
+    for i in cloud:
+        e = events[i]
+        f = e.fields
+        # ONE lookup decides whether this is a record of the kind these rules read at all. Without it
+        # every rule below would touch every delimited row in the pool.
+        op = _cloud_get(f, "operationName", "OperationName", "operation", "Operation", "ActivityDisplayName")
+        result = _cloud_get(f, "resultType", "ResultType", "properties.resultType")
+        client_app = _cloud_get(f, "clientAppUsed", "ClientAppUsed", "properties.clientAppUsed")
+        if op:
+            lop = op.lower()
+            if any(x in lop for x in az30_ops):
+                _tag(e, R["AZURE-0030"])
+                e.set_field_default("tactic", "persistence")
+            if any(x in lop for x in az34_ops) and any(r in e.raw.lower() for r in az34_roles):
+                _tag(e, R["AZURE-0034"])
+                e.set_field_default("tactic", "privilege escalation")
+            if any(x in lop for x in az38_ops):
+                _tag(e, R["AZURE-0038"])
+            if any(x in lop for x in az46_ops):
+                _tag(e, R["AZURE-0046"])
+                e.set_field_default("tactic", "defense evasion")
+            if any(x in lop for x in m14_ops):
+                _tag(e, R["M365-0014"])
+            if any(x in lop for x in m18_ops) and rx_forward.search(e.raw):
+                _tag(e, R["M365-0018"])
+                e.set_field("tactic", "collection")
+            if any(x in lop for x in m22_ops):
+                _tag(e, R["M365-0022"])
+            if any(x in lop for x in m26_ops):
+                _tag(e, R["M365-0026"])
+                e.set_field_default("exposure", "external")
+            if any(x in lop for x in m38_ops):
+                _tag(e, R["M365-0038"])
+                e.set_field("tactic", "defense evasion")
+        for rf in az10_fields:
+            v = f.get(rf, "").lower()
+            if v and v in az10_levels:
+                _tag(e, R["AZURE-0010"])
+                e.set_field_default("risk", v)
+                break
+        if client_app and client_app.lower() in az14_apps:
+            _tag(e, R["AZURE-0014"])
+        if result and result in az18_results:
+            _tag(e, R["AZURE-0018"])
+        if _cloud_get(f, "conditionalAccessStatus", "ConditionalAccessStatus").lower() in az22_status \
+                or (result and result in az22_results):
+            _tag(e, R["AZURE-0022"])
+        if any(f.get(m) for m in m10_markers):
+            sev = (f.get(m10_sev_field) or f.get(m10_sev_field.lower()) or "").lower()
+            if sev in m10_sevs:
+                _tag(e, R["M365-0010"], "critical" if sev == "high" else None)
+        for vf in m34_fields:
+            v = f.get(vf, "")
+            if v and rx_verdict.search(v):
+                _tag(e, R["M365-0034"])
+                e.set_field_default("verdict", v[:60])
+                break
+    # Azure sign-in failure burst, distinct countries, and bulk file operations.
+    az26_ok = _pt("SIGMA-AZURE-0026", "successResult")
+    for _, anchor, count, first in find_bursts(
+        (i for i in cloud
+         if _cloud_get(events[i].fields, "resultType", "ResultType", "properties.resultType") not in ("", az26_ok)), ts,
+            lambda i: _cloud_identity(events[i]), _pn("SIGMA-AZURE-0026", "window"), _pn("SIGMA-AZURE-0026", "threshold")):
+        _tag(events[anchor], R["AZURE-0026"])
+        events[anchor].set_field("burst.count", str(count))
+    az42_fields = _pl("SIGMA-AZURE-0042", "countryFields", lower=False)
+    for who, anchor, count, first in find_distinct_bursts(
+        (i for i in cloud if _cloud_get(events[i].fields, *az42_fields)), ts,
+            lambda i: _cloud_identity(events[i]),
+            lambda i: _cloud_get(events[i].fields, *az42_fields).lower(),
+            _pn("SIGMA-AZURE-0042", "window"), _pn("SIGMA-AZURE-0042", "distinctCountries")):
+        ev = events[anchor]
+        _tag(ev, R["AZURE-0042"])
+        ev.set_field("signin.countries", str(count))
+        ev.msg = f"{who} signed in from {count} different countries"
+    m30_ops = _pl("SIGMA-M365-0030", "operations")
+    for _, anchor, count, first in find_bursts(
+        (i for i in cloud
+         if _cloud_get(events[i].fields, "Operation", "operationName", "OperationName").lower() in m30_ops), ts,
+            lambda i: _cloud_identity(events[i]), _pn("SIGMA-M365-0030", "window"), _pn("SIGMA-M365-0030", "threshold")):
+        _tag(events[anchor], R["M365-0030"])
+        events[anchor].set_field("burst.count", str(count))
+        events[anchor].set_field_default("tactic", "exfiltration")
+
+    # --- one account, many addresses. Deliberately across EVERY family that carries an authentication:
+    # a credential in two pairs of hands rarely shows up in one log, and the whole point of a workspace
+    # that holds the web tier, the endpoint and the cloud together is that this question can be asked
+    # once instead of three times.
+    a240_ignore = set(_pl("SIGMA-AUTH-0240", "ignoreAccounts")) | _SYSTEM_ACCOUNTS
+    auth_idx = [i for i in (web + win + lnx + ct + cloud) if _auth_user(events[i], a240_ignore)]
+    for who, anchor, count, first in find_distinct_bursts(
+        auth_idx, ts, lambda i: _auth_user(events[i], a240_ignore), lambda i: _auth_ip(events[i]),
+            _pn("SIGMA-AUTH-0240", "window"), _pn("SIGMA-AUTH-0240", "distinctIps")):
+        ev = events[anchor]
+        _tag(ev, R["AUTH-0240"])
+        ev.set_field("account.addresses", str(count))
+        ev.msg = f"{who} authenticated from {count} different addresses"
     fired = sum(len(e.detections) for e in events)
-    return {"fired": fired, "attackers": set(attackers), "rules_evaluated": len(RULES)}
+    suppressed = _EXCLUDE.counts() if (_EXCLUDE is not None and not _EXCLUDE.empty) else {}  # type: ignore[attr-defined]
+    return {"fired": fired, "attackers": set(attackers), "rules_evaluated": len(RULES),
+            "suppressed": suppressed}

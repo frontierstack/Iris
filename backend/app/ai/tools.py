@@ -2093,6 +2093,102 @@ def _create_detection_rule(args: dict[str, Any], ctx: RunContext) -> dict[str, A
     return {"ok": True, "rule": _rule_row(r), **cost, "action": action}
 
 
+# ============================================================ EXCLUSIONS
+# "This rule keeps reporting the same benign thing" is a normal outcome of an investigation, and the fix
+# is a suppression rather than a disabled rule — switching a rule off loses everything it would have
+# caught, while an exclusion loses only the thing that was judged. The agent gets the same three verbs
+# the screen has, through the same validated router, and every write is undoable with the run.
+@tool("list_exclusions",
+      "The exclusions in force: what each one suppresses, which rules it is scoped to, and how many "
+      "detections it actually removed on the last pass. Call this before concluding that a rule did not "
+      "fire — a suppression is the other reason a detection is missing, and the ready-made suggestions "
+      "Iris offers (public resolvers, machine accounts, health checks) are listed too.",
+      {})
+def _list_exclusions(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
+    from ..routers.exclusions import list_exclusions
+    res = call_route(list_exclusions)
+    rows = [{"id": x.id, "name": x.name, "enabled": x.enabled,
+             "conditions": [f"{c.field} {c.op} {c.value}".strip() for c in x.conditions],
+             "combinator": x.combinator,
+             "scope": x.ruleIds or "every rule", "suppressed": x.suppressed,
+             "appliesToGraph": x.appliesToGraph, "why": x.note}
+            for x in res.exclusions]
+    return {"total": len(rows), "suppressedTotal": res.suppressed, "exclusions": rows,
+            "suggested": [{"name": s.name, "why": s.why,
+                           "conditions": [f"{c.field} {c.op} {c.value}".strip() for c in s.conditions]}
+                          for s in res.suggestions]}
+
+
+@tool("add_exclusion",
+      "Suppress a rule on evidence that has already been judged benign — a public resolver, a monitoring "
+      "probe, a machine account. It stops the DETECTION, never the event: the line stays in the pool, in "
+      "search and on the timeline. Scope it with `ruleIds` unless the thing really is uninteresting to "
+      "every rule; 'this address is never interesting' and 'not interesting for THIS rule' are different "
+      "claims and the second is usually what is meant. Say WHY in `note` — an unexplained suppression is "
+      "indistinguishable from missing evidence to whoever reads the case next.",
+      {"name": {"type": "string"},
+       "conditions": {"type": "array", "description": "typed conditions [{field, op, value}] — same "
+                                                      "vocabulary as create_detection_rule",
+                      "items": {"type": "object", "properties": {"field": {"type": "string"},
+                                                                 "op": {"type": "string"},
+                                                                 "value": {"type": "string"}}}},
+       "combinator": {"type": "string", "enum": ["and", "or"]},
+       "ruleIds": {"type": "array", "items": {"type": "string"},
+                   "description": "rule ids this applies to; omit for every rule"},
+       "note": {"type": "string", "description": "why this is benign"}},
+      ["name", "conditions"], writes=True)
+def _add_exclusion(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
+    from fastapi import HTTPException
+    from ..models import ExclusionInput, RuleCondition
+    from ..routers.exclusions import create_exclusion
+    _budget(ctx)
+    rows = args.get("conditions") or []
+    if not isinstance(rows, list) or not rows:
+        raise ToolError("an exclusion needs at least one condition — one that matches everything would "
+                        "switch the whole catalogue off")
+    try:
+        conds = [RuleCondition(field=_s(c.get("field"), 120), op=_s(c.get("op"), 30) or "contains",
+                               value=_s(c.get("value"), 2000)) for c in rows if isinstance(c, dict)]
+    except Exception as exc:  # noqa: BLE001
+        raise ToolError(f"those conditions are not valid: {exc}")
+    body = ExclusionInput(name=_s(args.get("name"), 120), conditions=conds,
+                          combinator="or" if _s(args.get("combinator"), 8).lower() == "or" else "and",
+                          ruleIds=[_s(r, 60) for r in (args.get("ruleIds") or []) if _s(r, 60)],
+                          note=_s(args.get("note"), 2000), enabled=True)
+    try:
+        ex = call_route(create_exclusion, body=body)
+    except HTTPException as exc:
+        raise ToolError(f"the exclusion was rejected: {exc.detail}")
+    action = ctx.record("add_exclusion",
+                        f"added exclusion {ex.id} '{ex.name}' ({'every rule' if not ex.ruleIds else str(len(ex.ruleIds)) + ' rule(s)'})",
+                        {"kind": "exclusion_added", "exclusionId": ex.id})
+    return {"ok": True, "id": ex.id, "name": ex.name, "trigger": ex.logic,
+            "appliesToGraph": ex.appliesToGraph,
+            "note": ("detections have been re-evaluated across the whole pool; anything this suppresses "
+                     "no longer appears in the anomaly list, and the events themselves are untouched"),
+            "action": action}
+
+
+@tool("delete_exclusion",
+      "Remove an exclusion. This only ever REVEALS detections — whatever it was suppressing comes back "
+      "on the next pass. Use it when a suppression turns out to have been hiding something that matters.",
+      {"exclusionId": {"type": "string"}, "why": {"type": "string"}},
+      ["exclusionId"], writes=True)
+def _delete_exclusion(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
+    from ..exclusions import EXCLUSIONS
+    from ..routers.exclusions import delete_exclusion
+    _budget(ctx)
+    eid = _s(args.get("exclusionId"), 60).strip()
+    cur = EXCLUSIONS.get(eid)
+    if cur is None:
+        raise ToolError(f"no exclusion with id {eid!r}. Call list_exclusions for the exact ids.")
+    before = cur.model_dump()
+    call_route(delete_exclusion, exclusion_id=eid)
+    action = ctx.record("delete_exclusion", f"removed exclusion {eid} '{cur.name}'",
+                        {"kind": "exclusion_deleted", "exclusionId": eid, "before": before})
+    return {"ok": True, "removed": eid, "action": action}
+
+
 @tool("preview_detection_rule",
       "DRY-RUN a rule definition against the whole pool WITHOUT saving it: how many events it would "
       "flag, up to 20 of them, and the trigger sentence describing what the engine would actually "

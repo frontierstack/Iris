@@ -687,6 +687,47 @@ export interface Anomaly {
  *  render the build state, because an empty anomaly list reads as "nothing fired". */
 export interface AnomaliesResponse { total: number; anomalies: Anomaly[]; status?: DerivedState }
 
+/* ───── Exclusions (GET /api/exclusions) ─────
+ * The one feature in Iris that can HIDE things, so the type carries what makes that safe: `suppressed`
+ * is how many detections it actually removed on the last pass (null = no pass since it changed, which
+ * is NOT zero), and `appliesToGraph` says whether it can be evaluated against an entity-graph node at
+ * all — a node has a type and a value and no fields, so a condition on `dst_port` cannot be checked
+ * against one and is declared rather than half-applied. */
+export interface Exclusion {
+  id: string;
+  name: string;
+  conditions: RuleCondition[];
+  combinator: 'and' | 'or';
+  /** empty = EVERY rule; otherwise the rule ids it is scoped to */
+  ruleIds: string[];
+  note: string;
+  enabled: boolean;
+  createdBy: 'user' | 'ai' | 'system';
+  createdAt: string;
+  updatedAt: string;
+  suppressed: number | null;
+  appliesToGraph: boolean;
+  error?: string | null;
+  /** generated, read-only sentence describing what it suppresses */
+  logic?: string | null;
+}
+export interface ExclusionInput {
+  name: string;
+  conditions: RuleCondition[];
+  combinator?: 'and' | 'or';
+  ruleIds?: string[];
+  note?: string;
+  enabled?: boolean;
+}
+/** Offered, never applied: shipping suppressions enabled would mean an analyst's first search silently
+ *  omitted evidence they never chose to omit. Each one says WHY. */
+export interface ExclusionSuggestion {
+  name: string; why: string; conditions: RuleCondition[]; combinator: 'and' | 'or'; ruleIds: string[];
+}
+export interface ExclusionsResponse {
+  exclusions: Exclusion[]; suggestions: ExclusionSuggestion[]; suppressed: number;
+}
+
 /* ───── Entity-graph findings (GET /api/graph/anomalies) ─────
  * A whole class of detection cannot be phrased per event: one address authenticating as fourteen
  * accounts is a property of the SHAPE of the relationships, and every one of those lines is

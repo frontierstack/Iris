@@ -421,6 +421,8 @@ _SUMMARY: dict[str, Callable[[dict[str, Any]], str]] = {
     "list_detections": lambda d: f"{_len(d, 'detections')} of {d.get('total', 0)} rule(s) fired",
     "list_anomalies": lambda d: f"{d.get('shown', _len(d, 'anomalies'))} anomal(ies), {_n(d.get('totalHits', 0))} hits",
     "list_detection_rules": lambda d: f"{_len(d, 'rules')} of {d.get('total', 0)} rule(s) in the catalogue",
+    "list_exclusions": lambda d: (f"{d.get('total', 0)} exclusion(s), suppressing "
+                                  f"{_n(d.get('suppressedTotal', 0))} detection(s)"),
     "list_graph_findings": lambda d: (f"{_len(d, 'findings')} of {d.get('total', 0)} entity-graph finding(s) "
                                       f"over the {d.get('scope', 'all')} scope"),
     "preview_detection_rule": lambda d: (f"would flag {_n(d.get('hits', 0))} event(s)"

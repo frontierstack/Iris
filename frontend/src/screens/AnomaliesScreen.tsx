@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
-import { SEVERITIES, type Anomaly, type Event, type GraphFinding, type Rule, type RuleCondition, type RuleField, type RuleInput, type RuleOp, type RuleParamKind, type RuleSuggestResult, type RuleTestResult, type Severity } from '../api/types';
+import { SEVERITIES, type Anomaly, type Event, type Exclusion, type ExclusionInput, type ExclusionSuggestion, type GraphFinding, type Rule, type RuleCondition, type RuleField, type RuleInput, type RuleOp, type RuleParamKind, type RuleSuggestResult, type RuleTestResult, type Severity } from '../api/types';
 import { DerivedPauseActions } from '../components/Enrichment';
 import { Icon } from '../components/icons';
 import { BuildingState, ConfirmDialog, Drawer, EmptyState, ErrorState, SectionHead, SevTag, SkeletonRows, Toggle } from '../components/ui';
@@ -1250,12 +1250,279 @@ function GraphFindingsSection() {
   );
 }
 
+/* ───────────────────────── Exclusions ─────────────────────────
+ * The one part of this screen that can HIDE evidence, so the design points at making that visible:
+ * every row states what it suppressed on the last pass, an exclusion that has never suppressed anything
+ * says so (it is probably wrong), and the section header carries the total. Nothing is excluded until
+ * somebody adds it — the suggested list is offered with its reasoning and applied by a deliberate click.
+ * An exclusion suppresses the CLAIM, never the event: the line stays in the pool, in search and on the
+ * timeline, and only the rule's assertion about it is dropped. The copy says so, because an analyst who
+ * thinks this deletes evidence will not use it, and one who thinks it does not hide anything will. */
+const EMPTY_EXCLUSION: ExclusionInput = { name: '', conditions: [{ field: 'msg', op: 'contains', value: '' }],
+                                          combinator: 'or', ruleIds: [], note: '', enabled: true };
+
+function ExclusionEditor({ open, current, onClose }: { open: boolean; current: Exclusion | null; onClose: () => void }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const invalidate = useInvalidateCaseData();
+  const rules = useRules();
+  const [draft, setDraft] = useState<ExclusionInput>(EMPTY_EXCLUSION);
+  const [scoped, setScoped] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setDraft(current
+      ? { name: current.name, conditions: current.conditions, combinator: current.combinator,
+          ruleIds: current.ruleIds, note: current.note, enabled: current.enabled }
+      : EMPTY_EXCLUSION);
+    setScoped(!!current?.ruleIds?.length);
+  }, [open, current]);
+
+  const after = () => {
+    void qc.invalidateQueries({ queryKey: ['exclusions'] });
+    void qc.invalidateQueries({ queryKey: qk.rules });
+    void qc.invalidateQueries({ queryKey: ['graph-anomalies'] });
+    invalidate();
+    onClose();
+  };
+  const save = useMutation({
+    mutationFn: (body: ExclusionInput) => (current ? api.updateExclusion(current.id, body) : api.createExclusion(body)),
+    onSuccess: () => { toast.success(current ? 'Exclusion updated' : 'Exclusion added',
+                                     'detections were re-evaluated across the workspace'); after(); },
+    onError: (e) => toast.error('Could not save the exclusion', e),
+  });
+
+  const setCond = (i: number, next: RuleCondition) =>
+    setDraft((d) => ({ ...d, conditions: d.conditions.map((c, j) => (j === i ? next : c)) }));
+
+  return (
+    <Drawer open={open} onClose={onClose} title={current ? 'Edit exclusion' : 'New exclusion'} wide>
+      <div className="form-grid">
+        <label className="field">
+          <span className="field__label">Name</span>
+          <input className="input" value={draft.name} placeholder="Public DNS resolvers"
+            onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))} />
+        </label>
+
+        <div className="field">
+          <span className="field__label">Conditions</span>
+          <span className="field__hint">
+            An event matching these is not tagged by the rules below. The event itself is untouched — it
+            stays in the pool, in search and on the timeline.
+          </span>
+          {/* The SAME ConditionRow the rule editor uses — one condition builder in this app, not two.
+              Two would drift, and here drift means an exclusion that reads a field differently from the
+              rule it is suppressing. */}
+          {draft.conditions.map((c, i) => (
+            <ConditionRow key={i} c={c} i={i} canRemove={draft.conditions.length > 1}
+              onChange={(next) => setCond(i, next)}
+              onRemove={() => setDraft((d) => ({ ...d, conditions: d.conditions.filter((_, j) => j !== i) }))} />
+          ))}
+          <div className="form-row" style={{ justifyContent: 'space-between' }}>
+            <button className="btn btn--sm"
+              onClick={() => setDraft((d) => ({ ...d, conditions: [...d.conditions, { ...EMPTY_CONDITION }] }))}>
+              <Icon.Plus /> Add condition
+            </button>
+            {draft.conditions.length > 1 && (
+              <Toggle on={draft.combinator === 'or'} onChange={(v) => setDraft((d) => ({ ...d, combinator: v ? 'or' : 'and' }))}
+                label={draft.combinator === 'or' ? 'match ANY condition' : 'match ALL conditions'} />
+            )}
+          </div>
+        </div>
+
+        <div className="field">
+          <span className="field__label">Applies to</span>
+          <Toggle on={scoped} onChange={(v) => { setScoped(v); if (!v) setDraft((d) => ({ ...d, ruleIds: [] })); }}
+            label={scoped ? 'only the rules I choose' : 'every rule'} />
+          <span className="field__hint">
+            “This address is never interesting” and “this address is not interesting for THIS rule” are
+            different claims. The second is usually what you mean.
+          </span>
+          {scoped && (
+            <div className="chip-row" style={{ flexWrap: 'wrap' }}>
+              {(rules.data ?? []).filter((r) => !r.removed).slice(0, 200).map((r) => (
+                <button key={r.id} type="button"
+                  className={cx('chip', draft.ruleIds?.includes(r.id) && 'chip--on')}
+                  onClick={() => setDraft((d) => ({
+                    ...d,
+                    ruleIds: d.ruleIds?.includes(r.id) ? d.ruleIds.filter((x) => x !== r.id) : [...(d.ruleIds ?? []), r.id],
+                  }))}>
+                  {r.name}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <label className="field">
+          <span className="field__label">Why (optional)</span>
+          <textarea className="input" rows={2} value={draft.note} placeholder="8.8.8.8 is Google's resolver — every host here uses it"
+            onChange={(e) => setDraft((d) => ({ ...d, note: e.target.value }))} />
+        </label>
+
+        <div className="form-row" style={{ justifyContent: 'flex-end', gap: 8, marginTop: 8 }}>
+          <button className="btn" onClick={onClose}>Cancel</button>
+          <button className="btn btn--accent" disabled={save.isPending || !draft.name.trim()}
+            onClick={() => save.mutate(draft)}>
+            {save.isPending && <span className="btn__spinner" />}
+            {current ? 'Save exclusion' : 'Add exclusion'}
+          </button>
+        </div>
+      </div>
+    </Drawer>
+  );
+}
+
+function ExclusionsSection() {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const invalidate = useInvalidateCaseData();
+  const q = useQuery({ queryKey: ['exclusions'], queryFn: api.exclusions });
+  const [editing, setEditing] = useState<{ open: boolean; current: Exclusion | null }>({ open: false, current: null });
+  const [showSuggested, setShowSuggested] = useState(false);
+
+  const after = (msg: string, hint: string) => {
+    toast.success(msg, hint);
+    void qc.invalidateQueries({ queryKey: ['exclusions'] });
+    void qc.invalidateQueries({ queryKey: qk.rules });
+    void qc.invalidateQueries({ queryKey: ['graph-anomalies'] });
+    invalidate();
+  };
+  const toggle = useMutation({
+    mutationFn: (id: string) => api.toggleExclusion(id),
+    onSuccess: (x) => after(x.enabled ? 'Exclusion on' : 'Exclusion off', 'detections were re-evaluated'),
+    onError: (e) => toast.error('Could not change the exclusion', e),
+  });
+  const remove = useMutation({
+    mutationFn: (id: string) => api.deleteExclusion(id),
+    onSuccess: () => after('Exclusion removed', 'anything it was hiding is back'),
+    onError: (e) => toast.error('Could not remove the exclusion', e),
+  });
+  const add = useMutation({
+    mutationFn: (s: ExclusionSuggestion) => api.createExclusion({
+      name: s.name, conditions: s.conditions, combinator: s.combinator, ruleIds: s.ruleIds, note: s.why }),
+    onSuccess: () => after('Exclusion added', 'detections were re-evaluated across the workspace'),
+    onError: (e) => toast.error('Could not add the exclusion', e),
+  });
+
+  const rows = q.data?.exclusions ?? [];
+  const suggestions = q.data?.suggestions ?? [];
+  const have = new Set(rows.map((r) => r.name.toLowerCase()));
+  const offered = suggestions.filter((s) => !have.has(s.name.toLowerCase()));
+
+  return (
+    <section>
+      <SectionHead
+        eyebrow="04 · Exclusions"
+        title={<>Exclusions {rows.length > 0 && <span className="sec__count">{rows.length}</span>}</>}
+        hint={
+          <>
+            Known-benign things a rule should stop claiming — a public resolver, a monitoring probe, a
+            machine account. An exclusion suppresses the <b>detection</b>, never the event: the line stays
+            in the pool, in search and on the timeline.
+            {q.data && q.data.suppressed > 0 && (
+              <> Currently suppressing <b>{fmtInt(q.data.suppressed)}</b> detection{q.data.suppressed === 1 ? '' : 's'}.</>
+            )}
+          </>
+        }
+        actions={
+          <>
+            {offered.length > 0 && (
+              <button className="btn btn--sm btn--ghost" onClick={() => setShowSuggested((v) => !v)}>
+                {showSuggested ? 'Hide' : 'Suggested'} ({offered.length})
+              </button>
+            )}
+            <button className="btn btn--accent btn--sm" onClick={() => setEditing({ open: true, current: null })}>
+              <Icon.Plus /> New exclusion
+            </button>
+          </>
+        }
+      />
+      {q.isLoading && <SkeletonRows n={2} />}
+      {q.isError && <ErrorState error={q.error} onRetry={() => void q.refetch()} />}
+
+      {showSuggested && offered.length > 0 && (
+        <div className="excl-suggest">
+          {offered.map((s) => (
+            <div className="excl-suggest__row" key={s.name}>
+              <div>
+                <div className="cell-bright">{s.name}</div>
+                {/* every suggestion states WHY, because a resolver being benign infrastructure is exactly
+                    what makes it useful for tunnelling — this is a judgement Iris must not make for you */}
+                <div className="cell-dim">{s.why}</div>
+              </div>
+              <button className="btn btn--sm" disabled={add.isPending} onClick={() => add.mutate(s)}>
+                <Icon.Plus /> Add
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {rows.length === 0 && !q.isLoading && (
+        <EmptyState
+          icon={<Icon.Sliders />}
+          title="Nothing is excluded"
+          body="Every rule is claiming everything it matches. Add an exclusion when a rule keeps reporting something you have already judged benign — that is what stops people learning to skim past it."
+        />
+      )}
+
+      {rows.length > 0 && (
+        <div className="table">
+          <div className="table__head excl-grid">
+            <div>On</div><div>Name</div><div>Suppresses</div><div className="num">Hidden</div><div>Scope</div><div />
+          </div>
+          {rows.map((x) => (
+            <div className={cx('table__row excl-grid', !x.enabled && 'is-off')} key={x.id}>
+              <div>
+                <Toggle on={x.enabled} onChange={() => toggle.mutate(x.id)} />
+              </div>
+              <div className="excl__name">
+                <span className="cell-bright">{x.name}</span>
+                {x.note && <span className="cell-dim ellipsis" title={x.note}>{x.note}</span>}
+              </div>
+              <div className="excl__logic cell-mono cell-dim" title={x.logic ?? ''}>
+                {x.conditions.map((c, i) => (
+                  <span key={i} className="tag">{c.field} {OPS.find((o) => o.value === c.op)?.phrase ?? c.op}{c.op === 'exists' ? '' : ` "${c.value}"`}</span>
+                ))}
+              </div>
+              {/* null is NOT zero: nothing has been re-evaluated since this changed, and saying "0"
+                  would claim the exclusion is doing nothing when nobody has checked. */}
+              <div className="cell-mono num" title={x.suppressed === null ? 'not evaluated yet' : 'detections suppressed on the last pass'}>
+                {x.suppressed === null ? '—' : fmtInt(x.suppressed)}
+              </div>
+              <div>
+                <span className={cx('badge', x.ruleIds.length > 0 && 'badge--ok')}>
+                  {x.ruleIds.length ? `${x.ruleIds.length} rule${x.ruleIds.length === 1 ? '' : 's'}` : 'every rule'}
+                </span>
+                {!x.appliesToGraph && (
+                  <span className="badge tip" data-tip="Its conditions read event fields, which an entity-graph node does not have — so graph findings are NOT filtered by this one.">
+                    events only
+                  </span>
+                )}
+              </div>
+              <div className="excl__go">
+                <button className="btn btn--sm btn--ghost" onClick={() => setEditing({ open: true, current: x })}>Edit</button>
+                <button className="btn btn--sm btn--ghost" disabled={remove.isPending} onClick={() => remove.mutate(x.id)}>
+                  <Icon.Trash />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <ExclusionEditor open={editing.open} current={editing.current} onClose={() => setEditing({ open: false, current: null })} />
+    </section>
+  );
+}
+
 export function AnomaliesScreen() {
   return (
     <div className="page anomalies">
       <AnomaliesSection />
       <GraphFindingsSection />
       <RulesSection />
+      <ExclusionsSection />
     </div>
   );
 }

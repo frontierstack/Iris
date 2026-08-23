@@ -33,6 +33,7 @@ import numpy as np
 
 from . import config, enrich, metrics, pool_store
 from .detect import RULES, run_rules
+from .exclusions import EXCLUSIONS
 from .rules import RULES_STORE
 from .models import (Case, CaseEnrichment, CaseNote, CaseSetEntry, CaseSnapshot, EnrichCounts, Event, PoolFileProgress,
                      PoolProgress, PoolSkip, Posture, QueueItem, Source, max_sev)
@@ -2197,10 +2198,17 @@ class Store:
     def _run_detections(self) -> None:
         """Built-in Sigma-like rules (minus disabled ones) + enabled custom regex rules."""
         RULES_STORE.load()
+        # ONE compiled exclusion set for the whole pass, built here rather than per rule: it is the same
+        # set for every rule and compiling a regex condition sixty times over would be the same mistake
+        # the _prx hoisting fixed. `record` publishes what it actually suppressed, which is what keeps a
+        # suppression list from being invisible on the screen that manages it.
+        excl = EXCLUSIONS.matcher()
         info = run_rules(self.events, self.ts, disabled=RULES_STORE.detection_disabled(),
                          overrides=RULES_STORE.detection_overrides(),
-                         params=RULES_STORE.detection_params())
-        custom = RULES_STORE.apply_all(self.events)
+                         params=RULES_STORE.detection_params(),
+                         exclude=excl)
+        custom = RULES_STORE.apply_all(self.events, excl)
+        EXCLUSIONS.record(excl.counts())
         self.rules_fired = int(info["fired"]) + custom  # type: ignore[arg-type]
 
     def reapply_all_rules(self) -> int:

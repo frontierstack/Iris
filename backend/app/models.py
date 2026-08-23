@@ -968,6 +968,64 @@ class RuleTestResult(BaseModel):
     error: Optional[str] = None
 
 
+class ExclusionInput(BaseModel):
+    """Body for POST/PUT /api/exclusions (id and timestamps are server-owned)."""
+    name: str
+    conditions: list[RuleCondition] = Field(default_factory=list)
+    combinator: Literal["and", "or"] = "and"
+    # Empty = EVERY rule. A non-empty list scopes the exclusion to those rule ids, which is the
+    # difference between "this address is never interesting" and "this address is not interesting FOR
+    # THIS ONE RULE" - and an analyst who means the second must never be given the first.
+    ruleIds: list[str] = Field(default_factory=list)
+    note: str = ""
+    enabled: bool = True
+
+
+class Exclusion(ExclusionInput):
+    """A suppression: evidence that matches it does not get tagged by the rules it is scoped to.
+
+    Exclusions are the one feature here that can HIDE evidence, so every part of the design points at
+    making that visible: `suppressed` counts what it actually removed on the last detection pass,
+    `appliesToGraph` says whether it can be evaluated against a graph node at all, and nothing is ever
+    enabled by default. An exclusion never deletes an event - it only stops a rule claiming it.
+    """
+    id: str
+    createdBy: Literal["user", "ai", "system"] = "user"
+    createdAt: str = ""
+    updatedAt: str = ""
+    # Detections this exclusion suppressed on the last full pass. None = no pass has run since it
+    # changed, which is NOT the same as zero and must not be rendered as it.
+    suppressed: Optional[int] = None
+    # Whether its conditions can be evaluated against an entity-graph node (which has a type and a
+    # value, and no fields). False means graph findings are NOT filtered by it - stated, never guessed.
+    appliesToGraph: bool = False
+    error: Optional[str] = None
+    # The read-only sentence describing what it suppresses, generated like a rule's trigger.
+    logic: Optional[str] = None
+
+
+class ExclusionSuggestion(BaseModel):
+    """A ready-made exclusion Iris offers but never applies by itself.
+
+    Shipping these ENABLED would silently hide evidence in a forensics tool, which is not a trade to
+    make on the analyst's behalf - so they are offered, with the reason stated, and adding one is a
+    deliberate click.
+    """
+    name: str
+    why: str
+    conditions: list[RuleCondition]
+    combinator: Literal["and", "or"] = "or"
+    ruleIds: list[str] = Field(default_factory=list)
+
+
+class ExclusionsResponse(BaseModel):
+    exclusions: list[Exclusion] = Field(default_factory=list)
+    suggestions: list[ExclusionSuggestion] = Field(default_factory=list)
+    # Total detections suppressed across every exclusion on the last pass - the headline number that
+    # keeps a suppression list from becoming invisible.
+    suppressed: int = 0
+
+
 class RulePreviewResult(RuleTestResult):
     """A dry run of a whole rule definition (POST /api/rules/preview).
 
