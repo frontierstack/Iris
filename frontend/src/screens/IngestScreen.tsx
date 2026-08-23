@@ -40,6 +40,12 @@ const JOB_DONE_MS = 20_000;
 const JOB_FAILED_MS = 30 * 60_000;
 const JOB_ROWS = 8;
 const PROGRESS_PUSH_MS = 900;       // throttle for the bytes-received PATCH
+/* How often this tab tells the server which transfers it still owns. Only three files are sent at a
+   time, so everything behind them is registered and silent — and the server's watchdog buries a silent
+   upload after 10 minutes. That is how a drop of packet captures came back as eight rows reading "the
+   upload stopped before the server received the whole file" without one of them having had a turn.
+   Well under the watchdog's window, so a single dropped tick is not a bury. */
+const HEARTBEAT_MS = 20_000;
 
 /* ───────────── Parser groups ───────────── */
 type GroupId = 'logs' | 'documents' | 'images' | 'network' | 'binary' | 'archives';
@@ -406,7 +412,11 @@ function MappingDrawer({ source, onClose, onViewRaw }: { source: Source | null; 
       {source && (
         <>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <span className={cx('pill', STATE_PILL[source.state])}>{source.state === 'PARSING' && <span className="spinner" />}{source.state}</span>
+            {/* The drawer is opened to ask "what is this file doing?" — so the parse gets the same
+                percentage, rate and ETA here as it does in the table it was opened from. */}
+            {source.state === 'PARSING'
+              ? <ParsingCell source={source} />
+              : <span className={cx('pill', STATE_PILL[source.state])}>{source.state}</span>}
             {/* The other half of the file's status: has it been interpreted at all (phase 2)? */}
             <EnrichChip source={source} />
             <EnrichActions source={source} />
@@ -473,11 +483,53 @@ function MappingDrawer({ source, onClose, onViewRaw }: { source: Source | null; 
   );
 }
 
-/* ───────────── Upload / parse progress row ───────────── */
+/* Which half of the two-phase ingest a tracker row is reporting on. Phase 2 is 'interpreting', never
+   'parsing': telling the analyst the file is still being read when it is already being interpreted
+   understates how far along it is and overstates what is left. */
 const PHASE_LABEL: Record<string, string> = {
   reading: 'reading', parsing: 'parsing', enriching: 'interpreting', merging: 'merging',
 };
 
+/* ───────────── The state cell of the Sources table ─────────────
+   A spinner says "something is happening" and nothing else. On a 639 MB capture that is twenty minutes
+   of a screen the analyst cannot tell apart from a hang — reported as "when a log is parsing, all that
+   happens is a spinner but there is no % indicator". Every number that answers it already existed
+   server-side, keyed by this source's id (jobs.PARSE_PROGRESS); `Source.progress` is that row.
+
+   What it says, in order of what is being asked: WHICH HALF is running (reading the lines vs
+   interpreting them — two different amounts of remaining work), how far through, how fast, and how long
+   is left. The bar is under the pill rather than beside it because the pill column is narrow and the
+   percentage has to stay legible at a glance down a table of hundreds of rows.
+
+   `progress` absent while PARSING is a real state and must not read as 0 %: a source waiting for the
+   enrichment worker, or one whose tracker row has not been created yet, is not a stalled parse. It
+   falls back to the bare pill, which is exactly what it used to be. */
+function ParsingCell({ source }: { source: Source }) {
+  const p = source.progress;
+  const phase = p ? (PHASE_LABEL[p.phase] ?? 'parsing') : '';
+  // Only claim a percentage when the file's size is known — `pct` is computed from bytes, and a
+  // container with no byte total would otherwise sit at a confident, meaningless 0 %.
+  const shown = p && p.bytesTotal ? Math.round(p.pct) : null;
+  const detail = p
+    ? [p.events ? `${fmtInt(p.events)} events` : '', fmtRate(p.bytesPerSec), fmtEta(p.etaSec),
+       p.workers > 1 ? `${p.workers} workers` : ''].filter(Boolean).join(' · ')
+    : '';
+  const title = p
+    ? `${phase}${shown !== null ? ` — ${shown}%` : ''}${p.bytesTotal ? `, ${fmtBytes(p.bytesDone)} of ${fmtBytes(p.bytesTotal)}` : ''}${detail ? ` · ${detail}` : ''}`
+    : 'parsing — no progress reported yet';
+  return (
+    <div className="parsing-cell" title={title}>
+      <span className="pill pill--accent">
+        <span className="spinner" />
+        {phase || 'PARSING'}{shown !== null ? ` ${shown}%` : ''}
+      </span>
+      {p && p.bytesTotal > 0 && <Bar pct={p.pct} color="var(--accent)" />}
+      {detail && <span className="parsing-cell__detail ellipsis">{detail}</span>}
+    </div>
+  );
+}
+
+/* ───────────── Upload / parse progress row ───────────── */
 function JobRow({ job, pct }: { job: UploadJob; pct?: number }) {
   // uploading = bytes still in flight (client knowledge); parsing = the server working on the file.
   // Conflating the two is what made a 6-minute parse look like a stuck upload.
@@ -493,7 +545,10 @@ function JobRow({ job, pct }: { job: UploadJob; pct?: number }) {
     // tracker row before it knows its source ids), and calling phase 2 'parsing' told the analyst the
     // file was still being read when it was already being interpreted.
     : job.state === 'parsing' ? (prog ? `${PHASE_LABEL[prog.phase] ?? 'parsing'} ${Math.round(prog.pct)}%` : 'parsing')
-    : job.state === 'queued' ? 'queued'
+    // 'queued' is a real, healthy state and it can last a while: this tab sends three files at a time, so
+    // everything behind them waits. It used to read as an unexplained stall, and the server used to
+    // agree with that reading and fail it at ten minutes.
+    : job.state === 'queued' ? 'waiting its turn'
     : `uploading ${shown}%`;
   const pill = job.state === 'error' ? 'pill--bad' : job.state === 'ready' ? 'pill--ok' : job.state === 'queued' ? 'pill--muted' : 'pill--accent';
   const detail = prog
@@ -642,6 +697,14 @@ export function IngestScreen() {
       let bg = 0;
       let failed = 0;
       const queue = files.map((f, i) => ({ f, id: ids[i] }));
+      // Every job in this batch is this tab's responsibility until it resolves — the ones waiting their
+      // turn most of all, since nothing else will say a word about them. Ids leave the set as each
+      // upload settles, so the last file is still heartbeaten while it is the only one left.
+      const mine = new Set(ids.filter(Boolean));
+      const beat = window.setInterval(() => {
+        if (!mine.size) return;
+        void api.jobHeartbeat([...mine]).catch(() => undefined);
+      }, HEARTBEAT_MS);
       const worker = async () => {
         for (;;) {
           const job = queue.shift();
@@ -670,11 +733,17 @@ export function IngestScreen() {
             }
           } catch {
             failed++;
+          } finally {
+            if (id) mine.delete(id);
           }
           refreshJobs();
         }
       };
-      await Promise.all(Array.from({ length: Math.min(3, queue.length) }, worker));
+      try {
+        await Promise.all(Array.from({ length: Math.min(3, queue.length) }, worker));
+      } finally {
+        window.clearInterval(beat);
+      }
       refreshJobs();
       setDropped((cur) => cur.filter((d) => d.at !== stamp));
       if (added) {
@@ -1045,7 +1114,14 @@ export function IngestScreen() {
                 </button>
               </div>
               <div style={{ fontSize: 'var(--fs-md)' }} className="ellipsis">{s.parser}</div>
-              <div className="cell-mono">{s.state === 'PARSING' ? <span className="muted">…</span> : fmtInt(s.events)}</div>
+              {/* A parsing source has a real, rising event count in the tracker — an ellipsis threw it away
+                  and left the one column that proves the parse is producing something blank. */}
+              <div className="cell-mono">
+                {s.state === 'PARSING'
+                  ? (s.progress?.events ? <span title="events parsed so far">{fmtInt(s.progress.events)}</span>
+                                        : <span className="muted">…</span>)
+                  : fmtInt(s.events)}
+              </div>
               <div className="cell-mono cell-dim num" title={s.size > 0 ? `${s.size.toLocaleString('en-US')} bytes` : 'size unknown'}>{fmtSize(s.size)}</div>
               <div className="cell-mono cell-dim" style={{ fontSize: 'var(--fs-sm)' }}>{fmtRange(s.range)}</div>
               <div className="conf">
@@ -1053,11 +1129,12 @@ export function IngestScreen() {
                 <span className="conf__pct" style={{ color: confColor(s.confidence) }}>{pct(s.confidence)}</span>
               </div>
               <div>
-                <span className={cx('pill', STATE_PILL[s.state], s.error && 'tip')} data-tip={s.error || undefined}>
-                  {s.state === 'PARSING' && <span className="spinner" />}
-                  {s.state === 'ERROR' && <Icon.Warn width={10} height={10} />}
-                  {s.state}
-                </span>
+                {s.state === 'PARSING' ? <ParsingCell source={s} /> : (
+                  <span className={cx('pill', STATE_PILL[s.state], s.error && 'tip')} data-tip={s.error || undefined}>
+                    {s.state === 'ERROR' && <Icon.Warn width={10} height={10} />}
+                    {s.state}
+                  </span>
+                )}
               </div>
               {/* Phase 2: has this file been interpreted, and the two ways to change that. */}
               <div className="enrich-cell">

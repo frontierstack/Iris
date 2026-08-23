@@ -815,7 +815,8 @@ function DataSection() {
           <span className="case-del__l">AI assistant conversation{nAiRuns === 1 ? '' : 's'} — prompts, answers and the tool calls behind them</span>
         </div>
         <div className="field__hint">
-          Kept: your detection rules (custom rules and edited built-ins — clear those under Anomalies → Rules)
+          Kept: your detection rules (custom rules and edited built-ins) and your exclusions — both are
+          configuration rather than evidence; clear them under Anomalies → Rules and Anomalies → Exclusions
           {resetSettings ? '.' : ', and your settings: theme, compute preference, analyst name and the stored AI key.'}
         </div>
         <label>

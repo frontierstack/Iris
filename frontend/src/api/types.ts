@@ -36,6 +36,12 @@ export interface Source {
   enrichError?: string | null;
   /** when the full parse finished, ISO-8601 UTC */
   enrichedAt?: string | null;
+  /** LIVE parse detail — the same shape a job row carries, read straight off the server's tracker.
+   *  Non-null ONLY while this source is actually being read (state 'PARSING', or enrich 'enriching').
+   *  The Sources table could otherwise only show a spinner, which on a 639 MB capture is twenty minutes
+   *  of a screen that cannot be told apart from a hang. In memory server-side: absent after a restart
+   *  until the work resumes. */
+  progress?: ParseProgress | null;
 }
 
 export interface Detection { name: string; id: string; level: Severity }
@@ -532,6 +538,9 @@ export interface UploadJob {
   error: string;
   /** the server restarted while this job was in flight */
   interrupted: boolean;
+  /** failed by the WATCHDOG, not by the parser — a heartbeat, a byte or the ingest request revives it.
+   *  A job the parser actually failed is never stale, and never comes back. */
+  stale?: boolean;
   sourceIds: string[];
   /** live PARSE progress — non-null only while state === 'parsing'. Server-side, so every tab sees it. */
   progress: ParseProgress | null;

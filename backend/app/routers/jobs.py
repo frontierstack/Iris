@@ -32,6 +32,10 @@ class JobProgress(BaseModel):
     received: int
 
 
+class JobHeartbeat(BaseModel):
+    ids: list[str] = []
+
+
 @router.get("")
 def list_jobs(limit: int = Query(100, ge=1, le=500)) -> dict:
     """Active + recent jobs, newest first. Reading also reconciles threaded parses (jobs.sync)."""
@@ -58,6 +62,23 @@ def patch_job(job_id: str, body: JobProgress) -> dict:
     if job is None:
         raise HTTPException(404, "job not found")
     return job.live()
+
+
+@router.post("/heartbeat")
+def heartbeat(body: JobHeartbeat) -> dict:
+    """"These transfers are still mine" — from the tab that holds the files.
+
+    A drop of twelve files registers twelve jobs and then sends three at a time, so the rest sit in
+    `queued` with nothing arriving for them. The server cannot tell that apart from a closed tab, and the
+    watchdog used to call it dead at exactly ten minutes: a whole drop of packet captures came back as
+    "the upload stopped before the server received the whole file" without one of them having been given
+    a turn. The sending tab is the only party that knows, so it reports in every 20 s until its queue
+    drains, and a job the watchdog already buried is revived here.
+    """
+    if not body.ids:
+        return {"alive": [], "revived": []}
+    alive, revived = REGISTRY.heartbeat(body.ids[:500])
+    return {"alive": alive, "revived": revived}
 
 
 @router.post("/clear")

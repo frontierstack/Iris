@@ -35,8 +35,9 @@ from . import config, enrich, metrics, pool_store
 from .detect import RULES, run_rules
 from .exclusions import EXCLUSIONS
 from .rules import RULES_STORE
-from .models import (Case, CaseEnrichment, CaseNote, CaseSetEntry, CaseSnapshot, EnrichCounts, Event, PoolFileProgress,
-                     PoolProgress, PoolSkip, Posture, QueueItem, Source, max_sev)
+from .models import (Case, CaseEnrichment, CaseNote, CaseSetEntry, CaseSnapshot, EnrichCounts, Event,
+                     ParseProgressInfo, PoolFileProgress, PoolProgress, PoolSkip, Posture, QueueItem,
+                     Source, max_sev)
 from .normalize import to_iso   # the per-record normalization itself lives in parsers/parallel.py
 from .parsers import archives
 from .parsers.base import BaseParser, ParsedEvent
@@ -2825,10 +2826,29 @@ class Store:
         documentation.
         """
         enrichment = self.enrichment()   # takes the store lock itself, so before the `with` below
+        # Live parse detail, attached per response. One lock acquisition for the whole tracker (it holds
+        # a handful of rows at most) and then a dict lookup per source — never a call per source, on the
+        # most-polled endpoint in the app. It is attached to a COPY: `self.sources` holds the real
+        # objects, and stamping a percentage onto them would leave a finished file claiming 84 % forever.
+        from .jobs import PARSE_PROGRESS
+
+        live = PARSE_PROGRESS.all_rows()
+
+        def _with_progress(src: Source) -> Source:
+            row = live.get(src.id) if live else None
+            if row is None:
+                return src
+            # Only while the source is genuinely being read. A tracker row can outlive the work by a
+            # moment (finish() is the last statement of the parse), and a READY source showing a live
+            # percentage is a claim about work that is over.
+            if src.state != "PARSING" and src.enrich != "enriching":
+                return src
+            return src.model_copy(update={"progress": ParseProgressInfo(**row)})
+
         with self.lock:
             case_ids_ = self.case_source_ids()
-            sources = [self.sources[s] for s in case_ids_]
-            lib_sources = [self.sources[s] for s in self.library_source_ids()]
+            sources = [_with_progress(self.sources[s]) for s in case_ids_]
+            lib_sources = [_with_progress(self.sources[s]) for s in self.library_source_ids()]
             case_events = sum(self.sources[s].events for s in case_ids_)
             pool_sources = [self.sources[s] for s in self.source_order if s in self.sources]
             n = len(self.events)

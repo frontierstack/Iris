@@ -30,7 +30,14 @@ interface Source { id:string; file:string; parser:string; events:number; range:[
      NO case — parsed and searchable all the same. Attaching it to a case flips this to 'case'. */
   origin?:'case'|'library';
   /* Always sent by this server. `range` is null and every event carries ts:'' until enrich === 'enriched'. */
-  enrich:EnrichState; enrichError?:string|null; enrichedAt?:string|null /*ISO-8601 UTC*/ }
+  enrich:EnrichState; enrichError?:string|null; enrichedAt?:string|null /*ISO-8601 UTC*/;
+  /* LIVE parse detail for this source — the same ParseProgress a job row carries (see "Upload & parse
+     jobs"), read straight off jobs.PARSE_PROGRESS. Non-null ONLY while this source is actually being
+     read: state 'PARSING' or enrich 'enriching'. A spinner says "something is happening"; on a 639 MB
+     capture that is indistinguishable from a hang for twenty minutes, and the percentage, the event
+     count and the ETA all already existed server-side. In-memory only, so it is absent after a restart
+     until the work resumes. */
+  progress?:ParseProgress|null }
 
 interface Event { id:string; ts:string; source:string /*parser family e.g. nginx.access*/; sourceId:string; file:string;
   host:string; user:string; msg:string; sev:Severity; raw:string;
@@ -951,7 +958,9 @@ registry lock; parse threads and concurrent uploads write through the same lock)
 type JobState = 'queued'|'uploading'|'parsing'|'ready'|'error';
 interface UploadJob { id:string; file:string; size:number; received:number; state:JobState;
   target:'case'|'library'; caseId:string /*'' for a library job*/; parser:string; confidence:number; events:number;
-  error:string; interrupted:boolean /*killed by a server restart*/; sourceIds:string[];
+  error:string; interrupted:boolean /*killed by a server restart*/;
+  stale:boolean /*failed by the watchdog, not by the parser — a heartbeat or a byte revives it*/;
+  sourceIds:string[];
   progress:ParseProgress|null /*live parse detail; non-null only while state === 'parsing'*/;
   createdAt:string; updatedAt:string }
 /* `received` is the UPLOAD (bytes the browser has sent). This is the PARSE, which is the long half:
@@ -974,13 +983,25 @@ interface JobsResponse { jobs:UploadJob[] /*newest first*/; active:number; total
    (`jobs.JobRegistry._adopt_locked`). Display only — it never writes `sourceIds`, so it cannot resolve a job. Before
    this, a 1 GB file showed 0 % for its whole raw split.
 - `GET   /api/jobs?limit=100` → `JobsResponse`. Reading also RECONCILES: threaded parses are resolved by reading the
-   source states back out of the store, stalled uploads (nothing received for 10 min) become `error`, and finished jobs
-   older than 30 min are pruned (hard cap 200, oldest finished first).
+   source states back out of the store, uploads nothing has advanced or heartbeaten for 10 min become `error` with
+   `stale:true`, and finished jobs older than 30 min are pruned (hard cap 200, oldest finished first).
+- **A job WAITING ITS TURN is not a dead upload.** The Ingest screen declares every dropped file up front and then
+   sends three at a time, so file #4 onwards sits in `queued` with `received:0` for as long as the queue ahead of it
+   takes. The watchdog measured that wait from job CREATION and buried all of them at exactly 600 s with "the upload
+   stopped before the server received the whole file" — uploads that had never been given a chance to start. Liveness
+   is therefore something only the sending tab knows, and it says so: `POST /api/jobs/heartbeat`. A job the watchdog
+   buried carries `stale:true` and is REVIVED by the next heartbeat, `PATCH` or ingest — a job `finish()` failed is
+   not, because that failure is real. The message also names the actual state now: a job that never received a byte
+   says the transfer never started.
 - `POST  /api/jobs` body `{files:[{file,size}], target:'case'|'library'}` → `{jobs:UploadJob[]}` — declare uploads BEFORE
    the bytes move, so another tab sees them from the first byte. Bookkeeping only: never touches the store, never
    materialises a case.
 - `PATCH /api/jobs/{id}` body `{received}` → `UploadJob` — bytes in flight. That number only exists in the uploading
    tab (XHR `upload.onprogress`), so the client pushes it; the frontend throttles to ~1/s.
+- `POST  /api/jobs/heartbeat` body `{ids:string[]}` → `{alive:string[], revived:string[]}` — "these transfers are
+   still mine". The sending tab posts the ids it has not finished (queued AND in flight) every 20 s until its batch
+   drains; the server touches each one and un-buries any it had marked `stale`. Unknown or already-finished ids are
+   ignored, so a tab that is a version behind, or one whose batch resolved between ticks, is never an error.
 - `POST  /api/jobs/clear` → `{ok:true, cleared:n}` — drop finished jobs; running ones are left alone.
 - `POST /api/sources?jobIds=a,b` and `POST /api/library/upload?jobIds=a,b` bind a request to already-declared jobs
    (positional against `files`). Callers that omit them still get jobs created server-side, so ingest is never invisible.

@@ -47,7 +47,15 @@ RETAIN_SEC = 30 * 60      # a FAILED job stays visible this long, so a refresh r
 # the report of evidence that never made it into the pool.
 READY_RETAIN_SEC = 20
 MAX_JOBS = 200            # hard cap, oldest first — jobs.json must not grow without bound
-STALE_UPLOAD_SEC = 600    # an upload nobody has advanced for this long is dead (tab closed mid-transfer)
+# An upload nobody has advanced for this long is dead (tab closed mid-transfer). "Advanced" includes the
+# HEARTBEAT: the Ingest screen declares every dropped file up front and then sends three at a time, so a
+# file behind eight others is legitimately untouched for as long as the queue ahead of it takes. Measured
+# from job CREATION this buried a whole drop of packet captures at exactly 600 s — eight rows reading "the
+# upload stopped before the server received the whole file", every one of them with received:0, i.e. an
+# upload that had never been given a chance to start. Only the sending tab knows whether a queued transfer
+# is still intended, so it says so (POST /api/jobs/heartbeat) and this stays the watchdog for the case it
+# was written for: nobody is coming back for this one.
+STALE_UPLOAD_SEC = 600
 
 # Detection at library-stage time reads a BOUNDED prefix: fingerprinting a 263 MB file must not cost a
 # full pass. registry.fingerprint() only ever looks at the first 256 KB of text anyway.
@@ -177,6 +185,16 @@ class ProgressTracker:
         with self._lock:
             return [{"sourceId": r.key, "file": r.file, **r.public()} for r in self._rows.values()]
 
+    def all_rows(self) -> dict[str, dict[str, Any]]:
+        """Every in-flight row, keyed by source id, taking the lock ONCE.
+
+        `GET /api/case` attaches this to its sources, and the analyst's library is ~680 of them: calling
+        `get()` per source would be 680 lock acquisitions on the most-polled endpoint in the app to read
+        a table that never holds more than a handful of rows.
+        """
+        with self._lock:
+            return {k: r.public() for k, r in self._rows.items()}
+
 
 PARSE_PROGRESS = ProgressTracker()
 
@@ -195,6 +213,10 @@ class Job:
     events: int = 0
     error: str = ""
     interrupted: bool = False      # the server died while this job was in flight
+    # Failed by the WATCHDOG, not by the parser. The distinction is what makes reviving safe: a byte, a
+    # heartbeat or the ingest request itself brings a stale job back, while a job `finish()` failed stays
+    # failed — that failure is a real report about evidence that did not reach the pool.
+    stale: bool = False
     sourceIds: list[str] = field(default_factory=list)
     created_ts: float = field(default_factory=time.time)
     updated_ts: float = field(default_factory=time.time)
@@ -204,7 +226,7 @@ class Job:
             "id": self.id, "file": self.file, "size": self.size, "received": self.received,
             "state": self.state, "target": self.target, "caseId": self.caseId, "parser": self.parser,
             "confidence": round(self.confidence, 3), "events": self.events, "error": self.error,
-            "interrupted": self.interrupted, "sourceIds": list(self.sourceIds),
+            "interrupted": self.interrupted, "stale": self.stale, "sourceIds": list(self.sourceIds),
             # live parse progress, present only while state == 'parsing' (see ProgressTracker)
             "progress": progress,
             "createdAt": _iso(self.created_ts), "updatedAt": _iso(self.updated_ts),
@@ -274,7 +296,7 @@ class JobRegistry:
                         received=int(r.get("received") or 0), state=str(r.get("state") or "queued"),
                         parser=str(r.get("parser") or ""), confidence=float(r.get("confidence") or 0.0),
                         events=int(r.get("events") or 0), error=str(r.get("error") or ""),
-                        interrupted=bool(r.get("interrupted")),
+                        interrupted=bool(r.get("interrupted")), stale=bool(r.get("stale")),
                         sourceIds=[str(s) for s in (r.get("sourceIds") or [])],
                         created_ts=float(r.get("created_ts") or time.time()),
                         updated_ts=float(r.get("updated_ts") or time.time()),
@@ -324,13 +346,56 @@ class JobRegistry:
         with self.lock:
             self._ensure_loaded()
             job = self._jobs.get(job_id)
-            if job is None or job.state in TERMINAL_STATES:
+            if job is None:
+                return None
+            if job.state in TERMINAL_STATES and not job.stale:
                 return job
+            # A stale job is one the watchdog buried; a byte arriving says it was wrong. Reviving here
+            # matters because the bury and the transfer race: the tab reaches file #9 seconds after the
+            # watchdog gave up on it, and without this the row reads "failed" for the whole upload and
+            # only corrects itself when the ingest request finally lands.
+            self._revive_locked(job)
             job.received = max(job.received, min(int(received or 0), job.size or int(received or 0)))
             job.state = "uploading"
             self._touch(job)
             self._save_locked()
             return job
+
+    def _revive_locked(self, job: Job) -> None:
+        """Undo a watchdog bury. Caller holds the lock; a job that is not stale is left exactly as it is."""
+        if not job.stale:
+            return
+        job.stale = False
+        job.error = ""
+        job.interrupted = False
+        job.state = "uploading" if job.received else "queued"
+
+    def heartbeat(self, job_ids: Iterable[str]) -> tuple[list[str], list[str]]:
+        """"These transfers are still mine." Returns (alive, revived) ids.
+
+        The only party that knows whether a QUEUED upload is still coming is the tab holding the file
+        handle: the server has seen nothing from it by definition. Unknown ids and jobs that finished
+        between two ticks are ignored rather than refused — a tab one version behind, or one whose batch
+        resolved while the request was in flight, is not an error.
+        """
+        alive: list[str] = []
+        revived: list[str] = []
+        with self.lock:
+            self._ensure_loaded()
+            for jid in job_ids:
+                job = self._jobs.get(str(jid))
+                if job is None:
+                    continue
+                if job.state in TERMINAL_STATES:
+                    if not job.stale:
+                        continue          # really finished — a heartbeat may not resurrect it
+                    self._revive_locked(job)
+                    revived.append(job.id)
+                self._touch(job)
+                alive.append(job.id)
+            if alive:
+                self._save_locked()
+        return alive, revived
 
     def begin_parse(self, job_id: str, size: Optional[int] = None) -> Optional[Job]:
         with self.lock:
@@ -338,6 +403,7 @@ class JobRegistry:
             job = self._jobs.get(job_id)
             if job is None:
                 return None
+            self._revive_locked(job)   # the body arrived, so any watchdog verdict on it was wrong
             if size is not None:
                 job.size = job.size or int(size)
                 job.received = int(size)
@@ -385,6 +451,9 @@ class JobRegistry:
                 return None
             if sids is not None:
                 job.sourceIds = list(sids)
+            # Whatever this resolves to is a REAL verdict about the file, so it outranks any watchdog
+            # bury and is never revived by a later heartbeat from a tab that has not caught up yet.
+            job.stale = False
             job.parser = parser or job.parser
             job.events = int(events)
             job.confidence = float(confidence or job.confidence)
@@ -491,8 +560,17 @@ class JobRegistry:
                     self._touch(job)
                     changed = True
                 elif job.state in ("queued", "uploading") and now - job.updated_ts > STALE_UPLOAD_SEC:
+                    # `updated_ts` is advanced by a byte (PATCH) AND by a heartbeat, so reaching here
+                    # means the sending tab has said nothing for ten minutes — it is gone. Name the state
+                    # honestly: a job with received:0 never started, and telling the analyst an upload
+                    # "stopped before the server received the whole file" about a transfer that never
+                    # sent a byte sends them looking for a network fault that does not exist.
                     job.state = "error"
-                    job.error = "the upload stopped before the server received the whole file"
+                    job.stale = True
+                    job.error = ("the upload stopped before the server received the whole file"
+                                 if job.received else
+                                 "this transfer never started — the tab that queued it is gone"
+                                 " (drop the file again to retry)")
                     self._touch(job)
                     changed = True
             before = len(self._jobs)

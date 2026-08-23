@@ -626,5 +626,11 @@ Full contract: `docs/API_CONTRACT.md`.
   `docker compose down -v` does **not** wipe it either: the evidence is a bind mount at `./backend/data`, not a
   volume. To remove the install as well, see [`uninstall.*`](#uninstall--removing-iris) — and note that it too
   keeps your data unless you pass `--purge-data` / `-PurgeData`.
-- **Sources table looks empty after upload** — files parse in the background; the state pill shows PARSING then
-  READY / REVIEW / MAP / ERROR (hover ERROR for the reason).
+- **Sources table looks empty after upload** — files parse in the background; the state pill shows PARSING with
+  the phase, percentage, event count and ETA (hover it for bytes and rate), then READY / REVIEW / MAP / ERROR
+  (hover ERROR for the reason). Once the file is READY, the *Interpreted* chip carries the same percentage for
+  phase 2, which on a large capture is the longer half.
+- **A drop of many files shows some as *waiting its turn*** — that is normal and healthy: Iris sends three files
+  at a time and the rest queue. They are not stalled, and the tab tells the server they are still coming, so they
+  are not failed either. Leave the tab open: **closing it abandons everything that has not been sent yet**, and
+  those rows turn into *this transfer never started* about ten minutes later.

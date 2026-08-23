@@ -348,6 +348,12 @@ export const api = {
   /** Bytes in flight — only the sending tab knows this, so it pushes it (throttled). */
   jobProgress: (id: string, received: number) =>
     request<UploadJob>(`/api/jobs/${encodeURIComponent(id)}`, json('PATCH', { received })),
+  /** "these transfers are still mine". A drop of twelve files registers twelve jobs and sends three at a
+   *  time, so the rest sit queued with nothing arriving for them — indistinguishable server-side from a
+   *  closed tab, and the watchdog used to call them dead at ten minutes. The sending tab reports in until
+   *  its queue drains; anything the watchdog already buried is revived. */
+  jobHeartbeat: (ids: string[]) =>
+    request<{ alive: string[]; revived: string[] }>('/api/jobs/heartbeat', json('POST', { ids })),
   clearJobs: () => request<{ ok: true; cleared: number }>('/api/jobs/clear', json('POST')),
 
   // Sources

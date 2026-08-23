@@ -236,6 +236,80 @@ def test_a_stalled_upload_is_not_reported_as_running_forever(c, monkeypatch) -> 
     monkeypatch.setattr(jobs_mod, "STALE_UPLOAD_SEC", -1)
     stalled = _job(c, job.id)
     assert stalled["state"] == "error" and "stopped" in stalled["error"]
+    # the watchdog's verdict, not the parser's — that is what makes reviving it legal
+    assert stalled["stale"] is True
+
+
+# ------------------------------------------------- a queued transfer is not an abandoned one
+# The analyst dropped twelve packet captures at once. The Ingest screen declares every one of them and
+# then sends THREE at a time, so files four onwards sat in `queued` with received:0 while ~10 GB went up
+# ahead of them — and the watchdog, which measured the wait from job CREATION, failed all of them at
+# exactly 600 s with "the upload stopped before the server received the whole file". Every one of those
+# uploads was fine; none had been given a turn. These pin the fix from both ends: a heartbeat keeps a
+# waiting transfer alive, and a wrong verdict is taken back rather than left on the screen.
+def test_a_heartbeat_keeps_a_queued_transfer_alive(c, monkeypatch) -> None:
+    """A file waiting its turn behind ten others is not a dead upload."""
+    job = REGISTRY.create("waiting-its-turn.pcap", 209_236_002, "library", "")
+    with REGISTRY.lock:
+        REGISTRY.get(job.id).updated_ts = time.time() - 10_000     # type: ignore[union-attr]
+
+    beat = c.post("/api/jobs/heartbeat", json={"ids": [job.id]})
+    assert beat.status_code == 200, beat.text
+    assert beat.json()["alive"] == [job.id]
+
+    row = _job(c, job.id)
+    assert row["state"] == "queued" and row["received"] == 0 and not row["error"]
+
+
+def test_the_watchdog_names_a_transfer_that_never_started(c, monkeypatch) -> None:
+    """received:0 is a different fact from a transfer cut off mid-body, and needs a different sentence."""
+    job = REGISTRY.create("never-had-a-turn.pcap", 139_998_821, "library", "")
+    monkeypatch.setattr(jobs_mod, "STALE_UPLOAD_SEC", -1)
+    row = _job(c, job.id)
+    assert row["state"] == "error" and row["stale"] is True
+    assert "never started" in row["error"]
+    assert "stopped before the server received" not in row["error"]
+
+
+def test_a_buried_transfer_comes_back_when_it_finally_moves(c, monkeypatch) -> None:
+    """The bury and the transfer race — the tab reaches file #9 seconds after the watchdog gave up."""
+    job = REGISTRY.create("late.pcap", 128_575_191, "library", "")
+    monkeypatch.setattr(jobs_mod, "STALE_UPLOAD_SEC", -1)
+    assert _job(c, job.id)["state"] == "error"
+    monkeypatch.setattr(jobs_mod, "STALE_UPLOAD_SEC", 600)
+
+    # the heartbeat catches it first...
+    revived = c.post("/api/jobs/heartbeat", json={"ids": [job.id]}).json()
+    assert revived["revived"] == [job.id]
+    back = _job(c, job.id)
+    assert back["state"] == "queued" and back["stale"] is False and back["error"] == ""
+
+    # ...and so does the first byte, which is the other way a wrong verdict is corrected
+    monkeypatch.setattr(jobs_mod, "STALE_UPLOAD_SEC", -1)
+    assert _job(c, job.id)["state"] == "error"
+    monkeypatch.setattr(jobs_mod, "STALE_UPLOAD_SEC", 600)
+    c.patch(f"/api/jobs/{job.id}", json={"received": 4096})
+    moving = _job(c, job.id)
+    assert moving["state"] == "uploading" and moving["received"] == 4096 and not moving["error"]
+
+
+def test_a_real_failure_is_never_revived_by_a_heartbeat(c) -> None:
+    """The whole reason the watchdog verdict is flagged: a parse failure is a REPORT and must survive
+    a heartbeat from a tab that has not caught up yet."""
+    job = REGISTRY.create("broken.log", 100, "library", "")
+    REGISTRY.fail(job.id, "this file is not what it claimed to be")
+
+    beat = c.post("/api/jobs/heartbeat", json={"ids": [job.id]}).json()
+    assert beat["alive"] == [] and beat["revived"] == []
+    row = _job(c, job.id)
+    assert row["state"] == "error" and row["error"] == "this file is not what it claimed to be"
+
+
+def test_a_heartbeat_for_an_unknown_job_is_not_an_error(c) -> None:
+    """A tab one version behind, or one whose batch resolved between ticks, must not see a failure."""
+    r = c.post("/api/jobs/heartbeat", json={"ids": ["deadbeefcafe", ""]})
+    assert r.status_code == 200 and r.json() == {"alive": [], "revived": []}
+    assert c.post("/api/jobs/heartbeat", json={"ids": []}).status_code == 200
 
 
 # ------------------------------------------------------------------ library uploads (no case at all)

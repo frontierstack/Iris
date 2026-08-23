@@ -229,6 +229,29 @@ class EventDetail(EventOut):
     analysis: Optional[dict[str, Any]] = None
 
 
+class ParseProgressInfo(BaseModel):
+    """Live parse detail for ONE source, straight off `jobs.PARSE_PROGRESS`.
+
+    The same shape a job row carries, attached to the source as well, because the Sources table is where
+    a long parse is actually watched and all it could say was `PARSING` with a spinner. On a 639 MB
+    capture that is twenty minutes of a screen that cannot be told apart from a hang — and every number
+    that answers "is it moving?" already existed server-side, keyed by this source's id.
+
+    In memory only: absent after a restart until the work resumes, and never persisted anywhere.
+    """
+    bytesDone: int = 0
+    bytesTotal: int = 0
+    pct: float = 0.0
+    events: int = 0
+    workers: int = 1
+    # 'reading' = phase 1 (raw lines into the pool), 'enriching' = phase 2 (the real parser),
+    # 'parsing' = a container with no raw phase, 'merging' = folding the events into the pool.
+    phase: str = "parsing"
+    bytesPerSec: int = 0
+    etaSec: Optional[int] = None
+    elapsedSec: int = 0
+
+
 class Source(BaseModel):
     id: str
     file: str
@@ -254,6 +277,9 @@ class Source(BaseModel):
     enrich: Literal["raw", "queued", "enriching", "enriched", "skipped", "error"] = "enriched"
     enrichError: Optional[str] = None
     enrichedAt: Optional[str] = None
+    # Live parse detail, attached per RESPONSE (never stored on the source and never persisted) — see
+    # ParseProgressInfo. Non-null only while this source is genuinely being read.
+    progress: Optional[ParseProgressInfo] = None
 
 
 class Cluster(BaseModel):

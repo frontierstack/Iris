@@ -1936,6 +1936,18 @@
 .enrich-act:hover { color: var(--text-bright); border-color: var(--border-hover, var(--border)); }
 .enrich-act:disabled { opacity: 0.5; cursor: default; }
 .enrich-cell { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+/* The Sources table's PARSING cell: pill, then the bar under it, then the rate/ETA line. Stacked rather
+   than laid out across, because the state column is the narrowest in that table and a percentage that
+   ellipsises is a percentage nobody can read. Nothing in here is focusable or clickable, so the row
+   underneath keeps its own click — and it must stay hoverable, because the full detail (bytes done,
+   rate, ETA, workers) is the cell's `title`. */
+.parsing-cell { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.parsing-cell .pill { align-self: flex-start; }
+.parsing-cell__detail {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
 /* An enrichment failure the analyst cannot read is not a report: it gets its own full-width line under
    the row rather than living only in a tooltip. */
 .enrich-err {

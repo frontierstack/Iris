@@ -25,6 +25,7 @@ from app import search as search_mod
 from app.jobs import PARSE_PROGRESS, REGISTRY
 from app.main import app
 from app.parsers import parallel as par
+from app.models import Source
 from app.store import STORE, Store
 
 from tests.conftest import drain_enrichment
@@ -381,6 +382,95 @@ def test_pool_progress_reports_bytes_not_just_a_file_count() -> None:
 
 
 # ------------------------------------------------------------------ 2. /api/case stays responsive
+# ------------------------------------------------- the Sources table's own progress
+# "When a log is parsing, all that happens is a spinner but there is no % indicator." The numbers were
+# already there — jobs.PARSE_PROGRESS is keyed by SOURCE id and has been feeding the transfer panel all
+# along — but nothing carried them onto the source rows, which is where a parse is actually watched:
+# the transfer row ages out 20 s after the upload resolves, and phase 2 then runs for another twenty
+# minutes on a big capture with `Source.state` sitting at READY the whole time.
+def test_a_parsing_source_carries_its_own_progress(c) -> None:
+    src_id, other_id = "s-parsing-1", "s-done-1"
+    PARSE_PROGRESS.start(src_id, "huge.pcap", 209_236_002)
+    PARSE_PROGRESS.advance(src_id, done=52_309_000, events=180_000, phase="reading")
+    # a tracker row can outlive the work by a moment; a finished source must never show a live percentage
+    PARSE_PROGRESS.start(other_id, "settled.log", 1000)
+    PARSE_PROGRESS.advance(other_id, done=1000, events=10)
+    try:
+        with STORE.lock:
+            STORE.sources[src_id] = Source(id=src_id, file="huge.pcap", parser="pcap", state="PARSING",
+                                           size=209_236_002, origin="library", enrich="raw")
+            STORE.sources[other_id] = Source(id=other_id, file="settled.log", parser="syslog", state="READY",
+                                             size=1000, events=10, origin="library", enrich="enriched")
+            STORE.source_order.extend([src_id, other_id])
+            STORE.source_origin[src_id] = "library"
+            STORE.source_origin[other_id] = "library"
+
+        rows = {s["id"]: s for s in c.get("/api/case").json()["librarySources"]}
+        prog = rows[src_id]["progress"]
+        assert prog is not None, "a PARSING source must report how far along it is"
+        assert prog["pct"] == pytest.approx(25.0, abs=0.2)
+        assert prog["events"] == 180_000 and prog["phase"] == "reading"
+        assert prog["bytesTotal"] == 209_236_002
+        assert rows[other_id]["progress"] is None, "a settled source must not claim live progress"
+    finally:
+        PARSE_PROGRESS.finish(src_id)
+        PARSE_PROGRESS.finish(other_id)
+        with STORE.lock:
+            for sid in (src_id, other_id):
+                STORE.sources.pop(sid, None)
+                STORE.source_origin.pop(sid, None)
+                if sid in STORE.source_order:
+                    STORE.source_order.remove(sid)
+
+
+def test_a_source_in_phase_two_carries_its_progress_too(c) -> None:
+    """Phase 2 is where a big file spends its time, and `state` stays READY throughout it — so the
+    percentage has to ride on the source whose ENRICH state is 'enriching', not only on 'PARSING'."""
+    src_id = "s-enriching-1"
+    PARSE_PROGRESS.start(src_id, "flows.csv", 400_000)
+    PARSE_PROGRESS.advance(src_id, done=300_000, events=900_000, phase="enriching")
+    try:
+        with STORE.lock:
+            STORE.sources[src_id] = Source(id=src_id, file="flows.csv", parser="csv", state="READY",
+                                           size=400_000, origin="library", enrich="enriching")
+            STORE.source_order.append(src_id)
+            STORE.source_origin[src_id] = "library"
+        row = {s["id"]: s for s in c.get("/api/case").json()["librarySources"]}[src_id]
+        assert row["progress"]["phase"] == "enriching"
+        assert row["progress"]["pct"] == pytest.approx(75.0, abs=0.2)
+    finally:
+        PARSE_PROGRESS.finish(src_id)
+        with STORE.lock:
+            STORE.sources.pop(src_id, None)
+            STORE.source_origin.pop(src_id, None)
+            if src_id in STORE.source_order:
+                STORE.source_order.remove(src_id)
+
+
+def test_attaching_progress_never_mutates_the_stored_source(c) -> None:
+    """It is attached to a COPY. Stamping the percentage onto `STORE.sources` would leave a finished
+    file claiming 84 % for the rest of the process's life — and that number is never persisted."""
+    src_id = "s-copy-1"
+    PARSE_PROGRESS.start(src_id, "x.log", 100)
+    PARSE_PROGRESS.advance(src_id, done=84, events=7)
+    try:
+        with STORE.lock:
+            STORE.sources[src_id] = Source(id=src_id, file="x.log", parser="syslog", state="PARSING",
+                                           size=100, origin="library", enrich="raw")
+            STORE.source_order.append(src_id)
+            STORE.source_origin[src_id] = "library"
+        assert c.get("/api/case").json()["librarySources"][-1]["progress"]["pct"] > 0
+        with STORE.lock:
+            assert STORE.sources[src_id].progress is None
+    finally:
+        PARSE_PROGRESS.finish(src_id)
+        with STORE.lock:
+            STORE.sources.pop(src_id, None)
+            STORE.source_origin.pop(src_id, None)
+            if src_id in STORE.source_order:
+                STORE.source_order.remove(src_id)
+
+
 def test_case_endpoint_does_not_rescan_the_pool(c, monkeypatch) -> None:
     """The two O(events) scans in case() are gone: coverage is a per-source tally and the distinct
     entity count is cached. Both used to run, under the store lock, on every poll."""

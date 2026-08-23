@@ -6,7 +6,7 @@ import type { EnrichState, Source } from '../api/types';
 import { Icon } from './icons';
 import { useCase, useInvalidateCaseData } from '../hooks/queries';
 import { useToast } from '../hooks/useToast';
-import { cx, fmtInt, fmtTs } from '../utils/format';
+import { cx, fmtBytes, fmtEta, fmtInt, fmtRate, fmtTs } from '../utils/format';
 
 /**
  * Two-phase ingest, said out loud.
@@ -199,12 +199,24 @@ export function EnrichChip({ source }: { source: Source }) {
   const st = enrichOf(source);
   const meta = ENRICH_META[st];
   const at = source.enrichedAt;
-  const tip = at ? `${meta.help} · enriched ${fmtTs(at)} UTC` : meta.help;
+  // Phase 2 is where a big file actually spends its time, and `Source.state` stays READY throughout it
+  // — so this chip, not the state pill, is the thing an analyst watches for twenty minutes. A spinner
+  // alone cannot be told apart from a hang; `source.progress` is the server's own tracker row for this
+  // source. Absent is a real answer (the worker has not started on it yet) and stays a bare chip.
+  const p = st === 'enriching' ? source.progress : null;
+  const shown = p && p.bytesTotal ? Math.round(p.pct) : null;
+  const detail = p
+    ? [p.bytesTotal ? `${fmtBytes(p.bytesDone)} of ${fmtBytes(p.bytesTotal)}` : '',
+       p.events ? `${fmtInt(p.events)} events` : '', fmtRate(p.bytesPerSec), fmtEta(p.etaSec)]
+      .filter(Boolean).join(' · ')
+    : '';
+  const tip = detail ? `${meta.help} · ${detail}`
+    : at ? `${meta.help} · enriched ${fmtTs(at)} UTC` : meta.help;
   return (
     <span className={cx('pill', meta.pill, 'tip')} data-tip={tip}>
       {st === 'enriching' && <span className="spinner" />}
       {st === 'error' && <Icon.Warn width={10} height={10} />}
-      {meta.label}
+      {meta.label}{shown !== null ? ` ${shown}%` : ''}
     </span>
   );
 }
