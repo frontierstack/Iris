@@ -260,7 +260,14 @@ class EnrichQueue:
 
     def status(self) -> dict:
         with self._lock:
-            return {"running": self._current, "queued": list(self._q), "pending": len(self._q) + (1 if self._current else 0)}
+            return {"running": self._current, "queued": list(self._q),
+                    "pending": len(self._q) + (1 if self._current else 0),
+                    # A finished batch waiting for its shared merge is REAL work — `_swap_many` is
+                    # O(the whole pool), tens of seconds at 16 M events — but the sources in it are
+                    # already `enriched`, so nothing in `counts` describes it. Without this the screen
+                    # has to choose between naming a file that has finished ("Interpreting
+                    # capture20110811" long after it was interpreted) and saying nothing at all.
+                    "committing": self._committing}
 
     def working(self) -> bool:
         """True while a LIVE worker still has phase-2 work to do.

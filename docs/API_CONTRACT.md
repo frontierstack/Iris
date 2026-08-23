@@ -132,9 +132,23 @@ interface Case { id:string; name:string; analyst:string; createdAt:string; sourc
    A `skipped` source is in NEITHER: the analyst declined it, and a warning that can never be cleared is
    noise. It is still visible in `counts`. */
 interface EnrichCounts { raw:number; queued:number; enriching:number; enriched:number; skipped:number; error:number }
+/* `running` is RECONCILED against `counts`, not taken from the queue: the worker keeps the name of
+   what it popped through the batch COMMIT that follows it, during which that source is already
+   `enriched`. Reporting it made the banner say "Interpreting capture20110811.binetflow" about a file
+   that had finished, and count it as one of the queued sources ("2 waiting behind it" when 3 were).
+   A sid appears here only while its source's `enrich` really is 'enriching'.
+   `committing` is that merge: real work, O(the whole pool) and tens of seconds at 16 M events, and it
+   belongs to NO source — every member of the batch is already enriched — so a screen names it for
+   what it is rather than blaming the last file it read.
+   "Interpreted" means `counts.enriched` and nothing else. A UI that computes it as "not raw" counts
+   queued and enriching sources as done, which is how "14 of 14 sources interpreted" came to sit
+   directly above a line saying three of them were still to come. */
 interface CaseEnrichment { counts:EnrichCounts;
-  running:string /*source id in phase 2 right now, '' when the worker is idle*/;
-  pending:number; outstanding:number }
+  running:string /*source in phase 2 right now, '' when none is*/;
+  committing:boolean /*a finished batch is merging into the pool*/;
+  pending:number; outstanding:number;
+  runningFile:string; runningPct:number|null; runningPhase:string; runningEtaSec:number|null;
+  needsAction:number }
 
 interface Settings {
   theme:string;                                   // 'iris-dark' | 'graphite' | 'paper' | 'midnight-blue' | 'solar'

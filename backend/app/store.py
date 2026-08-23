@@ -2959,6 +2959,15 @@ class Store:
         # seconds, so a bare "1 running" changes once a minute and reads as frozen; the tracker
         # already holds the file, the phase and the percentage, and this is the one place the UI can
         # get them without another request per source.
+        # The queue names what it POPPED, and it holds that name through the batch commit that
+        # follows — during which the source is already `enriched`. Reporting it as running is how the
+        # banner came to say "Interpreting capture20110811.binetflow" about a finished file, and to
+        # count one of the three queued sources as that file, leaving "2 waiting behind it".
+        if running:
+            with self.lock:
+                live = self.sources.get(running)
+            if live is None or live.enrich != "enriching":
+                running = ""
         file_name, pct, phase, eta = "", None, "", None
         if running:
             from .jobs import PARSE_PROGRESS
@@ -2977,6 +2986,7 @@ class Store:
         needs = counts.error + (counts.raw if pending == 0 else 0)
         return CaseEnrichment(counts=counts, running=running, pending=pending,
                               outstanding=counts.raw + pending,
+                              committing=bool(q.get("committing")),
                               runningFile=file_name, runningPct=pct, runningPhase=phase,
                               runningEtaSec=eta, needsAction=needs)
 

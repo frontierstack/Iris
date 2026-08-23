@@ -176,7 +176,12 @@ export interface EnrichCounts {
 export interface CaseEnrichment {
   counts: EnrichCounts;
   /** source id being enriched right now, '' when the worker is idle */
+  /** the source in phase 2 RIGHT NOW, '' when nothing is. Reconciled server-side against `counts`,
+   *  so it never names a file that has already finished. */
   running: string;
+  /** a finished batch is being merged into the pool — real work, tens of seconds on a large pool, and
+   *  it belongs to no single source because every member of it is already `enriched`. */
+  committing?: boolean;
   /** queued + enriching — is work IN FLIGHT? This is what a progress banner counts down. */
   pending: number;
   /** raw + queued + enriching — is my ANSWER incomplete? Those sources are in the pool as raw lines,

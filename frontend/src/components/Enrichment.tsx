@@ -97,6 +97,7 @@ export function useEnrichment() {
       phase: e?.runningPhase ?? '',
       etaSec: e?.runningEtaSec ?? null,
     },
+    committing: e?.committing ?? false,
     needsAction: e?.needsAction ?? 0,
     total: sources.length,
     raw,
@@ -282,7 +283,7 @@ export function EnrichActions({ source }: { source: Source }) {
  */
 export function EnrichBanner() {
   const { pathname } = useLocation();
-  const { outstanding, total, pending, running, raw, counts, detail } = useEnrichment();
+  const { outstanding, total, pending, running, raw, counts, detail, committing, sources } = useEnrichment();
   const enrichAll = useEnrichAll();
   const invalidate = useInvalidateCaseData();
   // Enrichment finishes with no request from the UI, so every derived query (search, timeline, graph,
@@ -304,9 +305,18 @@ export function EnrichBanner() {
   if (!pathname.startsWith('/ingest')) return null;
   if (!outstanding && !(counts?.error ?? 0)) return null;
 
-  const queued = Math.max(0, pending - (running ? 1 : 0));
+  // INTERPRETED means enriched — not "not raw". Counting `total - raw` called a queued source
+  // interpreted, so the strip read "14 of 14 sources interpreted" directly above "Interpreting
+  // capture20110811.binetflow · 2 waiting behind it". A count that disagrees with the line under it
+  // is worse than no count: it is the number an analyst uses to decide the workspace is ready.
+  // `skipped` is deliberately not counted either — it is a decision to leave a source uninterpreted,
+  // and the line below states it as one.
+  const done = counts ? counts.enriched : sources.filter((s) => enrichOf(s) === 'enriched').length;
+  // The queue is what is waiting, full stop. Subtracting the running source assumed `running` was one
+  // of them; it is counted in `pending` only while it is genuinely `enriching`.
+  const queued = counts ? counts.queued : Math.max(0, pending - (running ? 1 : 0));
   const failed = counts?.error ?? 0;
-  const idle = pending === 0;
+  const idle = pending === 0 && !committing;
   const pct = detail.pct;
   const eta = detail.etaSec;
 
@@ -314,7 +324,7 @@ export function EnrichBanner() {
     <div className="enrich-banner enrich-banner--slim" role="status" aria-live="polite">
       <div className="enrich-banner__body">
         <div className="enrich-banner__line">
-          <b>{fmtInt(total - raw.length)} of {fmtInt(total)} source{total === 1 ? '' : 's'} interpreted</b>
+          <b>{fmtInt(done)} of {fmtInt(total)} source{total === 1 ? '' : 's'} interpreted</b>
           <span className="muted"> — every source is searchable with its timestamps either way;
             interpreting one adds parsed fields, entities and detections.</span>
         </div>
@@ -325,7 +335,16 @@ export function EnrichBanner() {
             Interpreting <span className="mono">{detail.file || running}</span>
             {typeof pct === 'number' ? ` — ${pct.toFixed(0)}%` : ''}
             {typeof eta === 'number' && eta > 0 ? ` · ~${eta < 60 ? `${eta}s` : `${Math.round(eta / 60)}m`} left` : ''}
-            {queued > 0 ? ` · ${fmtInt(queued)} waiting behind it` : ''}
+            {queued > 0 ? ` · ${fmtInt(queued)} waiting` : ''}
+          </div>
+        ) : committing ? (
+          // The gap that used to keep the last file's name on screen. Merging a finished batch into
+          // the pool is O(the whole pool) — tens of seconds at 16 M events — and belongs to no single
+          // source, so it is named for what it is rather than blamed on a file that is already done.
+          <div className="enrich-banner__line">
+            <span className="spinner" />
+            Merging interpreted sources into the pool
+            {queued > 0 ? ` · ${fmtInt(queued)} waiting` : ''}
           </div>
         ) : queued > 0 ? (
           <div className="enrich-banner__line"><span className="spinner" />{fmtInt(queued)} queued to interpret</div>

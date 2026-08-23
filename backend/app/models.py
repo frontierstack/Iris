@@ -543,9 +543,18 @@ class CaseEnrichment(BaseModel):
     would be noise. It is still visible in `counts`.
     """
     counts: EnrichCounts = Field(default_factory=EnrichCounts)
-    running: str = ""       # source id currently in phase 2, "" when the worker is idle
+    # The source currently in phase 2, "" when the worker is idle. RECONCILED against `counts`: the
+    # queue keeps its own idea of what it is working on, and it still names the last source through
+    # the batch commit that follows it. A screen that reports that says "Interpreting <file>" about a
+    # file that finished a minute ago, so a sid only appears here while its source really is
+    # `enriching`.
+    running: str = ""
     pending: int = 0
     outstanding: int = 0
+    # A finished batch is being merged into the pool. Real work with no source of its own — every
+    # member of it is already `enriched` — and on a large pool it is tens of seconds. Reported so the
+    # screen can say what is happening instead of naming a file that is no longer being read.
+    committing: bool = False
     # What the RUNNING source is doing, so a screen can show movement rather than a number that changes
     # once a minute. A source takes tens of seconds on a large pool, so "1 running" on its own is
     # indistinguishable from "stuck" — which is exactly how it was read. Straight off
