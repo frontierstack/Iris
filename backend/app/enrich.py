@@ -392,6 +392,93 @@ class EnrichQueue:
                 return False
             time.sleep(0.01)
 
+    def _peel_small(self, first: str, store: "Store") -> list[str]:
+        """Take the run of small queued sources (the current one included) for parallel parsing."""
+        try:
+            from .graph_parts import workers_by_memory
+            from .parsers.parallel import min_parallel_bytes
+            cap = min(PARALLEL_SMALL_MAX, workers_by_memory(PARALLEL_SMALL_MAX))
+        except Exception:
+            return []
+        if cap < 2:
+            return []
+        limit = min_parallel_bytes()
+
+        def small(sid: str) -> bool:
+            src = getattr(store, "sources", {}).get(sid)
+            return src is not None and 0 < src.size < limit and src.enrich in ("queued", "raw", "error")
+
+        if not small(first):
+            return []
+        out = [first]
+        with self._lock:
+            while self._q and len(out) < cap and small(self._q[0]):
+                out.append(self._q.pop(0))
+        return out if len(out) >= 2 else []
+
+    def _parse_small_parallel(self, sids: list[str], store: "Store", batching) -> None:
+        """Parse `sids` in worker processes; commit each in the parent, in completion order."""
+        import contextlib
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        from multiprocessing import get_context
+        from .parsers.parallel import background_worker_init, parse_whole
+        tasks = {}
+        for sid in sids:
+            t = store.enrich_task(sid)
+            if t is not None:
+                tasks[sid] = t
+        if not tasks:
+            return
+        with self._lock:
+            self._committing = True
+        self._set_phase("parsing")
+        try:
+            pool = ProcessPoolExecutor(max_workers=min(len(tasks), PARALLEL_SMALL_MAX),
+                                       mp_context=get_context("spawn"), initializer=background_worker_init)
+        except Exception as exc:
+            log.warning("parallel enrichment unavailable (%s); parsing one at a time", exc)
+            with (batching() if batching else contextlib.nullcontext()):
+                for sid in tasks:
+                    self.last[sid] = store.enrich_source(sid)
+            with self._lock:
+                self._committing = False
+            return
+        t0 = time.time()
+        try:
+            futs = {pool.submit(parse_whole, *t): sid for sid, t in tasks.items()}
+            with (batching() if batching else contextlib.nullcontext()):
+                for fut in as_completed(futs):
+                    sid = futs[fut]
+                    with self._lock:
+                        self._current = sid
+                    try:
+                        batches = fut.result()
+                    except Exception as exc:          # a worker failed on this file: parse it here
+                        log.warning("parallel parse of %s failed (%s); parsing in-process", sid, exc)
+                        batches = None
+                    try:
+                        self.last[sid] = store.enrich_source(sid, batches=batches)
+                    except Exception as exc:  # one bad file must not lose the batch
+                        msg = f"{type(exc).__name__}: {exc}"
+                        self.last[sid] = EnrichResult(sid=sid, ok=False, error=msg)
+                        # NOTHING may leave a source at `enriching` (see the module docstring): it is
+                        # never re-queued, the banner counts it forever. Fail it properly — retryable.
+                        fail = getattr(store, "enrich_failed", None)
+                        if fail is not None:
+                            fail(sid, msg)
+        finally:
+            pool.shutdown(wait=True)
+            with self._lock:
+                self._current = ""
+                self._committing = False
+            self._set_phase("idle")
+            res = [self.last.get(s) for s in tasks]
+            ok = sum(1 for r in res if r is not None and r.ok)
+            bad = [f"{r.sid}: {r.error}" for r in res if r is not None and not r.ok]
+            print(f"[iris] enrichment: parsed {len(tasks)} small sources in parallel "
+                  f"({min(len(tasks), PARALLEL_SMALL_MAX)} workers, {time.time() - t0:.1f}s; "
+                  f"{ok} committed{', ' + '; '.join(bad) if bad else ''})", flush=True)
+
     # --------------------------------------------------------------- worker
     def start(self, store: "Store") -> None:
         if self._thread and self._thread.is_alive():
@@ -451,6 +538,14 @@ class EnrichQueue:
                 with self._lock:
                     more_waiting = bool(self._q)
                 batching = getattr(store, "enrich_batch", None) if more_waiting else None
+                # Many SMALL files waiting: parse them side by side in worker processes and commit each
+                # as it lands. The parse is pure-Python and GIL-bound, so on one worker a queue of
+                # forty one-second files took forty seconds a core; across processes it takes about
+                # forty divided by the workers the machine can hold.
+                small = self._peel_small(sid, store) if more_waiting else []
+                if small:
+                    self._parse_small_parallel(small, store, batching)
+                    continue
                 pending = getattr(store, "enrich_batch_size", None)
                 # A batch holds finished parses that are NOT in the pool yet, and the inner loop
                 # clears `_current` as soon as the queue runs dry — so without this flag `working()`
@@ -483,7 +578,15 @@ class EnrichQueue:
                             self.last[nxt] = EnrichResult(sid=nxt, ok=False,
                                                           error=f"{type(exc).__name__}: {exc}")
             except Exception as exc:  # a bad file may never take the worker down
-                self.last[sid] = EnrichResult(sid=sid, ok=False, error=f"{type(exc).__name__}: {exc}")
+                # ...but it must never be SILENT either: an exception here left four sources at
+                # `enriching` with nothing in flight and no message anywhere. Log the traceback and
+                # fail the source properly so the state is retryable and visible.
+                log.exception("enrichment of %s failed", sid)
+                msg = f"{type(exc).__name__}: {exc}"
+                self.last[sid] = EnrichResult(sid=sid, ok=False, error=msg)
+                fail = getattr(store, "enrich_failed", None)
+                if fail is not None:
+                    fail(sid, msg)
             finally:
                 with self._lock:
                     self._current = ""
@@ -509,5 +612,8 @@ class EnrichQueue:
 # long batch trades one kind of waiting for another.
 BATCH_MAX = 25
 BATCH_SECONDS = 30.0
+# Small sources are parsed in PARALLEL processes (one file per worker) and committed here in order.
+# Big ones keep the chunked pool. Bound is the memory-aware worker count, never more than this.
+PARALLEL_SMALL_MAX = 6
 
 QUEUE = EnrichQueue()

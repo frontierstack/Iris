@@ -337,6 +337,24 @@ def _run_chunk(parser: BaseParser, head: str, chunk: bytes, skip: int, sid: str,
     return batch
 
 
+def parse_whole(path, member: str, parser: BaseParser, sid: str, filename: str, family: str) -> list:
+    """WORKER ENTRY POINT: parse one WHOLE small file and return its normalized batches.
+
+    The chunked path above splits a big file across processes. This is the other shape of the
+    problem: a queue of many small files, each parsed in a second, one after another on the single
+    enrichment worker — pure-Python, GIL-bound, so threads could not help and the queue drained one
+    core wide. Here each small file IS the unit of work: one process per file, the parent only
+    commits. The bytes are read here, in the worker, so the parent never holds them.
+    """
+    from pathlib import Path as _P
+    from . import archives
+    p = _P(path)
+    data = archives.read_member(p, member) if member else p.read_bytes()
+    parsed = list(parser.parse_bytes(data))
+    del data
+    return [normalize_batch(parsed, sid, filename, family)]
+
+
 @dataclass
 class Plan:
     parser: BaseParser              # a pristine copy for the workers

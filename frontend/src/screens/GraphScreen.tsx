@@ -744,6 +744,14 @@ export function GraphScreen() {
           )}
         </div>
         <ScopeToggle scope={scope} onChange={setScope} count={nInCase} noCase={noCase} />
+        {/* The graph builds from the sources that are READY and says what is still to come, instead
+            of waiting for the whole queue: an analyst reading it must know it is over part of the
+            workspace. Hidden when nothing is pending — a "0 pending" chip is noise. */}
+        {!!stats?.sourcesPending && (
+          <span className="pill pill--warn" title="These sources are still being interpreted; each joins the graph the moment it finishes.">
+            {fmtInt(stats.sourcesPending)} source{stats.sourcesPending === 1 ? '' : 's'} still interpreting — graph covers {fmtInt(stats.sourcesIncluded ?? 0)}
+          </span>
+        )}
         <span className="graph__count">
           {g.isFetching && !g.data ? <span className="spinner" style={{ width: 10, height: 10, display: 'inline-block' }} /> : null}
           {stats ? <>{fmtInt(stats.nodes)} of {fmtInt(stats.totalNodes ?? stats.nodes)} nodes · {fmtInt(stats.edges)} links{stats.truncated ? ' · capped' : ''}</> : ''}

@@ -796,7 +796,11 @@ export function IngestScreen() {
         }
       };
       try {
-        await Promise.all(Array.from({ length: Math.min(3, queue.length) }, worker));
+        // Four transfers at a time (was three). Each upload request is its own server thread and the
+        // raw split is a few string operations per line, so the limit is the link and the disk, not
+        // the CPU; more lanes overlap network with the write. Beyond four the gain was not measurable
+        // and every extra lane is another file's bytes in flight on a memory-tight machine.
+        await Promise.all(Array.from({ length: Math.min(4, queue.length) }, worker));
       } finally {
         window.clearInterval(beat);
       }

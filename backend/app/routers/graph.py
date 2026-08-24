@@ -142,7 +142,12 @@ def graph(scope: str = Query("all", pattern="^(all|case)$"),
     seen: set[str] = set()
     edges = [e for e in edges
              if e.source in node_ids and e.target in node_ids and not (e.id in seen or seen.add(e.id))]
-    stats = {**stats, "edges": len(edges), "status": status}
+    included, pending = STORE.graph_coverage()
+    # The graph no longer waits for the interpretation queue: it covers the sources that are ready
+    # and says how many are still to come. An analyst reading a graph must know it is over PART of
+    # the workspace — that is the silent-omission class of bug this project keeps fighting.
+    stats = {**stats, "edges": len(edges), "status": status,
+             "sourcesIncluded": included, "sourcesPending": pending}
     return GraphV2(nodes=nodes, edges=edges, stats=stats)
 
 

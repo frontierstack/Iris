@@ -116,7 +116,10 @@ export interface DerivedState {
 export interface GraphStats { nodes: number; edges: number; truncated: boolean; totalNodes?: number; totalEdges?: number; byType: Partial<Record<EntityType, number>>; byRelation: Partial<Record<Relation, number>>; query?: string; status?: DerivedState;
   /** How many nodes `minDegree` removed. Reported so the screen can say the filter did it, rather than
    *  quietly showing a smaller graph. */
-  hiddenByDegree?: number }
+  hiddenByDegree?: number;
+  /** The graph covers `sourcesIncluded` sources; `sourcesPending` are still being interpreted and join
+   *  it the moment they land — it no longer waits for the queue to drain. */
+  sourcesIncluded?: number; sourcesPending?: number }
 export interface GraphV2 { nodes: GraphNode[]; edges: GraphEdge[]; stats: GraphStats }
 export interface GraphQuery { scope?: Scope; types?: EntityType[]; relations?: Relation[]; minCount?: number; minDegree?: number; focus?: string; hops?: number; limit?: number; q?: string;
   /** Source ids the graph is restricted to — entities and relations actually seen in those files.

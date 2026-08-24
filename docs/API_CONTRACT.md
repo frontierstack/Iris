@@ -160,6 +160,11 @@ interface CaseEnrichment { counts:EnrichCounts;
   runningFile:string; runningPct:number|null; runningPhase:string; runningEtaSec:number|null;
   needsAction:number }
 
+/* Phase 2 parses SMALL queued sources in PARALLEL worker processes (one file per process, up to the
+   memory-aware worker count) and commits them in the parent in completion order; big files keep the
+   chunked pool. A queue of forty one-second files no longer takes forty seconds a core. The commit
+   is still one merge per batch. */
+
 /* WHAT phase 2 is doing right now — the answer to "what is it waiting on?". The counts say how much is
    LEFT and never said what was happening: a 16.9 MB file behind a batch merge reported "1 queued to
    interpret" for minutes while the 13.8 M-event pool rebuild it was queued behind ran unannounced.
@@ -563,6 +568,11 @@ interface GraphEdge { id:string; source:string; target:string; relation:Relation
   sev:Severity; outcome?:'success'|'failure'|'denied'|'mixed'; eventIds:string[] /*≤ 20 sample*/;
   why:string /*plain-English*/; ai?:boolean; confidence?:number /*AI edges only, 0-1*/ }
 interface GraphV2 { nodes:GraphNode[]; edges:GraphEdge[]; stats:GraphStats }
+/* `stats.sourcesIncluded` / `stats.sourcesPending`: the graph BUILDS FROM THE SOURCES THAT ARE READY
+   and no longer waits for the interpretation queue to drain — extraction is per source with a per-source
+   partial cache (app/graph_parts.py), so a rebuild after one more source lands costs that source. A
+   source in phase 2 right now is left out (its events are about to be replaced) and counted in
+   `sourcesPending`; it joins on the next build. A graph over part of the workspace must say so. */
 interface GraphStats { nodes:number; edges:number; truncated:boolean;
   totalNodes:number; totalEdges:number;          // the whole built graph, before limit/filters
   byType:Record<EntityType,number>; byRelation:Record<Relation,number>;

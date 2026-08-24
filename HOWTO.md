@@ -641,6 +641,10 @@ Full contract: `docs/API_CONTRACT.md`.
   and for how long). The second runs in the background after that (and once after every restart) and holds nothing up: search, the
   timeline and the graph already have the new events. Only the *windowed* rules (bursts, sprays) need the
   whole pool re-read; every per-event rule was applied before the events went in.
+- **The graph shows *N sources still interpreting — graph covers M*** — the entity graph no longer waits for
+  every source to finish interpreting: it builds from the ones that are ready and each remaining source joins
+  the moment it lands. Small files are interpreted several at a time in worker processes; large ones are split
+  across workers as before.
 - **A drop of many files shows some as *waiting its turn*** — that is normal and healthy: Iris sends three files
   at a time and the rest queue. They are not stalled, and the tab tells the server they are still coming, so they
   are not failed either. Leave the tab open: **closing it abandons everything that has not been sent yet**, and

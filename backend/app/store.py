@@ -1839,7 +1839,37 @@ class Store:
             enrich.QUEUE.submit(sid)
         return len(pending)
 
-    def enrich_source(self, sid: str) -> "enrich.EnrichResult":
+    def enrich_task(self, sid: str) -> Optional[tuple]:
+        """What a worker process needs to parse this source on its own: (path, member, parser, file,
+        family, size). None when the source is gone or already settled. Marks it `enriching`."""
+        with self.lock:
+            src = self.sources.get(sid)
+            path = self.source_paths.get(sid)
+            parser = self.source_parsers.get(sid)
+            member = self.source_member.get(sid, "")
+            if src is None or path is None or parser is None or src.enrich in ("enriched", "skipped"):
+                return None
+            src.enrich = "enriching"  # type: ignore[assignment]
+            size = src.size
+        from .jobs import PARSE_PROGRESS
+        PARSE_PROGRESS.start(sid, src.file, size)
+        PARSE_PROGRESS.advance(sid, done=0, phase="enriching")
+        # positional for parsers.parallel.parse_whole(path, member, parser, sid, filename, family)
+        return (str(path), member, parser, sid, src.file, parser.family)
+
+    def enrich_failed(self, sid: str, msg: str) -> None:
+        """Phase 2 failed outside `enrich_source`'s own handler: record it the same way — the parse
+        failing, retryable, never a source stuck at `enriching`."""
+        from .jobs import PARSE_PROGRESS
+        PARSE_PROGRESS.finish(sid)
+        with self.lock:
+            src = self.sources.get(sid)
+            if src is not None and src.enrich == "enriching":
+                src.enrich, src.enrichError = "error", msg  # type: ignore[assignment]
+                src.state, src.error = "ERROR", msg  # type: ignore[assignment]
+        self.bump()
+
+    def enrich_source(self, sid: str, batches: Optional[list] = None) -> "enrich.EnrichResult":
         """Phase 2: parse and normalize a source that is currently in the pool as raw lines.
 
         Runs on the enrichment worker, never on a request thread. The source's raw events are REPLACED by
@@ -1861,22 +1891,27 @@ class Store:
             return enrich.EnrichResult(sid=sid, ok=True, error="already " + src.enrich)
         with self.lock:
             src.enrich = "enriching"  # type: ignore[assignment]
-        try:
-            # THE bug this accessor exists for. `path` is the staged CONTAINER when this source is an
-            # archive member, so reading it here replaced a parsed syslog member with lines of decoded
-            # zip binary — and left the source reporting READY / enriched over the top of it.
-            data = self.source_bytes(sid)
-            PARSE_PROGRESS.start(sid, src.file, len(data))
-            PARSE_PROGRESS.advance(sid, done=0, phase="enriching")
-        except (OSError, KeyError, ValueError) as exc:
-            with self.lock:
-                src.enrich, src.enrichError = "error", str(exc)  # type: ignore[assignment]
-            return enrich.EnrichResult(sid=sid, ok=False, error=str(exc))
+        data = b""
+        if batches is None:
+            try:
+                # THE bug this accessor exists for. `path` is the staged CONTAINER when this source is
+                # an archive member, so reading it here replaced a parsed syslog member with lines of
+                # decoded zip binary — and left the source reporting READY / enriched over the top.
+                data = self.source_bytes(sid)
+                PARSE_PROGRESS.start(sid, src.file, len(data))
+                PARSE_PROGRESS.advance(sid, done=0, phase="enriching")
+            except (OSError, KeyError, ValueError) as exc:
+                with self.lock:
+                    src.enrich, src.enrichError = "error", str(exc)  # type: ignore[assignment]
+                return enrich.EnrichResult(sid=sid, ok=False, error=str(exc))
 
         old_ids = [e.id for e in self.events if e.sourceId == sid]
         try:
-            batches = self._parse_batches(sid, src, parser, data)
-            PARSE_PROGRESS.advance(sid, done=len(data), phase="finishing", stage_pct=0)
+            # `batches` already parsed in a worker process (EnrichQueue._parse_small_parallel) skips
+            # straight to the commit — the parent never read the file.
+            if batches is None:
+                batches = self._parse_batches(sid, src, parser, data)
+            PARSE_PROGRESS.advance(sid, done=len(data) if data else src.size, phase="finishing", stage_pct=0)
             events, skew, unmapped = self._finish_batches(sid, batches, assign_ids=False)
             self._tail(sid, "finishing", 100)
         except Exception as exc:
@@ -2055,10 +2090,20 @@ class Store:
         # the pool-wide burst correction in the background after. See `_stamp_detections`.
         enrich.MERGE.start(len(live), len(self.events))
         enrich.MERGE.step("detecting", sum(len(b["events"]) for b in live))
-        for b in live:
-            self._stamp_detections(b["events"])
-        lost = self._swap_many({b["sid"]: b["events"] for b in live},
-                               {k: v for b in live for k, v in b["remap"].items()})
+        try:
+            for b in live:
+                self._stamp_detections(b["events"])
+            lost = self._swap_many({b["sid"]: b["events"] for b in live},
+                                   {k: v for b in live for k, v in b["remap"].items()})
+        except Exception as exc:
+            # The batch is already taken off `_enrich_batch`; if this raised and nothing caught it
+            # here, every source in it stayed `enriching` forever with no message anywhere (found
+            # with four of them). Fail each one properly — retryable, visible — and re-raise.
+            enrich.MERGE.finish()
+            msg = f"{type(exc).__name__}: {exc}"
+            for b in live:
+                self.enrich_failed(b["sid"], msg)
+            raise
         now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         with self.lock:
             for b in live:
@@ -2903,6 +2948,26 @@ class Store:
         """
         return bool(self.pool_loading) or enrich.QUEUE.working()
 
+    def graph_builds_paused(self) -> bool:
+        """The GRAPH is never paused for the queue — it builds from the sources that are ready.
+
+        `derived_builds_paused` exists because a rebuild used to be a full six-worker extraction of
+        the whole pool, thrown away on the next bump — a storm that ended in SIGSEGV. That reason is
+        gone: extraction is per source and each source's partial is cached (graph_parts), so a rebuild
+        after one more source finishes costs that source, and a cancelled build keeps every partial it
+        completed. So the graph does what the analyst asked — "start loading as items become
+        available" — and states its coverage (`stats.sourcesPending`) instead of waiting for the
+        queue to drain. The analysis and the anomaly roll-up keep the pause: they are still whole-pool
+        passes with nothing to cache.
+        """
+        return False
+
+    def graph_coverage(self) -> tuple[int, int]:
+        """(sources the graph includes, sources still being interpreted and therefore left out)."""
+        with self.lock:
+            pend = sum(1 for s in self.sources.values() if s.enrich in ("queued", "enriching"))
+            return len(self.sources) - pend, pend
+
     def derived_pause_note(self) -> str:
         """Why derived builds are paused, in the analyst's terms. See `derived_builds_paused`."""
         if self.pool_loading:
@@ -2914,7 +2979,7 @@ class Store:
         from .graph import GRAPH_CACHE
 
         key = self._derived_key(scope)
-        if self.derived_builds_paused():
+        if self.graph_builds_paused():
             GRAPH_CACHE.pause(scope, key, self._derived_size(scope), self.derived_pause_note())
             return None
         # Only the BACKGROUND path is cancellable. A bump lands mid-build routinely and the value this
@@ -2975,7 +3040,12 @@ class Store:
         """
         from .graph_store import GRAPH_FORMAT
         with self.lock:
-            order = [sid for sid in self.source_order if sid in self.sources]
+            # A source in phase 2 right now is about to have every event replaced; extracting it
+            # today is work thrown away in a minute. It joins the graph when it lands, and the
+            # response says it is missing (`stats.sourcesPending`). Raw-by-choice sources ARE
+            # included: the analyst declined interpretation, and the text is what they get.
+            order = [sid for sid in self.source_order
+                     if sid in self.sources and self.sources[sid].enrich not in ("queued", "enriching")]
             meta = {sid: (self.sources[sid].file, self.sources[sid].events,
                           self.sources[sid].range, self.sources[sid].enrich) for sid in order}
         code = {sid: k for k, sid in enumerate(order)}

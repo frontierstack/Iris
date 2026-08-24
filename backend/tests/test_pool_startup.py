@@ -237,15 +237,18 @@ def test_no_derived_build_starts_while_the_library_is_loading(c, monkeypatch):
     monkeypatch.setattr(STORE, "_build_graph_v2", counted)
     monkeypatch.setattr(STORE, "pool_loading", True)
     try:
+        # The GRAPH is no longer paused for the load: extraction is per source with a per-source
+        # partial cache, so a build during the load costs the sources that are in and keeps every
+        # partial it finishes — the storm this test was written against cannot recur from it. It must
+        # still answer promptly (never block the request) and say what it is doing.
         r = c.get("/api/graph?limit=20").json()
-        assert r["stats"]["status"]["state"] == "building"
-        assert "library" in r["stats"]["status"].get("note", "")
-        assert r["nodes"] == [] and started["graph"] == 0
+        assert r["stats"]["status"]["state"] in ("building", "ready")
+        assert "sourcesPending" in r["stats"]
         a = c.get("/api/anomalies?limit=5").json()
         assert a["status"]["state"] == "building" and a["anomalies"] == []
         t = c.get("/api/timeline").json()
         assert t.get("status", {}).get("state") == "building"
-        assert STORE.graph_status("all")["state"] == "building"
+        assert STORE.graph_status("all")["state"] in ("building", "ready")
     finally:
         monkeypatch.setattr(STORE, "pool_loading", False)
     # once the load is over the very same request builds for real. Phase-2 enrichment pauses derived
@@ -273,9 +276,9 @@ def test_a_bulk_load_merges_in_batches_not_once_per_file(c, monkeypatch):
     merges = {"n": 0}
     real = store_mod.Store._merge_into_pool
 
-    def counted(self, events):
+    def counted(self, events, sid=""):
         merges["n"] += 1
-        return real(self, events)
+        return real(self, events, sid)
 
     monkeypatch.setattr(store_mod.Store, "_merge_into_pool", counted)
     _wipe(c)

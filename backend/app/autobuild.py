@@ -107,7 +107,7 @@ class GraphAutoBuilder:
             return False                      # it JUST changed; wait for the quiet window
         if now - changed_at < quiet_seconds():
             return False
-        if store.derived_builds_paused():
+        if getattr(store, "graph_builds_paused", store.derived_builds_paused)():
             return False                      # a load or an enrichment run is in flight — the storm guard
         if not getattr(store, "events", None):
             self.last_version = version       # nothing to build; do not come back for this version
