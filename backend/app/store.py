@@ -1876,7 +1876,9 @@ class Store:
         old_ids = [e.id for e in self.events if e.sourceId == sid]
         try:
             batches = self._parse_batches(sid, src, parser, data)
+            PARSE_PROGRESS.advance(sid, done=len(data), phase="finishing", stage_pct=0)
             events, skew, unmapped = self._finish_batches(sid, batches, assign_ids=False)
+            self._tail(sid, "finishing", 100)
         except Exception as exc:
             PARSE_PROGRESS.finish(sid)
             msg = f"{type(exc).__name__}: {exc}"
@@ -1924,7 +1926,7 @@ class Store:
             deferred = self._defer_swap(sid, events, remap, skew, unmapped, len(old_ids), t0)
             if deferred is not None:
                 return deferred          # committed with the rest of the batch, see `enrich_batch`
-            self._stamp_detections(events)
+            self._stamp_detections(events, sid)
             lost = self._swap_source_events(sid, events, remap)
         except Exception as exc:
             # Anything raising AFTER `enriching` was set leaves the source stuck in that state for the
@@ -1949,7 +1951,6 @@ class Store:
             if skew is not None:
                 self.skews[sid] = skew
             self.source_parse_errors[sid] = unmapped
-        PARSE_PROGRESS.finish(sid)
         self.bump()
         self._refresh_detections_async()
         # Cache the finished source so the next restart neither re-parses nor re-enriches it. The
@@ -1963,11 +1964,12 @@ class Store:
         # save_meta itself refuses to recreate a deleted case directory; this is the cheaper half.
         if self.source_origin.get(sid, "case") == "case":
             self.save_meta()
+        PARSE_PROGRESS.finish(sid)     # only now: the cache write was the last thing the row reported
         return enrich.EnrichResult(sid=sid, ok=True, raw_events=len(old_ids), events=len(events),
                                    one_to_one=one_to_one, remap=remap, lost_citations=lost,
                                    took_ms=int((time.perf_counter() - t0) * 1000))
 
-    def _cache_library_source(self, sid: str, events: list[Event]) -> None:
+    def _cache_library_source(self, sid: str, events: list[Event], report: bool = True) -> None:
         """Persist one finished LIBRARY source's parsed events (see app/pool_store.py). Never raises.
 
         Case-origin sources are deliberately not cached: their bytes live under `cases/<id>/uploads/`,
@@ -1981,9 +1983,10 @@ class Store:
                 src = self.sources.get(sid)
                 origin = self.source_origin.get(sid, "case")
                 errors = self.source_parse_errors.get(sid, 0)
+            tick = (lambda done, n: self._tail(sid, "caching", 100.0 * done / max(1, n))) if report else None
             if not name or src is None or origin != "library":
                 return
-            pool_store.save_member(name, src, events, errors)
+            pool_store.save_member(name, src, events, errors, progress=tick)
         except Exception as exc:  # noqa: BLE001 — a cache write may never fail an ingest
             print(f"[iris] pool cache: could not cache {sid} ({type(exc).__name__}: {exc})")
 
@@ -2086,9 +2089,11 @@ class Store:
 
     def _swap_source_events(self, sid: str, events: list[Event], remap: dict[str, str]) -> list[str]:
         """Replace ONE source's events. See `_swap_many` — this is the single-source case."""
-        return self._swap_many({sid: events}, remap).get(sid, [])
+        return self._swap_many({sid: events}, remap,
+                               tick=lambda stage, p: self._tail(sid, "merging", p)).get(sid, [])
 
-    def _swap_many(self, by_source: dict[str, list[Event]], remap: dict[str, str]) -> dict[str, list[str]]:
+    def _swap_many(self, by_source: dict[str, list[Event]], remap: dict[str, str],
+                   tick: Optional[Callable[[str, float], None]] = None) -> dict[str, list[str]]:
         """Replace SEVERAL sources' events in one merge, moving any curation that cited the old ids.
 
         The merge is the expensive part and it is O(the whole pool) however few events change: a new
@@ -2122,16 +2127,26 @@ class Store:
         while True:
             base = self.events
             enrich.MERGE.step("filtering", len(base))
+            if tick is not None:
+                tick("filtering", 10)
             merged = [e for e in base if e.sourceId not in sids]
             merged.extend(incoming)
             enrich.MERGE.step("sorting", len(merged))
+            if tick is not None:
+                tick("sorting", 30)
             merged = _sort_events(merged)
             enrich.MERGE.step("indexing", len(merged))
+            if tick is not None:
+                tick("indexing", 60)
             index = _build_index(merged)
             enrich.MERGE.step("timestamps", len(merged))
+            if tick is not None:
+                tick("timestamps", 80)
             ts = _epochs(merged) if merged else np.zeros(0, dtype=np.float64)
             fired = sum(len(e.detections) for e in merged)
             enrich.MERGE.step("curation", len(merged))
+            if tick is not None:
+                tick("curation", 95)
             with self.lock:
                 if self.events is not base:
                     continue
@@ -2251,9 +2266,10 @@ class Store:
                 src.error = f"{type(exc).__name__}: {exc}"
             self.bump()
             return
-        PARSE_PROGRESS.advance(sid, done=len(data), phase="merging")
+        PARSE_PROGRESS.advance(sid, done=len(data), phase="finishing", stage_pct=0)
         events, skew, unmapped = self._finish_batches(sid, batches)
         del batches
+        self._tail(sid, "finishing", 100)
         with self.lock:
             src.events = len(events)
             src.state = state  # type: ignore[assignment]
@@ -2270,22 +2286,22 @@ class Store:
             self.unmapped_fields += unmapped
             self.source_parse_errors[sid] = unmapped
         # the merge + sort of the whole pool, and the detection pass over it, stay OUT of the lock
-        self._append_events(events)
+        # The per-event rules go on THESE events before they enter the pool — proportional to the file
+        # — and the pool-wide windowed correction runs in the background. This path used to run the
+        # whole catalogue over the whole pool, synchronously, after every direct parse (a pcap, a remap,
+        # a load-anyway): minutes at "parsing 100 %" with nothing on screen saying why.
+        if not self._bulk:  # a bulk load runs the rules ONCE at the end, not once per file
+            self._stamp_detections(events, sid)
+        self._append_events(events, sid)
         n_events = len(events)
-        # Kept only when this source is finished at parse time; otherwise the reference dies with the
-        # `del` below, because holding a second list of a million events costs what the pool costs.
         events_for_cache = events if self.sources[sid].enrich == "enriched" else []
         del events
-        PARSE_PROGRESS.finish(sid)
-        if not self._bulk:  # a bulk load runs the rules ONCE at the end, not once per file
-            with self._detect_lock:      # NOT self.lock — see _detect_lock's comment
-                self._run_detections()
         self.bump()
+        if not self._bulk:
+            self._refresh_detections_async()
         metrics.finish_progress(sid, n_events, len(data))
-        # A source that is born `enriched` (EVTX, SQLite, PDF, an OCR'd image: no readable raw phase)
-        # is finished right here and will never reach `enrich_source`, so this is its only chance to
-        # be cached. A raw-first source is NOT cached here — it is not interpreted yet.
         self._cache_library_source(sid, events_for_cache)
+        PARSE_PROGRESS.finish(sid)
 
     def _parse_batches(self, sid: str, src: Source, parser: BaseParser, data: bytes) -> list:
         """Tokenize + normalize one file into ordered chunks, in parallel when that pays.
@@ -2382,7 +2398,7 @@ class Store:
         if batch:
             self._merge_into_pool(batch)
 
-    def _append_events(self, events: list[Event]) -> None:
+    def _append_events(self, events: list[Event], sid: str = "") -> None:
         """Publish a source's events into the pool.
 
         In BULK mode the events are only buffered; `_flush_pending` merges them once the buffer passes
@@ -2403,13 +2419,19 @@ class Store:
             if due:
                 self._flush_pending()
             return
-        self._merge_into_pool(events)
+        self._merge_into_pool(events, sid)
 
-    def _merge_into_pool(self, events: list[Event]) -> None:
+    def _merge_into_pool(self, events: list[Event], sid: str = "") -> None:
         while True:
             base = self.events
+            if sid:
+                self._tail(sid, "merging", 10)
             merged = _sort_events(base + events)
+            if sid:
+                self._tail(sid, "merging", 50)
             index = {e.id: i for i, e in enumerate(merged)}
+            if sid:
+                self._tail(sid, "merging", 80)
             ts = _epochs(merged) if merged else np.zeros(0, dtype=np.float64)
             with self.lock:
                 if self.events is base:
@@ -2424,7 +2446,15 @@ class Store:
         self.event_index = {e.id: i for i, e in enumerate(self.events)}
         self.ts = _epochs(self.events) if self.events else np.zeros(0, dtype=np.float64)
 
-    def _stamp_detections(self, events: list[Event]) -> None:
+    @staticmethod
+    def _tail(sid: str, phase: str, pct: Optional[float] = None) -> None:
+        """One line for the work AFTER the bytes are read. The bar sat at "parsing 100 %" for minutes
+        while ids were assigned, the per-event rules ran, the pool was re-sorted and the cache was
+        written: none of that is a byte count, so each phase reports its own 0-100."""
+        from .jobs import PARSE_PROGRESS
+        PARSE_PROGRESS.advance(sid, phase=phase, stage_pct=pct)
+
+    def _stamp_detections(self, events: list[Event], sid: str = "") -> None:
         """Run the catalogue over events that are ABOUT TO ENTER the pool — and only them.
 
         The pass after a commit used to be `_run_detections()`, the whole catalogue over the whole
@@ -2450,13 +2480,14 @@ class Store:
         excl = EXCLUSIONS.matcher()
         ordered = _sort_events(events)
         ts = _epochs(ordered) if ordered else np.zeros(0, dtype=np.float64)
+        tick = (lambda p: self._tail(sid, "detecting", p)) if sid else None
         with self._detect_lock:
             run_rules(ordered, ts, disabled=RULES_STORE.detection_disabled(),
                       overrides=RULES_STORE.detection_overrides(),
-                      params=RULES_STORE.detection_params(), exclude=excl)
+                      params=RULES_STORE.detection_params(), exclude=excl, progress=tick)
             RULES_STORE.apply_all(ordered, excl)
 
-    def _run_detections(self) -> None:
+    def _run_detections(self, progress: Optional[Callable[[float], None]] = None) -> None:
         """Built-in Sigma-like rules (minus disabled ones) + enabled custom regex rules."""
         RULES_STORE.load()
         # ONE compiled exclusion set for the whole pass, built here rather than per rule: it is the same
@@ -2467,7 +2498,7 @@ class Store:
         info = run_rules(self.events, self.ts, disabled=RULES_STORE.detection_disabled(),
                          overrides=RULES_STORE.detection_overrides(),
                          params=RULES_STORE.detection_params(),
-                         exclude=excl)
+                         exclude=excl, progress=progress)
         custom = RULES_STORE.apply_all(self.events, excl)
         EXCLUSIONS.record(excl.counts())
         self.rules_fired = int(info["fired"]) + custom  # type: ignore[arg-type]
@@ -2659,10 +2690,13 @@ class Store:
             self._detect_started = time.time()
 
         def run() -> None:
+            def tick(p: float) -> None:
+                self._detect_pct = p
             try:
                 while True:
+                    self._detect_pct = 0.0
                     with self._detect_lock:
-                        self._run_detections()
+                        self._run_detections(progress=tick)
                     with self.lock:
                         self.bump()
                         if not self._detect_again:
@@ -3148,8 +3182,10 @@ class Store:
         with self.lock:
             refreshing = bool(getattr(self, "_detect_busy", False))
             refresh_since = float(getattr(self, "_detect_started", 0.0) or 0.0)
+            refresh_pct = getattr(self, "_detect_pct", None)
         return CaseEnrichment(counts=counts, running=running, pending=pending, activity=activity,
                               detectionsRefreshing=refreshing,
+                              detectionsRefreshPct=(float(refresh_pct) if refreshing and refresh_pct is not None else None),
                               detectionsRefreshSec=int(max(0.0, time.time() - refresh_since)) if refreshing else 0,
                               outstanding=counts.raw + pending,
                               committing=bool(q.get("committing")),

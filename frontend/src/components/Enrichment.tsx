@@ -101,6 +101,7 @@ export function useEnrichment() {
     activity: e?.activity,
     detectionsRefreshing: e?.detectionsRefreshing ?? false,
     detectionsRefreshSec: e?.detectionsRefreshSec ?? 0,
+    detectionsRefreshPct: e?.detectionsRefreshPct ?? null,
     needsAction: e?.needsAction ?? 0,
     total: sources.length,
     raw,
@@ -208,7 +209,12 @@ export function EnrichChip({ source }: { source: Source }) {
   // alone cannot be told apart from a hang; `source.progress` is the server's own tracker row for this
   // source. Absent is a real answer (the worker has not started on it yet) and stays a bare chip.
   const p = st === 'enriching' ? source.progress : null;
-  const shown = p && p.bytesTotal ? Math.round(p.pct) : null;
+  const stagePhase = !!p && ['finishing', 'detecting', 'merging', 'caching'].includes(p.phase);
+  const shown = p ? (stagePhase ? (typeof p.stagePct === 'number' ? Math.round(p.stagePct) : null)
+                                : (p.bytesTotal ? Math.round(p.pct) : null)) : null;
+  const stageLabel = stagePhase
+    ? ({ finishing: 'assigning ids', detecting: 'rules', merging: 'merging', caching: 'caching' } as Record<string, string>)[p!.phase]
+    : '';
   const detail = p
     ? [p.bytesTotal ? `${fmtBytes(p.bytesDone)} of ${fmtBytes(p.bytesTotal)}` : '',
        p.events ? `${fmtInt(p.events)} events` : '', fmtRate(p.bytesPerSec), fmtEta(p.etaSec)]
@@ -220,7 +226,7 @@ export function EnrichChip({ source }: { source: Source }) {
     <span className={cx('pill', meta.pill, 'tip')} data-tip={tip}>
       {st === 'enriching' && <span className="spinner" />}
       {st === 'error' && <Icon.Warn width={10} height={10} />}
-      {meta.label}{shown !== null ? ` ${shown}%` : ''}
+      {meta.label}{stageLabel ? ` · ${stageLabel}` : ''}{shown !== null ? ` ${shown}%` : ''}
     </span>
   );
 }
@@ -287,7 +293,7 @@ export function EnrichActions({ source }: { source: Source }) {
 export function EnrichBanner() {
   const { pathname } = useLocation();
   const { outstanding, total, pending, running, raw, counts, detail, committing, sources, activity,
-    detectionsRefreshing, detectionsRefreshSec } = useEnrichment();
+    detectionsRefreshing, detectionsRefreshSec, detectionsRefreshPct } = useEnrichment();
   const enrichAll = useEnrichAll();
   const invalidate = useInvalidateCaseData();
   // Enrichment finishes with no request from the UI, so every derived query (search, timeline, graph,
@@ -378,7 +384,8 @@ export function EnrichBanner() {
           // with nothing queued reads as one more thing being waited on.
           <div className="enrich-banner__line">
             <span className="spinner" />
-            <span>Re-checking windowed detection rules over the whole pool in the background — search,
+            <span>Re-checking windowed detection rules over the whole pool in the background
+              {typeof detectionsRefreshPct === 'number' ? ` — ${Math.round(detectionsRefreshPct)}%` : ''} — search,
               the timeline and the graph are not waiting on it.</span>
             {detectionsRefreshSec >= 5 && <span className="muted"> · {fmtDur(detectionsRefreshSec)}</span>}
           </div>

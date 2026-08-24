@@ -599,6 +599,7 @@ class CaseEnrichment(BaseModel):
     # see is exactly the "nothing is happening" the activity field exists to prevent.
     detectionsRefreshing: bool = False
     detectionsRefreshSec: int = 0
+    detectionsRefreshPct: Optional[float] = None   # rough, by catalogue section; None = not started
     # What the RUNNING source is doing, so a screen can show movement rather than a number that changes
     # once a minute. A source takes tens of seconds on a large pool, so "1 running" on its own is
     # indistinguishable from "stuck" — which is exactly how it was read. Straight off

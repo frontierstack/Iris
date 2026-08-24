@@ -487,8 +487,22 @@ function MappingDrawer({ source, onClose, onViewRaw }: { source: Source | null; 
    'parsing': telling the analyst the file is still being read when it is already being interpreted
    understates how far along it is and overstates what is left. */
 const PHASE_LABEL: Record<string, string> = {
-  reading: 'reading', parsing: 'parsing', enriching: 'interpreting', merging: 'merging',
+  reading: 'reading', parsing: 'parsing', enriching: 'interpreting',
+  finishing: 'assigning ids', detecting: 'running detection rules', merging: 'merging into the pool',
+  caching: 'writing the cache',
 };
+/* The phases whose progress is NOT the byte bar. For these the row shows the phase's own 0-100
+   (`stagePct`) and drives the bar with it — a full bar under "parsing 100 %" for five minutes was the
+   report "hangs for a long time even when shown to be at 100%". */
+const STAGE_PHASES = new Set(['finishing', 'detecting', 'merging', 'caching']);
+function phaseText(p: { phase: string; pct: number; stagePct?: number | null }): { label: string; pct: number } {
+  const label = PHASE_LABEL[p.phase] ?? p.phase;
+  if (STAGE_PHASES.has(p.phase)) {
+    const sp = typeof p.stagePct === 'number' ? Math.round(p.stagePct) : null;
+    return { label: sp === null ? label : `${label} ${sp}%`, pct: sp ?? 0 };
+  }
+  return { label: `${label} ${Math.round(p.pct)}%`, pct: p.pct };
+}
 
 /* ───────────── The state cell of the Sources table ─────────────
    A spinner says "something is happening" and nothing else. On a 639 MB capture that is twenty minutes
@@ -506,10 +520,12 @@ const PHASE_LABEL: Record<string, string> = {
    falls back to the bare pill, which is exactly what it used to be. */
 function ParsingCell({ source }: { source: Source }) {
   const p = source.progress;
-  const phase = p ? (PHASE_LABEL[p.phase] ?? 'parsing') : '';
-  // Only claim a percentage when the file's size is known — `pct` is computed from bytes, and a
-  // container with no byte total would otherwise sit at a confident, meaningless 0 %.
-  const shown = p && p.bytesTotal ? Math.round(p.pct) : null;
+  const pt = p ? phaseText(p) : null;
+  const phase = p ? (PHASE_LABEL[p.phase] ?? p.phase) : '';
+  // Only claim a byte percentage when the file's size is known — `pct` is computed from bytes, and a
+  // container with no byte total would otherwise sit at a confident, meaningless 0 %. A stage phase
+  // carries its own count and is always shown.
+  const shown = p ? (STAGE_PHASES.has(p.phase) ? Math.round(pt!.pct) : (p.bytesTotal ? Math.round(p.pct) : null)) : null;
   const detail = p
     ? [p.events ? `${fmtInt(p.events)} events` : '', fmtRate(p.bytesPerSec), fmtEta(p.etaSec),
        p.workers > 1 ? `${p.workers} workers` : ''].filter(Boolean).join(' · ')
@@ -523,7 +539,7 @@ function ParsingCell({ source }: { source: Source }) {
         <span className="spinner" />
         {phase || 'PARSING'}{shown !== null ? ` ${shown}%` : ''}
       </span>
-      {p && p.bytesTotal > 0 && <Bar pct={p.pct} color="var(--accent)" />}
+      {p && (p.bytesTotal > 0 || STAGE_PHASES.has(p.phase)) && <Bar pct={pt!.pct} color="var(--accent)" />}
       {detail && <span className="parsing-cell__detail ellipsis">{detail}</span>}
       {/* No tracker row: say so. A bar at 0 % for a source nothing is working on is the exact reading
           that made a settled workspace look like a hang. */}
@@ -544,14 +560,15 @@ function JobRow({ job, pct }: { job: UploadJob; pct?: number }) {
   // has not registered, or the work is waiting on something. Drawing a full bar for that claims the
   // file is done, and drawing 0 % claims it is stuck; the bar is simply not drawn.
   const noDetail = job.state === 'parsing' && !prog;
+  const stage = prog ? phaseText(prog) : null;
   const shown = inFlight ? (pct ?? (job.size ? Math.round((job.received / job.size) * 100) : 0))
-    : prog ? prog.pct : 100;
+    : stage ? stage.pct : 100;
   const label = job.state === 'error' ? (job.interrupted ? 'interrupted' : 'failed')
     : job.state === 'ready' ? (job.target === 'library' ? 'in library' : `${fmtInt(job.events)} events`)
     // name the PHASE: 'reading' is now visible from the first tick of a big file (the job adopts its
     // tracker row before it knows its source ids), and calling phase 2 'parsing' told the analyst the
     // file was still being read when it was already being interpreted.
-    : job.state === 'parsing' ? (prog ? `${PHASE_LABEL[prog.phase] ?? 'parsing'} ${Math.round(prog.pct)}%` : 'parsing')
+    : job.state === 'parsing' ? (stage ? stage.label : 'parsing')
     // 'queued' is a real, healthy state and it can last a while: this tab sends three files at a time, so
     // everything behind them waits. It used to read as an unexplained stall, and the server used to
     // agree with that reading and fail it at ten minutes.

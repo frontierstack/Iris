@@ -1737,8 +1737,13 @@ def _auth_ip(e: Event) -> str:
 def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] = None,
               overrides: Optional[dict[str, dict]] = None,
               params: Optional[dict[str, dict[str, str]]] = None,
-              exclude: Optional[object] = None) -> dict[str, object]:
+              exclude: Optional[object] = None,
+              progress: Optional[Callable[[float], None]] = None) -> dict[str, object]:
     """Evaluate all built-in rules over the events (in-place). Returns summary info (attacker IPs, fired count).
+
+    `progress(pct)` is called at the catalogue's section boundaries with a rough 0-100. Rough on
+    purpose — the sections are not equal work — but a pass that takes nine minutes on a large pool and
+    reports nothing is indistinguishable from a hang, and "detecting 60 %" moving is not.
 
     `disabled` = built-in rule ids that must not fire (toggled off or removed in /api/rules).
     `overrides` = {rule_id: {"name","sev"}} analyst edits applied to the detections this run produces.
@@ -1750,6 +1755,13 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     _OVERRIDES = dict(overrides or {})
     _PARAMS = {k: dict(v) for k, v in (params or {}).items()}
     _EXCLUDE = exclude
+    def _tick(p: float) -> None:
+        if progress is not None:
+            try:
+                progress(p)
+            except Exception:  # noqa: BLE001 — a progress listener must never fail a pass
+                pass
+    _tick(0.0)
     for ev in events:
         if ev.detections:  # only pay the assignment where there IS a value; empty means the shared list
             ev.detections = EMPTY_LIST
@@ -1772,6 +1784,7 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
         elif e.source.startswith(_NET_FAMILIES):
             net.append(i)
     web = fam_of["nginx.access"]
+    _tick(5.0)
     # --- WEB-0042: 401 bursts per src ip
     w42_statuses = _pl("SIGMA-WEB-0042", "statuses")
     for ip, anchor, count, first in find_bursts(
@@ -2033,6 +2046,7 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
             attackers.setdefault(ip, "port scan")
 
 
+    _tick(35.0)
     # ================================================================ the wider catalogue
     # Everything below was added alongside the pcap parser. Each block re-uses a bucket already built
     # above — no second walk of the pool per rule — and every constant is read ONCE into a local before
@@ -2243,6 +2257,7 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
         if is_public_ip(ip):
             attackers.setdefault(ip, "port scan")
 
+    _tick(55.0)
     # --- any source: secrets, encoded commands, ransomware markers.
     # This is the ONE pass that is not restricted to a family, so it is also the only one that can cost a
     # full scan of the pool. It pays for itself by SCREENING first: the three patterns are joined into a
@@ -2269,6 +2284,7 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
                         e.set_field_default("tactic", tactic)
 
 
+    _tick(80.0)
     # ================================================================ Windows / Azure / Microsoft 365
     # The cloud rules read the fields the JSON exports carry. Azure sign-in and audit logs, Microsoft 365
     # unified audit and Defender alerts all arrive as JSON (Monitor export, Graph, advanced hunting) or
@@ -2441,6 +2457,7 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
         _tag(ev, R["AUTH-0240"])
         ev.set_field("account.addresses", str(count))
         ev.msg = f"{who} authenticated from {count} different addresses"
+    _tick(100.0)
     fired = sum(len(e.detections) for e in events)
     suppressed = _EXCLUDE.counts() if (_EXCLUDE is not None and not _EXCLUDE.empty) else {}  # type: ignore[attr-defined]
     return {"fired": fired, "attackers": set(attackers), "rules_evaluated": len(RULES),

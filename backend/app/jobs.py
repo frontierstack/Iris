@@ -110,7 +110,12 @@ class ParseProgress:
     done: int = 0
     events: int = 0
     workers: int = 1          # >1 when the file is being parsed by the multi-process path
-    phase: str = "parsing"    # 'parsing' | 'merging'
+    phase: str = "parsing"    # 'reading' | 'parsing' | 'enriching' | 'finishing' | 'detecting' | 'merging' | 'caching'
+    # Progress of the CURRENT phase when it is not measured in bytes. The bar hit 100 % the moment the
+    # last byte was parsed and then sat there for minutes: id assignment, the per-event rule pass, the
+    # pool merge and the cache write all happened under "parsing 100 %". None of those is a byte count,
+    # so each reports its own 0-100 here and the screen shows "merging 40 %" instead of a full bar.
+    stage_pct: Optional[float] = None
     started_ts: float = field(default_factory=time.time)
     updated_ts: float = field(default_factory=time.time)
 
@@ -121,6 +126,7 @@ class ParseProgress:
         pct = (done / self.total * 100.0) if self.total else 0.0
         eta = ((self.total - done) / rate) if (self.total and rate > 1.0 and done < self.total) else None
         return {"bytesDone": int(done), "bytesTotal": int(self.total), "pct": round(min(100.0, pct), 1),
+                "stagePct": (round(min(100.0, max(0.0, self.stage_pct)), 1) if self.stage_pct is not None else None),
                 "events": int(self.events), "workers": int(self.workers), "phase": self.phase,
                 "bytesPerSec": int(rate), "etaSec": (int(eta) if eta is not None else None),
                 "elapsedSec": int(elapsed)}
@@ -138,11 +144,15 @@ class ProgressTracker:
             self._rows[key] = ParseProgress(key=key, file=file, total=max(0, int(total)), workers=max(1, workers))
 
     def advance(self, key: str, *, done: Optional[int] = None, add: int = 0, events: Optional[int] = None,
-                phase: str = "") -> None:
+                phase: str = "", stage_pct: Optional[float] = None) -> None:
         with self._lock:
             row = self._rows.get(key)
             if row is None:
                 return
+            if phase and phase != row.phase:
+                row.stage_pct = None          # a new phase starts its own count
+            if stage_pct is not None:
+                row.stage_pct = float(stage_pct)
             if done is not None:
                 row.done = max(row.done, int(done))
             if add:

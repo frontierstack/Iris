@@ -195,6 +195,8 @@ export interface CaseEnrichment {
    *  but it is minutes of one core on a big workspace and deserves a line rather than silence. */
   detectionsRefreshing?: boolean;
   detectionsRefreshSec?: number;
+  /** rough 0-100 by catalogue section; null before the first section reports */
+  detectionsRefreshPct?: number | null;
   /** queued + enriching — is work IN FLIGHT? This is what a progress banner counts down. */
   pending: number;
   /** raw + queued + enriching — is my ANSWER incomplete? Those sources are in the pool as raw lines,
@@ -573,7 +575,11 @@ export interface ParseProgress {
   /** which half of the two-phase ingest is running: 'reading' = phase 1 (raw lines into the pool),
    *  'enriching' = phase 2 (the real parser, on the enrichment worker), 'parsing' = a container with no
    *  raw phase (binary/structured), 'merging' = folding the events into the pool. */
-  phase: 'reading' | 'parsing' | 'enriching' | 'merging';
+  phase: 'reading' | 'parsing' | 'enriching' | 'finishing' | 'detecting' | 'merging' | 'caching' | (string & {});
+  /** 0-100 of the CURRENT phase when that phase is not a byte count (finishing / detecting / merging /
+   *  caching). The byte bar hit 100 % the moment the last byte was read and then sat there for minutes
+   *  under "parsing 100 %"; this is what moves instead. null while the phase is byte-measured. */
+  stagePct?: number | null;
   bytesPerSec: number; etaSec: number | null; elapsedSec: number;
 }
 /** See CaseEnrichment.activity. `kind` names the state; `detail` is the sentence to show.

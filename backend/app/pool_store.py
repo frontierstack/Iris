@@ -50,7 +50,7 @@ import os
 import pickle
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from . import config, sealed
 from .models import Event, Source
@@ -166,7 +166,8 @@ def _write(path: Path, payload: dict) -> bool:
     return _write_frames(path, payload, None)
 
 
-def _write_frames(path: Path, header: dict, events: Optional[list]) -> bool:
+def _write_frames(path: Path, header: dict, events: Optional[list],
+                  progress: Optional[Callable[[int, int], None]] = None) -> bool:
     """Write header + the events as SEPARATE pickle frames, HMAC-tagged, without ever holding the
     whole serialised blob in memory.
 
@@ -211,6 +212,8 @@ def _write_frames(path: Path, header: dict, events: Optional[list]) -> bool:
                 for i in range(0, n, CHUNK):
                     pickle.Pickler(tap, protocol=pickle.HIGHEST_PROTOCOL).dump(
                         [_pack_event(e) for e in events[i:i + CHUNK]])
+                    if progress is not None:
+                        progress(min(n, i + CHUNK), n)     # a 2 M-event cache write is minutes; say so
             fh.flush()
             fh.seek(len(_MAGIC))
             fh.write(mac.digest())
@@ -291,7 +294,8 @@ def save_manifest(name: str, sids: list[str]) -> bool:
                                 {"format": POOL_FORMAT, "sig": sig, "sids": list(sids), "at": time.time()})
 
 
-def save_member(name: str, src: Source, events: list[Event], errors: int) -> bool:
+def save_member(name: str, src: Source, events: list[Event], errors: int,
+                progress: Optional[Callable[[int, int], None]] = None) -> bool:
     """Cache ONE finished member source, with the event list the caller already holds."""
     if not enabled() or not name or src is None:
         return False
@@ -302,7 +306,7 @@ def save_member(name: str, src: Source, events: list[Event], errors: int) -> boo
         return False
     return _write_frames(_dir() / f"{_stem(name)}.{src.id}.pkl",
                          {"format": POOL_FORMAT, "sig": sig, "source": src.model_dump(),
-                          "errors": int(errors)}, events)
+                          "errors": int(errors)}, events, progress=progress)
 
 
 # --------------------------------------------------------------------------- load
