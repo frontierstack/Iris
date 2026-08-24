@@ -93,12 +93,145 @@ def _log(msg: str) -> None:
     print(f"[iris] graph cache: {msg}", file=sys.stderr, flush=True)
 
 
+FRAME_ROWS = 4000
+_FRAME_MAGIC = b"IRISGF1\n"
+
+
+def _frames(nodes_out: list, edges_out: list):
+    for i in range(0, len(nodes_out), FRAME_ROWS):
+        yield ("nodes", nodes_out[i:i + FRAME_ROWS])
+    for i in range(0, len(edges_out), FRAME_ROWS):
+        yield ("edges", edges_out[i:i + FRAME_ROWS])
+
+
+def _write_frames(path, header: dict, frames) -> None:
+    """Magic, a pickled header, then independent pickle streams (one Pickler per frame — see the
+    pool_store note: a shared pickler's memo makes the second frame unreadable), then the HMAC of
+    everything before it. The tag is computed as the bytes go out; nothing is held twice."""
+    import hmac as _hmac
+    import hashlib
+    from .sealed import key
+    mac = _hmac.new(key(), digestmod=hashlib.sha256)
+    with open(path, "wb") as fh:
+        def put(b: bytes) -> None:
+            mac.update(b)
+            fh.write(b)
+        put(_FRAME_MAGIC)
+        put(pickle.dumps(header, protocol=pickle.HIGHEST_PROTOCOL))
+        for frame in frames:
+            put(pickle.dumps(frame, protocol=pickle.HIGHEST_PROTOCOL))
+        fh.write(mac.digest())
+
+
+def _read_frames(path):
+    """(header, [frames]) or (None, None). The tag is verified over the whole file BEFORE anything is
+    unpickled — a pickle in a bind-mounted directory is code execution to whoever can write there."""
+    import hmac as _hmac
+    import hashlib
+    import io
+    from .sealed import key
+    size = os.path.getsize(path)
+    if size < len(_FRAME_MAGIC) + 32:
+        return None, None
+    mac = _hmac.new(key(), digestmod=hashlib.sha256)
+    with open(path, "rb") as fh:
+        body_len = size - 32
+        remaining = body_len
+        while remaining > 0:
+            chunk = fh.read(min(1 << 24, remaining))
+            if not chunk:
+                return None, None
+            mac.update(chunk)
+            remaining -= len(chunk)
+        tag = fh.read(32)
+    if not _hmac.compare_digest(mac.digest(), tag):
+        return None, None
+    with open(path, "rb") as fh:
+        if fh.read(len(_FRAME_MAGIC)) != _FRAME_MAGIC:
+            return None, None
+        header = pickle.Unpickler(fh).load()
+        frames = []
+        while fh.tell() < body_len:
+            frames.append(pickle.Unpickler(fh).load())
+    return header, frames
+
+
+class Parts:
+    """The per-source partial-graph cache behind `graph_parts.build` (see that module's docstring).
+
+    One sealed pickle per source under `cache/graph-parts/`, keyed by the source id and named inside
+    by the source's content signature, so a changed source misses and an unchanged one loads in
+    milliseconds instead of being re-extracted. Any doubt — a foreign tag, a wrong signature, an
+    exception — is a miss; it is a cache. `clear-all` wipes the whole `cache/` tree, this included.
+    """
+
+    def _dir(self):
+        return _dir() / "graph-parts"
+
+    def _path(self, sid: str):
+        safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in sid)
+        return self._dir() / f"{safe}.pkl"
+
+    def get(self, sid: str, sig: str):
+        if not enabled():
+            return None
+        p = self._path(sid)
+        if not p.is_file():
+            return None
+        try:
+            with open(p, "rb") as fh:
+                raw = fh.read()
+            blob = _unseal(raw)
+            if blob is None:
+                return None
+            payload = pickle.loads(blob)
+            if payload.get("sig") != sig or payload.get("format") != GRAPH_FORMAT:
+                return None
+            return payload["nodes"], payload["edges"]
+        except Exception:  # noqa: BLE001
+            return None
+
+    def put(self, sid: str, sig: str, partial) -> None:
+        if not enabled():
+            return
+        try:
+            self._dir().mkdir(parents=True, exist_ok=True)
+            nodes, edges = partial
+            blob = pickle.dumps({"format": GRAPH_FORMAT, "sig": sig, "nodes": nodes, "edges": edges},
+                                protocol=pickle.HIGHEST_PROTOCOL)
+            tmp = self._path(sid).with_suffix(".tmp")
+            with open(tmp, "wb") as fh:
+                fh.write(_seal(blob))
+            os.replace(tmp, self._path(sid))
+        except Exception as exc:  # noqa: BLE001
+            _log(f"partial for {sid} not saved ({type(exc).__name__}: {exc})")
+
+    def prune(self, keep: set) -> int:
+        """Drop partials of sources no longer in the pool. Returns how many were removed."""
+        d = self._dir()
+        if not d.is_dir():
+            return 0
+        keep_names = {self._path(s).name for s in keep}
+        n = 0
+        for f in d.glob("*.pkl"):
+            if f.name not in keep_names:
+                try:
+                    f.unlink()
+                    n += 1
+                except OSError:
+                    pass
+        return n
+
+
+PARTS = Parts()
+
+
 # --------------------------------------------------------------------------- save
 def save(store: Any, scope: str, gb: Any, sig: str) -> bool:
     """Write the builder's aggregate. Never raises — a cache write that fails is just a cache miss later."""
     if not enabled():
         return False
-    from .graph import _NodeAgg, _EdgeAgg  # noqa: F401  (documented dependency, not used directly)
+    from .graph import _NodeAgg, _EdgeAgg, _TAIL  # noqa: F401  (documented dependency, not used directly)
     t0 = time.perf_counter()
     try:
         events = store.events
@@ -106,24 +239,31 @@ def save(store: Any, scope: str, gb: Any, sig: str) -> bool:
         for nid, n in gb.nodes.items():
             # positions -> ids; `recent()` is chronological, so the ring is stored as an ordered list
             head = [events[i].id for i in n.events if 0 <= i < len(events)]
-            recent = [events[i].id for i in n.recent()[len(n.events):] if 0 <= i < len(events)] \
-                if len(n.tail) else []
+            # `recent()` is head+ring while the ring is filling and ONLY the ring once it is full, so
+            # slicing off `len(events)` returned nothing for exactly the busiest nodes — they came back
+            # from the cache with no recent-events window. Store the ring as `recent()` gives it
+            # (ascending); load sets the cursor to 0, which unwraps to the same list.
+            rec = n.recent()
+            recent = [events[i].id for i in (rec if len(n.tail) >= _TAIL else rec[len(n.events):])
+                      if 0 <= i < len(events)] if len(n.tail) else []
             nodes_out.append((nid, n.type, n.value, n.label, n.count, n.first, n.last, n.sev, n.detections,
                               head, recent, dict(n.srcs), dict(n.files)))
         edges_out = [(k, e.source, e.target, e.relation, e.count, e.first, e.last, e.sev,
                       dict(e.outcomes), list(e.events), dict(e.why), sorted(e.files))
                      for k, e in gb.edges.items()]
-        payload = {"format": GRAPH_FORMAT, "sig": sig, "nodes": nodes_out, "edges": edges_out,
-                   "savedAt": time.time()}
+        # FRAMED, never one blob. `pickle.dumps` of the whole payload was a single multi-hundred-MB
+        # (at 13.8 M events, multi-GB) transient allocation at the END of the build — on a VM that had
+        # nothing left, which is the moment the process was found dead. Frames of a few thousand rows
+        # each, HMAC'd as they are written, keep the peak to one frame.
         _dir().mkdir(parents=True, exist_ok=True)
         tmp = _path(scope).with_suffix(".tmp")
-        blob = pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
+        header = {"format": GRAPH_FORMAT, "sig": sig, "savedAt": time.time(),
+                  "nodes": len(nodes_out), "edges": len(edges_out)}
         with _LOCK:
-            with open(tmp, "wb") as fh:
-                fh.write(_seal(blob))
+            _write_frames(tmp, header, _frames(nodes_out, edges_out))
             os.replace(tmp, _path(scope))
-        del blob
-        _log(f"saved {len(nodes_out)} nodes / {len(edges_out)} relations for scope={scope} "
+        del nodes_out, edges_out
+        _log(f"saved {header['nodes']} nodes / {header['edges']} relations for scope={scope} "
              f"in {time.perf_counter() - t0:.1f}s")
         return True
     except Exception as exc:  # noqa: BLE001
@@ -142,17 +282,17 @@ def load(store: Any, scope: str, sig: str) -> Optional[tuple[dict, dict]]:
     from .graph import _NodeAgg, _EdgeAgg, _HEAD, _TAIL
     t0 = time.perf_counter()
     try:
-        with _LOCK, open(p, "rb") as fh:
-            raw = fh.read()
-        blob = _unseal(raw)
-        del raw
-        if blob is None:
-            _log("cache file is unsigned or was not written by this install; ignoring it and rebuilding")
+        with _LOCK:
+            header, frames = _read_frames(p)
+        if header is None:
+            _log("cache file is unsigned, corrupt or not written by this install; ignoring it and rebuilding")
             return None
-        payload = pickle.loads(blob)
-        del blob
-        if not isinstance(payload, dict) or payload.get("format") != GRAPH_FORMAT or payload.get("sig") != sig:
+        if header.get("format") != GRAPH_FORMAT or header.get("sig") != sig:
             return None
+        payload = {"nodes": [], "edges": []}
+        for kind, rows in frames:
+            payload[kind].extend(rows)
+        del frames
         index = store.event_index
         nodes: dict[str, _NodeAgg] = {}
         for (nid, typ, value, label, count, first, last, sev, det, head, recent, srcs, files) in payload["nodes"]:

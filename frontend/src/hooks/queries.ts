@@ -63,8 +63,18 @@ const BUILD_POLL_MS = 1_500;
  *  state that should not exist (the endpoint starts a build on every miss) but is indistinguishable from
  *  a real outage at the screen. Backing off to a slower poll there means a graph that never arrives is a
  *  few seconds of "building", not a permanently blank page. */
-function buildPoll(state: string | undefined, empty: boolean): number | false {
-  if (state === 'building') return BUILD_POLL_MS;
+/* Poll cadence for a derived structure. While a build is running the interval SCALES with the build:
+   a 1.5 s poll is right for a 50 k-event graph and wrong for a 13.8 M-event one, where every poll lands
+   on a process that is packing the pool and swapping — the polls themselves were part of "the page
+   becomes unresponsive". Bounded at 8 s so progress still visibly moves. */
+function buildPoll(state: string | undefined, empty: boolean, target?: number): number | false {
+  if (state === 'building') {
+    const n = target ?? 0;
+    if (n > 5_000_000) return BUILD_POLL_MS * 5;
+    if (n > 1_000_000) return BUILD_POLL_MS * 3;
+    if (n > 200_000) return BUILD_POLL_MS * 2;
+    return BUILD_POLL_MS;
+  }
   if (state !== 'ready' && empty) return BUILD_POLL_MS * 4;
   return false;
 }
@@ -88,7 +98,8 @@ export function useGraph(gq: GraphQuery = {}, enabled = true) {
     queryFn: () => api.graph(gq),
     enabled,
     placeholderData: (p) => p,
-    refetchInterval: (q) => buildPoll(q.state.data?.stats?.status?.state, !q.state.data?.nodes?.length),
+    refetchInterval: (q) => buildPoll(q.state.data?.stats?.status?.state, !q.state.data?.nodes?.length,
+                                      q.state.data?.stats?.status?.target),
   });
 }
 

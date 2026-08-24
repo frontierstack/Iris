@@ -822,28 +822,24 @@ class GraphBuilder:
     def __init__(self, events: list[Event], progress: Optional[Callable[[int], None]] = None,
                  parallel: Optional[bool] = None,
                  cancelled: Optional[Callable[[], bool]] = None,
-                 preloaded: Optional[tuple[dict, dict]] = None) -> None:
+                 preloaded: Optional[tuple[dict, dict]] = None,
+                 groups: Optional[list] = None, sigs: Optional[dict] = None,
+                 index: Optional[dict] = None, cache: Any = None) -> None:
+        """`groups`/`sigs`/`index`/`cache` are the per-source extraction inputs (see graph_parts): the
+        store passes them so unchanged sources come from the partial cache. Absent, they are derived
+        from `events` — a from-scratch build, still per source, still the same fold."""
         self.events = events
-        # `preloaded` = (nodes, edges) restored by graph_store for THIS pool: skip the extraction and go
-        # straight to the derived structures. See graph_store.py for why that is exact.
         self._preloaded = preloaded
-        # `parallel=None` means "decide from the pool size and IRIS_GRAPH_WORKERS"; False pins the
-        # in-process path (every test that compares the two, and IRIS_GRAPH_WORKERS=1).
         self._parallel = parallel
         self._cancelled = cancelled
-        self._used_parallel = False     # what actually happened, for the tests and the timing log
+        self._groups, self._sigs, self._index, self._cache = groups, sigs, index, cache
+        self._used_parallel = False
+        self.build_note = ""
         self.nodes: dict[str, _NodeAgg] = {}
         self.edges: dict[tuple[str, str, str], _EdgeAgg] = {}
-        # `adj` used to be maintained inside the event loop — two set inserts per RELATION OCCURRENCE, i.e.
-        # ~6 M relation hits and 12 M set operations at 1.2 M events, all of them redundant: the neighbour
-        # sets are a function of the DEDUPLICATED edge keys alone (~500 k). It is now derived once, lazily,
-        # and only focus/hops and path finding ever ask for it. `degree` comes from `_degrees()` instead,
-        # which is integer array work and runs on the GPU when there is one.
         self._adj: Optional[dict[str, set[str]]] = None
         self._deg: dict[str, int] = {}
         self._progress = progress
-        # Derived once, lazily, and reused by every request served from this cached builder: ranking every
-        # node and walking every edge PER REQUEST is its own O(graph) cost on top of the build.
         self._ranked: Optional[list[str]] = None
         self._by_node: Optional[dict[str, list[tuple[str, str, str]]]] = None
         self._build()
@@ -853,42 +849,22 @@ class GraphBuilder:
         if self._preloaded is not None:
             self.nodes, self.edges = self._preloaded
             self._preloaded = None
-        elif not self._extract_parallel():
-            aggregate(self.events, self.nodes, self.edges, 0, prog, self._cancelled)
-        # Both of these are O(the graph) and belong to THIS thread — the background build — not to the
-        # first request that happens to arrive once the build is done.
+        elif self.events:
+            from . import graph_parts
+            # ONE implementation of the build, per source, in-process or across workers. `parallel`
+            # is honoured as a ceiling: False pins it in-process (tests compare the two).
+            mw = 1 if self._parallel is False else None
+            self.build_note = graph_parts.build(self.events, self.nodes, self.edges,
+                                                groups=self._groups, sigs=self._sigs, index=self._index,
+                                                cache=self._cache, progress=prog,
+                                                cancelled=self._cancelled, max_workers=mw)
+            self._used_parallel = "in-process" not in self.build_note
         if prog is not None:
             prog(len(self.events))
         self._deg = self._degrees()
         self.ranked_ids()
         self.edges_of("")
 
-    def _extract_parallel(self) -> bool:
-        """Try the multi-process extraction. False means "nothing happened, do it in-process".
-
-        EVERY failure mode of the parallel path — no subprocesses allowed, a worker that died, a
-        timeout, an import error inside `graph_parallel`, a pool that will not spawn — has to land
-        here as a plain False, because the only correct answer to "the workers did not work" is the
-        serial build. `self.nodes` / `self.edges` are untouched unless the parallel run completed.
-        """
-        if self._parallel is False:
-            return False
-        try:
-            from . import graph_parallel
-        except Exception:                       # import-guarded like every optional accelerator here
-            return False
-        if self._parallel is None and not graph_parallel.should_parallelise(len(self.events)):
-            return False
-        self._used_parallel = graph_parallel.build(self.events, self.nodes, self.edges,
-                                                   progress=self._progress, cancelled=self._cancelled)
-        return self._used_parallel
-
-    # -------------------------------------------------------------- vectorised graph-level passes
-    # Everything below operates on the AGGREGATED graph (nodes and deduplicated edges), never on events —
-    # which is exactly why it vectorises: it is integer work over two arrays of node indices. It runs
-    # through `compute.xp()`, so it is cupy on an active CUDA device and numpy everywhere else, and the
-    # two must agree exactly (tests/test_graph_gpu_equivalence.py). Regex extraction over Python strings
-    # is ~75 % of the build and does NOT move to a GPU; see the module docstring of that test.
     def _edge_endpoint_arrays(self) -> tuple[list[str], Any, Any]:
         """(node ids in insertion order, source index array, target index array) over distinct edges."""
         node_ids = list(self.nodes)

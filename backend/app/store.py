@@ -1090,6 +1090,35 @@ class Store:
         with open(path, "rb") as fh:
             return fh.read(limit)
 
+    def _memory_skip_detail(self, size: int) -> str:
+        """Why this file will not fit, and what would actually make room.
+
+        "Free memory (or close other work)" was the old advice and it is unactionable here, because on
+        a machine running nothing else the thing holding the memory IS the pool: 13.8 M interpreted
+        events, 22.5 GiB, 190 MB left. An analyst reading that goes looking for another application to
+        close and finds none.
+
+        So name the pool's own share and the lever that moves it. INTERPRETING a source is what costs
+        the memory — a raw line is roughly 3-4 bytes of RAM per byte of log, a parsed many-column row
+        is 9-13 — so leaving a big export raw, or skipping one, frees several times its size. That is a
+        decision only the analyst can make (it decides what the timeline, the graph and the field rules
+        can see), which is exactly why it belongs in the message rather than in a policy.
+        """
+        ratio = self.pool_bytes_per_source_byte()[0]
+        need_mb = int(size * ratio) // (1 << 20)
+        free_mb = int(pool_headroom_bytes() * ratio) // (1 << 20)
+        with self.lock:
+            pool_events = len(self.events)
+            interpreted = sum(1 for s in self.sources.values() if s.enrich == "enriched")
+        held = ""
+        if pool_events:
+            held = (f" The pool itself is what is holding it: {pool_events:,} events from "
+                    f"{interpreted} interpreted source{'' if interpreted == 1 else 's'}.")
+        return (f"needs about {need_mb} MB of memory and this machine has {free_mb} MB free — its "
+                f"events are NOT searchable.{held} Interpreting a source is what costs the memory, so "
+                f"leaving a large one raw (or deleting one you are done with) frees several times its "
+                f"size; more RAM for the machine is the other way. Then load it from Sources.")
+
     def _room_for(self, source_bytes: int) -> bool:
         """Is there live memory for a source of this size? Never blocks a small file.
 
@@ -1194,13 +1223,7 @@ class Store:
                 # offers "load it anyway" is the honest form of the same limit.
                 size = self._library_size(name)
                 if not self._room_for(size):
-                    need = int(size * self.pool_bytes_per_source_byte()[0])
-                    self.note_pool_skip(
-                        name, display, size, "memory",
-                        f"needs about {need // (1 << 20)} MB of memory and this machine has "
-                        f"{pool_headroom_bytes() * self.pool_bytes_per_source_byte()[0] // (1 << 20)} MB "
-                        f"free — its events are NOT searchable. Free memory (or close other work) and "
-                        f"load it from Sources.")
+                    self.note_pool_skip(name, display, size, "memory", self._memory_skip_detail(size))
                     with self.lock:
                         self.pool_pending = max(0, self.pool_pending - 1)
                         self._plan_state(name, "skipped", size=size)
@@ -2667,6 +2690,12 @@ class Store:
             self.source_parse_errors.pop(sid, None)
             self.source_member.pop(sid, None)
             path = self.source_paths.pop(sid, None)
+        try:
+            from .graph_store import PARTS
+            PARTS.prune(set(self.sources))
+        except Exception:  # noqa: BLE001 — a cache tidy must never fail a delete
+            pass
+        with self.lock:
             # members of one expanded container share a file on disk — never unlink it while a sibling
             # source still reads from it
             if path is not None and any(p == path for p in self.source_paths.values()):
@@ -2883,11 +2912,50 @@ class Store:
         # restart instead of after a 60-190 s extraction.
         sig = graph_store.signature(self, scope)
         pre = graph_store.load(self, scope, sig)
+        groups = sigs = index = cache = None
+        if pre is None and events:
+            # Per-source extraction with a per-source partial cache (graph_parts): a rebuild costs the
+            # sources that CHANGED. Scope 'all' is the pool, whose ids `event_index` already maps;
+            # scope 'case' is a subset with its own positions, and small — no cache for it.
+            groups, sigs = self._graph_groups(events)
+            if scope == "all":
+                with self.lock:
+                    index = self.event_index
+                cache = graph_store.PARTS
+            else:
+                index = {e.id: i for i, e in enumerate(events)}
         gb = GraphBuilder(events, progress=lambda i: GRAPH_CACHE.tick(scope, i), cancelled=cancelled,
-                          preloaded=pre)
+                          preloaded=pre, groups=groups, sigs=sigs, index=index, cache=cache)
+        if gb.build_note:
+            print(f"[iris] graph: {gb.build_note}", flush=True)
         if pre is None and events:
             graph_store.save(self, scope, gb, sig)
         return gb
+
+    def _graph_groups(self, events: list) -> tuple[list, dict]:
+        """([(sourceId, pool positions)] in source order, {sourceId: content signature}).
+
+        The positions come from ONE numpy pass over a per-event source code, not a Python list per
+        source. The signature is what makes a cached partial safe to reuse: file, event count, time
+        range and phase-2 state — a re-parse, an enrichment or a remap changes at least one of them.
+        """
+        from .graph_store import GRAPH_FORMAT
+        with self.lock:
+            order = [sid for sid in self.source_order if sid in self.sources]
+            meta = {sid: (self.sources[sid].file, self.sources[sid].events,
+                          self.sources[sid].range, self.sources[sid].enrich) for sid in order}
+        code = {sid: k for k, sid in enumerate(order)}
+        arr = np.fromiter((code.get(e.sourceId, -1) for e in events), dtype=np.int32, count=len(events))
+        groups = []
+        for sid in order:
+            idx = np.flatnonzero(arr == code[sid])
+            if len(idx):
+                groups.append((sid, idx))
+        stray = np.flatnonzero(arr < 0)
+        if len(stray):
+            groups.append(("", stray))   # events of a source that is gone: extracted, never cached
+        sigs = {sid: f"{GRAPH_FORMAT}|{m[0]}|{m[1]}|{m[2]}|{m[3]}" for sid, m in meta.items()}
+        return groups, sigs
 
     def analysis(self, scope: str = "all") -> dict[str, Any]:
         """Cached correlation output (clusters, entities, edges, correlations), BUILDING IF NEEDED.

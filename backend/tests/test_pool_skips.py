@@ -283,3 +283,26 @@ def test_every_skip_reason_survives_the_round_trip(c) -> None:
     finally:
         for i in range(len(reasons)):
             STORE.clear_pool_skip(f"x_{i}.log")
+
+
+def test_a_memory_refusal_names_the_pool_as_the_thing_holding_the_memory() -> None:
+    """"Free memory (or close other work)" is unactionable on a machine running nothing else: the
+    thing holding the memory IS the pool. The message has to say so and name the lever."""
+    from app.models import Event, Source as Src
+
+    st = store_mod.Store()
+    st.events = [Event(id=f"e{i}", raw="x" * 120) for i in range(1000)]
+    st.sources["a"] = Src(id="a", file="big.csv", parser="csv", state="READY", size=5000,
+                          events=1000, enrich="enriched")
+    msg = st._memory_skip_detail(2_000_000_000)
+    assert "NOT searchable" in msg
+    assert "1,000 events" in msg and "1 interpreted source" in msg
+    assert "leaving a large one raw" in msg
+    assert "close other work" not in msg, "the old unactionable advice is back"
+
+
+def test_the_memory_detail_survives_an_empty_pool() -> None:
+    """No pool, no "the pool is holding it" clause — and no crash on the way to saying so."""
+    st = store_mod.Store()
+    msg = st._memory_skip_detail(1_000_000)
+    assert "NOT searchable" in msg and "holding it" not in msg

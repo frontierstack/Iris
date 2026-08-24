@@ -665,6 +665,13 @@ export function GraphScreen() {
   }, [srcSel, poolSources]);
   const stats = g.data?.stats;
   const buildingGraph = stats?.status?.state === 'building';
+  // While the server is building, the canvas is showing the PREVIOUS graph under an overlay — and the
+  // force simulation was still ticking it at 60 fps, on the same tab that is polling a server busy
+  // packing millions of events. Stop the layout for the duration; it reheats when the new graph lands.
+  useEffect(() => {
+    if (buildingGraph) sim.sim.stop();
+    else if (sim.nodes.length) sim.sim.restart();
+  }, [sim, buildingGraph]);
 
   /* ── render ──
      Nothing about the graph itself is in this tree any more: the <canvas> is painted imperatively by

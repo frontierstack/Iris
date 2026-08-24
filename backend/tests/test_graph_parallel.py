@@ -24,6 +24,7 @@ import time
 import pytest
 
 from app import graph, graph_parallel
+from app import graph_parts
 from app.derived import AsyncCache
 from app.models import Detection, Event
 
@@ -135,7 +136,10 @@ def assert_same_graph(a: graph.GraphBuilder, b: graph.GraphBuilder) -> None:
 def small_chunks(monkeypatch):
     monkeypatch.setenv("IRIS_GRAPH_CHUNK", str(CHUNK))
     monkeypatch.setenv("IRIS_GRAPH_PARALLEL_MIN", "0")
-    graph_parallel._reported.clear()
+    # workers are sized from FREE MEMORY now; on a loaded host that is legitimately zero, and these
+    # tests are about the multi-process path, so pin a count
+    monkeypatch.setenv("IRIS_GRAPH_WORKERS", "3")
+    graph_parts._reported.clear()
 
 
 # --------------------------------------------------------------------------- tests
@@ -176,7 +180,7 @@ def test_pool_failure_falls_back_to_serial(small_chunks, monkeypatch, capsys):
     def boom(*a, **k):
         raise OSError("subprocesses are not permitted here")
 
-    monkeypatch.setattr(graph_parallel, "ProcessPoolExecutor", boom)
+    monkeypatch.setattr(graph_parts, "ProcessPoolExecutor", boom)
     evs = make_corpus(1200, seed=5)
     par = graph.GraphBuilder(evs, parallel=True)
     assert par._used_parallel is False
@@ -198,7 +202,7 @@ def test_worker_death_falls_back_to_serial(small_chunks, monkeypatch):
         def submit(self, *a, **k): return DeadFuture()
         def shutdown(self, *a, **k): pass
 
-    monkeypatch.setattr(graph_parallel, "ProcessPoolExecutor", DeadPool)
+    monkeypatch.setattr(graph_parts, "ProcessPoolExecutor", DeadPool)
     evs = make_corpus(1200, seed=6)
     par = graph.GraphBuilder(evs, parallel=True)
     assert par._used_parallel is False
@@ -218,7 +222,7 @@ def test_chunk_timeout_falls_back_to_serial(small_chunks, monkeypatch):
         def submit(self, *a, **k): return StuckFuture()
         def shutdown(self, *a, **k): pass
 
-    monkeypatch.setattr(graph_parallel, "ProcessPoolExecutor", StuckPool)
+    monkeypatch.setattr(graph_parts, "ProcessPoolExecutor", StuckPool)
     evs = make_corpus(1200, seed=7)
     par = graph.GraphBuilder(evs, parallel=True)
     assert par._used_parallel is False
@@ -276,9 +280,13 @@ def test_build_from_a_background_thread_completes(small_chunks):
     assert cache._inflight == {}
 
 
-def test_a_failed_run_leaves_the_callers_dicts_untouched(small_chunks, monkeypatch):
-    """`build()` must not half-write `nodes`/`edges`: whatever went wrong, the serial path that runs
-    next has to start from a clean slate or the graph would double-count."""
+def test_a_failed_run_leaves_the_callers_dicts_untouched(small_chunks, monkeypatch, capsys):
+    """A worker dying mid-source must never leave a half-merged graph. The per-source design makes
+    that structural — nothing reaches `nodes`/`edges` until the final fold — and the failed source is
+    re-extracted in-process, so the caller ends up with the SAME graph the in-process build produces,
+    not half of one, and not a doubled one."""
+    calls = {"n": 0}
+
     class Done:
         def __init__(self, v): self.v = v
         def cancel(self): return False
@@ -289,18 +297,23 @@ def test_a_failed_run_leaves_the_callers_dicts_untouched(small_chunks, monkeypat
         def result(self, timeout=None): raise MemoryError("worker ran out of memory")
 
     class HalfPool:
-        """First chunk succeeds, the next one dies — the case where a naive merge would leave the
-        caller holding half a graph and the serial rebuild would then double every count."""
+        """First chunk succeeds, the next one dies."""
         def __init__(self, *a, **k): pass
-        def submit(self, fn, rows, base): return Done(fn(rows, base)) if base == 0 else Boom()
+        def submit(self, fn, rows):
+            calls["n"] += 1
+            return Done(fn(rows)) if calls["n"] == 1 else Boom()
         def shutdown(self, *a, **k): pass
 
-    monkeypatch.setattr(graph_parallel, "ProcessPoolExecutor", HalfPool)
+    monkeypatch.setattr(graph_parts, "ProcessPoolExecutor", HalfPool)
+    evs = make_corpus(1200, seed=4)
     nodes: dict = {}
     edges: dict = {}
-    assert graph_parallel.build(make_corpus(1200, seed=4), nodes, edges) is False
-    assert nodes == {} and edges == {}
-
+    note = graph_parallel.build(evs, nodes, edges)
+    assert isinstance(note, str) and "in-process" in note
+    assert "parallel extraction unavailable" in capsys.readouterr().err
+    ref = graph.GraphBuilder(evs, parallel=False)
+    assert {k: n.count for k, n in nodes.items()} == {k: n.count for k, n in ref.nodes.items()}
+    assert {k: e.count for k, e in edges.items()} == {k: e.count for k, e in ref.edges.items()}
 
 def test_the_row_shim_covers_every_event_attribute_extraction_reads():
     """The workers do not get `Event`s — they get `graph_parallel._Row`, rebuilt from the packed
