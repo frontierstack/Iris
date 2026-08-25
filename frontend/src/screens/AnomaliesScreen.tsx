@@ -113,7 +113,7 @@ function AnomaliesSection() {
   // statement about the evidence, so the build state replaces the table until it lands.
   const building = q.data?.status?.state === 'building' && list.length === 0;
   return (
-    <section>
+    <section className={cx('sec-card', secOpen && 'sec-card--open')}>
       <SectionHead
         eyebrow="01 · Anomalies"
         open={secOpen} onToggle={toggleSec}
@@ -121,7 +121,7 @@ function AnomaliesSection() {
         hint={building ? 'aggregating rule hits across the pool…'
           : q.data ? `${fmtInt(q.data.total)} rule${q.data.total === 1 ? '' : 's'} fired` : 'sorted by severity, then hits'}
       />
-      {secOpen && (<>
+      {secOpen && (<div className="sec-card__body">
       {/* Rules are evaluated against interpreted events. Until a source is enriched it has no parsed
           fields, no severity and no timestamp, so no rule has been given the chance to fire on it —
           and "no rule has fired" would be a false statement about that evidence. */}
@@ -173,7 +173,7 @@ function AnomaliesSection() {
           {list.map((a) => <AnomalyRow key={a.ruleId} a={a} open={open === a.ruleId} onToggle={() => setOpen((o) => (o === a.ruleId ? null : a.ruleId))} />)}
         </div>
       )}
-      </>)}
+      </div>)}
     </section>
   );
 }
@@ -1008,7 +1008,7 @@ function RulesSection() {
   const nRemoved = rules.data?.filter((r) => r.removed).length ?? 0;
 
   return (
-    <section>
+    <section className={cx('sec-card', secOpen && 'sec-card--open')}>
       <SectionHead
         eyebrow="03 · Rules"
         open={secOpen} onToggle={toggleSec}
@@ -1032,7 +1032,7 @@ function RulesSection() {
           </>
         }
       />
-      {secOpen && (<>
+      {secOpen && (<div className="sec-card__body">
       <div className="anom__toolbar">
         <div className="chip-row">
           <span className="chip-row__label">Show</span>
@@ -1164,7 +1164,7 @@ function RulesSection() {
         onConfirm={() => clearAll.mutate('all')}
         onCancel={() => setClearing(false)}
       />
-      </>)}
+      </div>)}
     </section>
   );
 }
@@ -1221,7 +1221,7 @@ function GraphFindingsSection() {
   }, [q.data]);
 
   return (
-    <section>
+    <section className={cx('sec-card', secOpen && 'sec-card--open')}>
       <SectionHead
         eyebrow="02 · Entity graph"
         open={secOpen} onToggle={toggleSec}
@@ -1234,7 +1234,7 @@ function GraphFindingsSection() {
           </>
         }
       />
-      {secOpen && (<>
+      {secOpen && (<div className="sec-card__body">
       {q.isError && <ErrorState error={q.error} onRetry={() => void q.refetch()} />}
       {q.isLoading && <SkeletonRows n={3} />}
       {/* NOT built is not the same as nothing found, and the screen must never render the first as the
@@ -1278,7 +1278,7 @@ function GraphFindingsSection() {
           </div>
         </>
       )}
-      </>)}
+      </div>)}
     </section>
   );
 }
@@ -1445,7 +1445,7 @@ function ExclusionsSection() {
   const offered = suggestions.filter((s) => !have.has(s.name.toLowerCase()));
 
   return (
-    <section>
+    <section className={cx('sec-card', secOpen && 'sec-card--open')}>
       <SectionHead
         eyebrow="04 · Exclusions"
         open={secOpen} onToggle={toggleSec}
@@ -1473,7 +1473,7 @@ function ExclusionsSection() {
           </>
         }
       />
-      {secOpen && (<>
+      {secOpen && (<div className="sec-card__body">
       {q.isLoading && <SkeletonRows n={2} />}
       {q.isError && <ErrorState error={q.error} onRetry={() => void q.refetch()} />}
 
@@ -1548,7 +1548,7 @@ function ExclusionsSection() {
         </div>
       )}
       <ExclusionEditor open={editing.open} current={editing.current} onClose={() => setEditing({ open: false, current: null })} />
-      </>)}
+      </div>)}
     </section>
   );
 }

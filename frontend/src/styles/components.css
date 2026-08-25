@@ -2015,10 +2015,60 @@
 .fontpick__name { font-size: var(--fs-sm); color: var(--text); min-width: 0; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
 
-/* collapsible section heads (Anomalies): the title is the toggle, the hint stays as the summary */
-.sec__toggle { background: none; border: 0; padding: 0; margin: 0; text-align: left; color: inherit; font: inherit; cursor: pointer; border-radius: var(--radius-sm); }
-.sec__toggle:hover .sec__title { color: var(--accent); }
-.sec__toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
-.sec__chev { display: inline-block; width: 0.55em; height: 0.55em; margin-right: 10px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: translateY(-0.15em) rotate(-45deg); transition: transform 120ms; opacity: 0.7; }
-.sec__chev.open { transform: translateY(-0.3em) rotate(45deg); }
-.sec--closed { margin-bottom: 0; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+/* ───────── Collapsible section CARDS (Anomalies) ─────────
+   Each section is one bordered card. Closed, the card is its head alone: eyebrow, title and a
+   one-line summary carrying the counts, with a labelled Expand control on the right — four of them
+   stack into an overview of the page. Open, the head gets a divider and the body sits inside the
+   same border, so what belongs to a section is never in doubt. No caret: it read as a tree view. */
+.sec-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  overflow: clip;
+}
+.sec-card + .sec-card { margin-top: 14px; }
+.sec-card > .sec--card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: 0;
+  padding: 14px 18px;
+  background: var(--surface-1);
+}
+.sec-card > .sec--open { border-bottom: 1px solid var(--border); }
+.sec-card > .sec--closed:hover { background: var(--surface-2); }
+.sec-card__body { padding: 16px 18px 18px; }
+.sec--card .sec__toggle {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: block;
+  background: none; border: 0; padding: 0; margin: 0;
+  text-align: left; color: inherit; font: inherit; cursor: pointer;
+}
+.sec--card .sec__toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 6px; border-radius: var(--radius-sm); }
+.sec--card .sec__title { font-size: var(--fs-2xl); }
+.sec--card .sec__toggle:hover .sec__title { color: var(--accent); }
+.sec__summary {
+  margin-top: 4px;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  line-height: 1.45;
+  max-width: 72ch;
+}
+.sec__right { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+.sec__right .sec__actions { margin-left: 0; }
+.sec__state {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.sec__state svg { width: 12px; height: 12px; }
+.sec-card > .sec--card:hover .sec__state { border-color: var(--accent-border); color: var(--text-bright); }

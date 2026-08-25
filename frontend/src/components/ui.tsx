@@ -1,6 +1,7 @@
 import { useEffect, type ReactNode } from 'react';
 import type { DerivedState, Severity } from '../api/types';
 import { cx, sevVar } from '../utils/format';
+import { Icon } from './icons';
 import { useToast } from '../hooks/useToast';
 
 /* ───── Severity ───── */
@@ -222,22 +223,34 @@ export function SectionHead({ eyebrow, title, hint, actions, id, open, onToggle 
   open?: boolean; onToggle?: () => void;
 }) {
   const collapsible = typeof onToggle === 'function';
-  const head = (
-    <>
-      {eyebrow && <div className="sec__eyebrow">{eyebrow}</div>}
-      <div className="sec__title">
-        {collapsible && <span className={cx('sec__chev', open && 'open')} aria-hidden="true" />}
-        {title}
+  if (!collapsible) {
+    return (
+      <div className="sec" id={id}>
+        <div>
+          {eyebrow && <div className="sec__eyebrow">{eyebrow}</div>}
+          <div className="sec__title">{title}</div>
+        </div>
+        {hint && <div className="sec__hint">{hint}</div>}
+        {actions && <div className="sec__actions">{actions}</div>}
       </div>
-    </>
-  );
+    );
+  }
+  // A CARD head. The whole left block (eyebrow, title, summary) is the toggle, and the state is a
+  // labelled control on the right — "Expand" / "Collapse" with a plus/minus — rather than a caret,
+  // which read as a tree-view affordance and was asked to go.
   return (
-    <div className={cx('sec', collapsible && 'sec--collapsible', collapsible && !open && 'sec--closed')} id={id}>
-      {collapsible
-        ? <button type="button" className="sec__toggle" aria-expanded={!!open} onClick={onToggle}>{head}</button>
-        : <div>{head}</div>}
-      {hint && <div className="sec__hint">{hint}</div>}
-      {actions && (!collapsible || open) && <div className="sec__actions">{actions}</div>}
+    <div className={cx('sec', 'sec--card', open ? 'sec--open' : 'sec--closed')} id={id}>
+      <button type="button" className="sec__toggle" aria-expanded={!!open} onClick={onToggle}>
+        {eyebrow && <div className="sec__eyebrow">{eyebrow}</div>}
+        <div className="sec__title">{title}</div>
+        {hint && <div className="sec__summary">{hint}</div>}
+      </button>
+      <div className="sec__right">
+        {open && actions && <div className="sec__actions">{actions}</div>}
+        <button type="button" className="sec__state" aria-hidden="true" tabIndex={-1} onClick={onToggle}>
+          {open ? <><Icon.Minus /> Collapse</> : <><Icon.Plus /> Expand</>}
+        </button>
+      </div>
     </div>
   );
 }

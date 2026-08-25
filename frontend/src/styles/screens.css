@@ -1803,7 +1803,7 @@
 
 /* ═══════ ANOMALIES & RULES ═══════ */
 .anomalies > section + section {
-  margin-top: 34px;
+  margin-top: 14px;
 }
 .anom-grid {
   grid-template-columns:
