@@ -1534,11 +1534,18 @@ def _list_notes(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
 def _get_case_state(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
     store = _store()
     c = store.case()
-    return {"hasCase": not c.pending, "caseId": c.id, "name": c.name, "summary": getattr(store, "summary", ""),
-            "analyst": c.analyst, "poolEventCount": c.poolEventCount, "caseEventCount": c.eventCount,
-            "caseSetSize": len(c.caseSet), "labels": store.case_labels(), "notes": len(c.notes),
-            "sources": len(c.sources), "librarySources": len(c.librarySources),
-            "poolLoading": c.poolLoading}
+    out = {"hasCase": not c.pending, "caseId": c.id, "name": c.name, "summary": getattr(store, "summary", ""),
+           "analyst": c.analyst, "poolEventCount": c.poolEventCount, "caseEventCount": c.eventCount,
+           "caseSetSize": len(c.caseSet), "labels": store.case_labels(), "notes": len(c.notes),
+           "sources": len(c.sources), "librarySources": len(c.librarySources),
+           "poolLoading": c.poolLoading}
+    if c.pending:
+        # The analyst's rule: a case-less workspace is not a reason to leave findings in the chat.
+        out["note"] = ("no case exists — the workspace is case-less. Search, counts and the graph work "
+                       "without one, but every write (events, timeline, indicators, notes, links) needs a "
+                       "case. If this objective is an investigation, call create_case NOW (name it for the "
+                       "objective) before your first finding, then record as you go.")
+    return out
 
 
 # ================================================================= WRITE tools

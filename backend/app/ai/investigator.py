@@ -80,8 +80,8 @@ from .argrepair import repair_arguments
 from .client import (AIError, BadToolArguments, ContextTooLong, LLMClient, ProviderUnavailable,
                      absorb_text_calls, has_tool_call_syntax, parse_text_tool_calls)
 from .history import HISTORY
-from .prompts import (ARG_TOO_BIG, BUDGET_NOTICE, CHECK_IN, DOCUMENT_CHECK, INVESTIGATOR_SYSTEM, RECORD_NUDGE,
-                      SUMMARY_CHECK, WRAP_UP, investigator_user_prompt)
+from .prompts import (ARG_TOO_BIG, BUDGET_NOTICE, CHECK_IN, DOCUMENT_CHECK, INVESTIGATOR_SYSTEM, NO_CASE_LINE,
+                      RECORD_NUDGE, SUMMARY_CHECK, WRAP_UP, investigator_user_prompt)
 from .tools import (REGISTRY, RunContext, ToolError, tool_budget_seconds, tool_schemas,
                     unverified_citations)
 
@@ -292,7 +292,8 @@ def build_context(store: Any) -> str:
     try:
         c = store.case()
         if c.pending:
-            lines.append("No case exists yet (the workspace is case-less; analysis still works).")
+            lines.append("No case exists yet (the workspace is case-less; analysis still works). If this "
+                         "objective is an investigation, create_case FIRST and record findings into it.")
         else:
             lines.append(f"Active case {c.id} '{c.name}' — {len(c.caseSet)} events curated into the case set, "
                          f"{len(c.notes)} note(s).")
@@ -611,6 +612,17 @@ def _case_open(store: Any) -> bool:
         return False
 
 
+def _case_line(store: Any) -> str:
+    """The extra sentence a write-up nudge carries when there is no case: create one, then record.
+
+    The nudges used to be SKIPPED in a case-less workspace ("every case-scoped write refuses while
+    pending, so asking would only waste a turn"). The analyst's rule is the opposite: *"no case — the
+    workspace is case-less — it should then create the case."* The model can create one itself
+    (`create_case` is a tool), so a missing case is an instruction, not an exemption.
+    """
+    return "" if _case_open(store) else NO_CASE_LINE
+
+
 async def investigate(store: Any, objective: str, run_id: str,
                       max_steps: Optional[int] = None, max_seconds: Optional[int] = None,
                       client: Optional[LLMClient] = None, focus: str = "",
@@ -779,11 +791,12 @@ async def investigate(store: Any, objective: str, run_id: str,
             # Asked between steps, never as a request to finish: the copy says to record what is solid
             # and carry on. Only with a case to write into, and at most MAX_RECORD_NUDGES times.
             elif (record_nudges < MAX_RECORD_NUDGES and productive_since_write >= RECORD_EVERY
-                  and tool_calls >= RECORD_MIN_CALLS and _case_open(store)):
+                  and tool_calls >= RECORD_MIN_CALLS):
                 record_nudges += 1
                 calls_since = productive_since_write
                 productive_since_write = 0
-                messages.append({"role": "user", "content": RECORD_NUDGE.format(calls=calls_since)})
+                messages.append({"role": "user", "content": RECORD_NUDGE.format(calls=calls_since,
+                                                                                 case=_case_line(store))})
                 note = (f"{calls_since} tool calls returned evidence and none of it is recorded in the "
                         f"case yet — asked the assistant to write down what is solid before continuing")
                 HISTORY.append(run_id, {"kind": "status", "text": note})
@@ -924,7 +937,7 @@ async def investigate(store: Any, objective: str, run_id: str,
                 # than filing nothing. Only when there IS a case (writes refuse while pending) and the
                 # run did real work (DOCUMENT_MIN_CALLS).
                 if (not documented and ctx.writes == 0 and tool_calls >= DOCUMENT_MIN_CALLS
-                        and _case_open(store) and not runs.stop_requested(run_id)
+                        and not runs.stop_requested(run_id)
                         and elapsed() < lim["maxSeconds"] and step < lim["maxSteps"]
                         # ...and only if there is room to pay for the turn. A run at its context
                         # ceiling that is handed one more user message compacts or stops on the
@@ -933,8 +946,9 @@ async def investigate(store: Any, objective: str, run_id: str,
                         # worse trade than finishing with an unwritten case.
                         and _est_tokens(messages) < ceiling):
                     documented = True
-                    messages.append({"role": "user", "content": DOCUMENT_CHECK})
-                    note = "nothing recorded in the case yet — asking the assistant to write up what it found"
+                    messages.append({"role": "user", "content": DOCUMENT_CHECK.format(case=_case_line(store))})
+                    note = ("nothing recorded in the case yet — asking the assistant to write up what it found"
+                            + ("" if _case_open(store) else " (and to create the case first)"))
                     HISTORY.append(run_id, {"kind": "status", "text": note})
                     yield {"type": "status", "text": note, "documentCheck": True}
                     continue
@@ -943,7 +957,7 @@ async def investigate(store: Any, objective: str, run_id: str,
                 # summary note (and the case summary) before the report. Skipped when a note already
                 # exists, because that is what "an equivalent summary" looks like on the case.
                 if (not summarised and ctx.writes > 0 and tool_calls >= DOCUMENT_MIN_CALLS
-                        and _case_open(store) and not _has_summary(ctx.actions)
+                        and not _has_summary(ctx.actions)
                         and not runs.stop_requested(run_id)
                         and elapsed() < lim["maxSeconds"] and step < lim["maxSteps"]
                         and _est_tokens(messages) < ceiling):

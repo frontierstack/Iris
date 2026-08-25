@@ -335,16 +335,21 @@ def test_the_write_up_is_offered_only_once(client):
     assert evs[-1]["type"] == "done" and evs[-1]["reason"] == "complete"
 
 
-def test_nothing_is_asked_when_there_is_no_case_to_write_into(client, monkeypatch):
-    """Every case-scoped write refuses while the store is pending, so asking would only waste a turn."""
+def test_with_no_case_the_write_up_says_to_create_one(client, monkeypatch):
+    """The analyst's rule: "no case — the workspace is case-less — it should then create the case."
+    The nudge used to be skipped while pending; now it fires and tells the model to create_case first."""
     monkeypatch.setattr(STORE, "pending", True, raising=False)
-    evs, _f, _rid = drive("investigate", [
+    evs, fake, _rid = drive("investigate", [
         {"calls": [("count_events", {"query": "a"})]},
         {"calls": [("count_events", {"query": "b"})]},
         {"calls": [("count_events", {"query": "c"})]},
         {"text": "Findings."},
     ])
-    assert not any(s.get("documentCheck") for s in of(evs, "status"))
+    checks = [s for s in of(evs, "status") if s.get("documentCheck")]
+    assert len(checks) == 1 and "create the case" in checks[0]["text"]
+    nudge = next(str(m["content"]) for m in fake.seen[-1]["messages"]
+                 if m["role"] == "user" and "BEFORE YOU FINISH" in str(m["content"]))
+    assert "create_case" in nudge and "NO CASE" in nudge
 
 
 def test_the_opening_line_does_not_read_as_a_plan(client):

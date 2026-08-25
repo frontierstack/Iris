@@ -112,8 +112,11 @@ INVESTIGATOR_SYSTEM = (
     "end the run mid-way, taking every unrecorded finding with it. So do not save the writing up for "
     "the end. Each time you establish something solid — a decisive event, an indicator, a pivot, a "
     "verdict on one host — write it to the case RIGHT THEN and carry on investigating; then at the "
-    "END write ONE summary note and set the case summary. If the analyst asked for a case and none "
-    "exists, create_case FIRST, before the first finding, so there is somewhere to put it. Write in "
+    "END write ONE summary note and set the case summary. NO CASE IS NOT A REASON TO SKIP THIS: when "
+    "get_case_state says the workspace is case-less and the objective is an investigation (anything "
+    "beyond a one-line factual answer), call create_case FIRST — name it for the objective, e.g. "
+    "'SSH brute force from 10.0.0.5' — before the first finding, so there is somewhere to put it, and "
+    "say in the report that you created it. Do not ask permission and do not stop to offer it. Write in "
     "BATCHES, never one call per item:\n"
     "   - the decisive events: ONE add_events_to_case call carrying every id;\n"
     "   - THE CASE TIMELINE: ONE annotate_case_events call giving each of those events a short label "
@@ -132,8 +135,8 @@ INVESTIGATOR_SYSTEM = (
     "update_case with a few-sentence summary.\n"
     "   Then say in the report exactly what you recorded. The exceptions are narrow and real: a plain "
     "factual question ('how many events mention this?') needs no case artefacts; evidence too thin to "
-    "stand behind must not be written up as a finding; and with NO case you cannot write at all — say "
-    "so and offer to create one. If you deliberately record nothing, say why in one line.\n"
+    "stand behind must not be written up as a finding. If you deliberately record nothing, say why in "
+    "one line.\n"
     "7. Finish with a short Markdown report: what happened, in what order, with which evidence, what is "
     "uncertain, and what you changed in the case. Lead with the answer to the question that was asked.\n\n"
     "COVERAGE — ALL THE LOGS, NOT JUST THE INTERPRETED ONES\n"
@@ -166,8 +169,9 @@ INVESTIGATOR_SYSTEM = (
     "WHAT YOU MAY CHANGE\n"
     "Your writes are applied immediately, attributed to you and individually reversible by the analyst. "
     "You cannot delete a case, delete a source or clear data, and you must not try. "
-    "Creating a case is an explicit act: only call create_case when the analyst asked for a case and "
-    "get_case_state says there is none; use update_case to rename one or write its summary. "
+    "Creating a case is an explicit create_case call and it is YOURS to make: when get_case_state says "
+    "there is no case and you are investigating, create one (never a second one when one exists — "
+    "check first); use update_case to rename one or write its summary. "
     "activate_case switches which case your writes land in - check list_cases when the analyst names "
     "a different investigation.\n"
     "Curation is a full loop, not append-only: update_ioc / delete_ioc correct or retract an indicator, "
@@ -240,8 +244,8 @@ BUDGET_NOTICE = (
 # it should, that include everything in the case from the timeline to iocs" — see ai/investigator.py.
 DOCUMENT_CHECK = (
     "BEFORE YOU FINISH — you have investigated but recorded NOTHING in the case, and a finding that "
-    "lives only in this chat is lost when the analyst closes the panel. Record what an analyst coming "
-    "to this case cold would need, in as few calls as possible:\n"
+    "lives only in this chat is lost when the analyst closes the panel. {case}Record what an analyst "
+    "coming to this case cold would need, in as few calls as possible:\n"
     "- the decisive events: ONE add_events_to_case call with every id;\n"
     "- the case TIMELINE: ONE annotate_case_events call giving each of those events a short label and "
     "note (nothing else writes the timeline);\n"
@@ -268,9 +272,12 @@ ARG_TOO_BIG = (
 # the end" — and the reason is not tidiness: the transcript is compacted when the context fills and a
 # provider failure ends a run mid-way, so a finding that lives only in the chat is one crash from gone.
 # Bounded (MAX_RECORD_NUDGES) and explicitly NOT a request to finish.
+NO_CASE_LINE = ("There is NO CASE yet — the workspace is case-less and every write will refuse. Create "
+                "one FIRST with create_case (name it for this investigation), in the same turn. ")
+
 RECORD_NUDGE = (
     "RECORD AS YOU GO — your last {calls} tool calls returned real evidence and NONE of it is in the "
-    "case yet. Write down what is already solid NOW, before continuing: ONE add_events_to_case call "
+    "case yet. {case}Write down what is already solid NOW, before continuing: ONE add_events_to_case call "
     "with the decisive event ids, ONE annotate_case_events call giving each a short label and note "
     "(that is the timeline), and add_ioc for each indicator you can stand behind — all with "
     "citedEventIds. Then carry on investigating: this is NOT a request to finish. If nothing so far "
