@@ -1120,9 +1120,11 @@ interface AiRun { id:string; prompt:string; focus:string; model:string;
   transcript:AiTranscriptEntry[]; transcriptSeq:number; transcriptTruncated:boolean }
 type AiRunEvent =
   | { type:'run'; runId:string; model:string; threadId:string; parentId:string; maxSteps:number; maxSeconds:number; maxContextTokens:number; maxWrites:number; maxCompactions:number; maxToolSeconds:number }
-  /** checkIn = the "you have made N tool calls — can you answer yet?" nudge;
-      documentCheck = the "you recorded nothing in the case" one. Both are ordinary status lines. */
-  | { type:'status'; text:string; checkIn?:number; documentCheck?:boolean }
+  /** checkIn = the "your last N tool calls returned nothing new — another angle, or the report?" nudge
+      (it fires on a BARREN STREAK, never on the call count: a run still finding things is never
+      interrupted); budgetNotice = the "leave room to write it up" one; documentCheck = the "you
+      recorded nothing in the case" one. All three are ordinary status lines. */
+  | { type:'status'; text:string; checkIn?:number; budgetNotice?:boolean; documentCheck?:boolean }
   | { type:'step'; step:number; elapsedSec:number }
   | { type:'delta'; text:string; step:number }                       // the model's prose, streamed
   | { type:'tool_call'; id:string; name:string; arguments:object; step:number }

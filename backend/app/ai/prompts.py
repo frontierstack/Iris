@@ -200,14 +200,32 @@ INVESTIGATOR_SYSTEM = (
     "state anything a result did not return."
 )
 
-# Injected by the loop when a run has spent several tool calls without finishing. It is a nudge, not
-# an order: the point is to make "am I done?" a question the model actually asks itself, because left
-# alone it reads the step budget as a plan and keeps drilling long after the question was answered.
+# Injected by the loop ONLY when the last few calls each came back with nothing new — a repeat, a
+# refusal or an empty result (investigator._returned_something). It is a nudge, not an order, and it
+# is deliberately NOT "can you stop yet?": the earlier version fired on the call count alone and was
+# reported as pushing the model to "stop investigating too early when it probably should continue.
+# This gets in the way for a lot of log files that might need to be sifted through." So it asks for a
+# DIFFERENT ANGLE first and mentions the report second — continuing is a legitimate answer to it, and
+# the copy has to say so or the mere arrival of the message reads as an instruction to wrap up.
 CHECK_IN = (
-    "CHECK-IN — you have made {calls} tool calls. Can you answer the analyst's objective with what "
-    "you already have? If yes, stop calling tools and write the report now, naming what is still "
-    "uncertain instead of chasing it. Continue only if one specific question is unanswered AND you "
-    "know the single call that answers it. Your budget is a ceiling for runaway loops, not a target.")
+    "CHECK-IN — your last {streak} tool calls came back with nothing new (a repeat, a refusal, or an "
+    "empty result). That usually means the current line of enquiry is exhausted, not that the "
+    "objective is met. Choose one:\n"
+    "- a DIFFERENT angle: another source, another field, a wider window, a broader query, a source "
+    "you have not read yet — say which and take it;\n"
+    "- the report, if the objective is genuinely answered — name what is still uncertain rather than "
+    "chasing it.\n"
+    "Repeating a query you have already run is the one thing that will not help. There is no pressure "
+    "to finish: continuing is the right answer whenever evidence is still unread.")
+
+# Injected once, when a hard budget stop is close. Not about stopping early — about the report: the
+# failure it prevents is a run that spends its last steps on one more search and leaves the analyst
+# with nothing written down.
+BUDGET_NOTICE = (
+    "BUDGET — about {steps} steps ({seconds}s) remain before this run is stopped and the report is "
+    "written from whatever you have. Keep investigating if the evidence warrants it, but do not start "
+    "a line of enquiry you cannot finish, and make sure anything worth keeping is recorded in the case "
+    "before the run ends.")
 
 # Injected ONCE, when a run that did real investigative work is about to finish having written nothing
 # to the case. The analyst's report was that the assistant "didn't interact with the case at all when

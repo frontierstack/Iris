@@ -8,6 +8,10 @@ Three analyst reports, one test file, because they are the same complaint from t
   2. *"it went through a lot of tool calls … it likely went deeper than it should have. For, up to 40
      steps, 600s, 46 tools the assistant should not feel that is has to go through these limits."* —
      the budgets are a runaway-loop ceiling, not a plan, and the loop now says so mid-run (CHECK_IN).
+     Its FOLLOW-UP report matters as much: firing that nudge on the call count alone "influences the
+     model to stop investigating too early when it probably should continue … a lot of log files that
+     might need to be sifted through". So it fires on a BARREN STREAK — consecutive calls that each
+     returned nothing new — and never on productive work, however much of it there is.
   3. *"didn't interact with the case at all when it should, that include everything in the case from
      the timeline to iocs."* — a run that investigated and recorded nothing is asked, once, to write it
      up (DOCUMENT_CHECK).
@@ -187,17 +191,62 @@ def test_the_brief_is_bounded(client):
 
 
 # ------------------------------------------------------------------ stopping early
-def test_a_long_run_is_asked_whether_it_can_answer_yet(client):
+def _barren(i: int) -> tuple[str, dict]:
+    """One call that returns NOTHING NEW: a query no line can match, so `hits` comes back 0."""
+    return ("count_events", {"query": f"zzz-no-such-value-{i}"})
+
+
+def _productive(i: int) -> tuple[str, dict]:
+    """One call that genuinely returns something. The args VARY: an identical repeat is served from the
+    run's own dedupe cache, and a repeat is exactly what "nothing new" means."""
+    return ("count_events", {"query": f"NOT zzz-no-such-value-{i}"})
+
+
+def test_a_run_that_stops_finding_things_is_asked_for_another_angle(client):
     """The check-in. It fires as a user turn between steps and never forces the model's hand."""
-    script = [{"calls": [("count_events", {"query": f"q{i}"})]} for i in range(investigator.CHECK_IN_EVERY)]
+    n = investigator.CHECK_IN_MIN_CALLS + investigator.CHECK_IN_STREAK
+    script = [{"calls": [_barren(i)]} for i in range(n)]
     script.append({"text": "Enough — answering now."})
     evs, fake, _rid = drive("dig", script)
 
     notes = [s for s in of(evs, "status") if s.get("checkIn")]
-    assert len(notes) == 1, "exactly one check-in after the first interval"
-    assert "tool calls so far" in notes[0]["text"]
+    assert len(notes) == 1, f"exactly one check-in, got {notes}"
+    assert "nothing new" in notes[0]["text"]
     sent = [m for m in fake.seen[-1]["messages"] if m["role"] == "user"]
     assert any("CHECK-IN" in str(m["content"]) for m in sent)
+    # and the copy must not read as an instruction to wrap up
+    nudge = next(str(m["content"]) for m in sent if "CHECK-IN" in str(m["content"]))
+    assert "DIFFERENT angle" in nudge and "continuing is the right answer" in nudge
+
+
+def test_a_run_that_keeps_finding_things_is_never_interrupted(client):
+    """The analyst's report: the count-based nudge stopped runs that should have kept sifting.
+
+    Far more calls than the old `CHECK_IN_EVERY` would have allowed, all of them productive: no nudge.
+    """
+    n = investigator.CHECK_IN_MIN_CALLS * 3
+    script = [{"calls": [_productive(i)]} for i in range(n)]
+    script.append({"text": "done"})
+    evs, _f, _rid = drive("sift every source", script)
+    assert not [s for s in of(evs, "status") if s.get("checkIn")], "productive work was interrupted"
+
+
+def test_a_barren_streak_early_in_a_run_is_not_enough(client):
+    """A slow start is not a runaway loop — the floor is there so the opening is never nudged."""
+    script = [{"calls": [_barren(i)]} for i in range(investigator.CHECK_IN_STREAK + 1)]
+    script.append({"text": "done"})
+    evs, _f, _rid = drive("dig", script)
+    assert not [s for s in of(evs, "status") if s.get("checkIn")]
+
+
+def test_one_productive_call_resets_the_streak(client):
+    """Nothing-new has to be CONSECUTIVE: a find in the middle means the line of enquiry is alive."""
+    script: list = [{"calls": [_productive(i)]} for i in range(investigator.CHECK_IN_MIN_CALLS)]
+    for i in range(investigator.CHECK_IN_STREAK * 4):
+        script.append({"calls": [_barren(100 + i) if i % 2 else _productive(200 + i)]})
+    script.append({"text": "done"})
+    evs, _f, _rid = drive("dig", script)
+    assert not [s for s in of(evs, "status") if s.get("checkIn")]
 
 
 def test_a_short_run_is_never_nudged(client):
@@ -211,11 +260,25 @@ def test_a_short_run_is_never_nudged(client):
 
 def test_the_nudges_are_bounded(client):
     """A model that ignores the check-in must not be nagged on every step for the rest of the run."""
-    n = investigator.CHECK_IN_EVERY * (investigator.MAX_CHECK_INS + 3)
-    script = [{"calls": [("count_events", {"query": f"q{i}"})]} for i in range(n)]
+    n = (investigator.CHECK_IN_MIN_CALLS
+         + investigator.CHECK_IN_STREAK * (investigator.MAX_CHECK_INS + 3)
+         + investigator.CHECK_IN_COOLDOWN * (investigator.MAX_CHECK_INS + 3))
+    script = [{"calls": [_barren(i)]} for i in range(n)]
     script.append({"text": "done"})
-    evs, _f, _rid = drive("dig forever", script)
+    evs, _f, _rid = drive("dig forever", script, max_steps=n + 2)
     assert len([s for s in of(evs, "status") if s.get("checkIn")]) == investigator.MAX_CHECK_INS
+
+
+def test_the_budget_notice_is_about_the_report_not_about_stopping(client):
+    """Sent once, near the ceiling, and it must not tell the model to stop investigating."""
+    script = [{"calls": [_productive(i)]} for i in range(8)]
+    script.append({"text": "done"})
+    evs, fake, _rid = drive("dig", script, max_steps=6)
+    notes = [s for s in of(evs, "status") if s.get("budgetNotice")]
+    assert len(notes) == 1, f"exactly one budget notice, got {notes}"
+    sent = [str(m["content"]) for m in fake.seen[-1]["messages"] if m["role"] == "user"]
+    nudge = next(m for m in sent if "BUDGET —" in m)
+    assert "Keep investigating if the evidence warrants it" in nudge
 
 
 # ------------------------------------------------------------------ writing it down

@@ -50,11 +50,16 @@ established (ai/continuation.py). Before that, every prompt was a cold start, so
 timeline" re-ran the whole investigation it had just reported on and spent its budget rediscovering
 facts the analyst had already been told.
 
-TWO NUDGES the loop injects, both as ordinary user turns, both bounded, neither able to force the
-model's hand — the model can decline either and carry on:
-  • CHECK_IN, every CHECK_IN_EVERY tool calls (max MAX_CHECK_INS): "can you answer now?". The
-    budgets are a runaway-loop ceiling, but a model reads them as a plan and keeps drilling long
-    after the question was answered.
+THREE NUDGES the loop injects, all as ordinary user turns, all bounded, none able to force the
+model's hand — the model can decline any of them and carry on:
+  • CHECK_IN, only after CHECK_IN_STREAK consecutive tool calls that returned NOTHING NEW (a repeat,
+    a refusal, an empty result). It used to fire on the call count alone, every 8 calls, and was
+    reported as pushing the model to "stop investigating too early when it probably should
+    continue... a lot of log files that might need to be sifted through". Call count cannot tell a
+    run working through thirty sources from one asking the same question in a loop; a barren streak
+    can. It asks for a different ANGLE first and the report second.
+  • BUDGET_NOTICE, once, at BUDGET_NOTICE_AT of the step or wall-clock budget. About the REPORT, not
+    about stopping: the failure it prevents is a run spending its last steps on one more search.
   • DOCUMENT_CHECK, once, when a run that did real work is about to finish having written NOTHING to
     the case. A finding that lives only in the chat is lost when the panel closes.
 
@@ -75,7 +80,7 @@ from .argrepair import repair_arguments
 from .client import (AIError, BadToolArguments, LLMClient, absorb_text_calls, has_tool_call_syntax,
                      parse_text_tool_calls)
 from .history import HISTORY
-from .prompts import (ARG_TOO_BIG, CHECK_IN, DOCUMENT_CHECK, INVESTIGATOR_SYSTEM, WRAP_UP,
+from .prompts import (ARG_TOO_BIG, BUDGET_NOTICE, CHECK_IN, DOCUMENT_CHECK, INVESTIGATOR_SYSTEM, WRAP_UP,
                       investigator_user_prompt)
 from .tools import (REGISTRY, RunContext, ToolError, tool_budget_seconds, tool_schemas,
                     unverified_citations)
@@ -101,13 +106,26 @@ WRITE_DEADLINE_FACTOR = 3.0
 # Below this fraction of the ceiling a compaction counts as having worked. If the brief plus the kept
 # tail cannot get under it, compacting again would not help either — see ai/compaction.py.
 COMPACT_FLOOR = 0.8
-# How many tool calls a run may make before the loop asks it, once per interval, whether it can
-# already answer. The analyst's report: a question about one IP "went through a lot of tool calls, it
-# did find good info, but it likely went deeper than it should have". Left alone the model treats
-# the step budget as a plan; this is what turns "am I done?" into a question it actually answers.
-# It is a nudge injected as a user turn, never a forced stop — a genuine reconstruction may need more.
-CHECK_IN_EVERY = 8
-MAX_CHECK_INS = 3
+# ---- the check-in, and why it is no longer a metronome.
+# It used to fire every 8 tool calls, up to 3 times, on the CALL COUNT alone: "you have made N tool
+# calls — can you answer now?". The analyst's report on that: "often this influences the model to stop
+# investigating too early when it probably should continue. This gets in the way for a lot of log files
+# that might need to be sifted through." Both halves were wrong. A run working through thirty sources
+# is not a runaway loop, and 8 calls out of a 40-step budget is barely a start — so the nudge arrived
+# while the work was still productive and biased it toward stopping. It also asked a question the model
+# cannot answer usefully at that point, which costs a turn every time.
+#
+# What actually distinguishes a runaway loop from an investigation is not how MANY calls have been made
+# but whether they are still returning anything. So the check-in fires on EVIDENCE of spinning: a run
+# of consecutive calls that each came back cached (a repeat of one already made), refused, or empty.
+# Productive work resets the streak and is never interrupted.
+CHECK_IN_MIN_CALLS = 12       # never before this - the opening of a real investigation looks like this too
+CHECK_IN_STREAK = 5           # consecutive calls that returned nothing new
+CHECK_IN_COOLDOWN = 8         # calls between nudges, so declining one is not re-asked immediately
+MAX_CHECK_INS = 2
+# The other moment a nudge is worth its turn, and it is about the REPORT, not about stopping early: the
+# run is close enough to a hard budget stop that it needs to leave room to write one. Sent at most once.
+BUDGET_NOTICE_AT = 0.75       # fraction of the step OR wall-clock budget spent
 # Below this many tool calls a run was a question, not an investigation, and asking it to write the
 # case up would be noise. At or above it, finishing with an empty case is the failure the analyst
 # reported: "didn't interact with the case at all when it should, that include everything in the
@@ -450,6 +468,37 @@ _SUMMARY: dict[str, Callable[[dict[str, Any]], str]] = {
 }
 
 
+def _returned_something(ok: bool, result: Any) -> bool:
+    """Did this call move the investigation, or is the run spinning?
+
+    The check-in used to fire on the CALL COUNT, which cannot tell a run working through thirty log
+    files from one asking the same question in a loop — so it interrupted the first. This is the
+    distinction that matters, and it is deliberately narrow: only a REPEAT (served from the run's own
+    dedupe cache), a REFUSAL, or an explicitly empty result counts as nothing new.
+
+    A zero-hit search is real evidence once — ruling something out is work — which is why one of these
+    changes nothing on its own; it takes CHECK_IN_STREAK of them in a row to earn a nudge.
+    """
+    if not ok:
+        return False
+    if not isinstance(result, dict):
+        return True
+    if result.get("cached"):
+        return False       # the model asked something it had already asked
+    for key in ("hits", "count", "total", "matched", "events"):
+        v = result.get(key)
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, int):
+            return v > 0
+    for key in ("results", "rows", "values", "samples", "nodes", "entities", "findings",
+                "detections", "anomalies", "sources", "fields", "entries", "paths", "clusters"):
+        v = result.get(key)
+        if isinstance(v, list):
+            return len(v) > 0
+    return True
+
+
 def _summarize(name: str, ok: bool, data: Any) -> str:
     """One line for the transcript UI — the analyst should be able to follow without opening payloads."""
     if not ok:
@@ -548,9 +597,11 @@ async def investigate(store: Any, objective: str, run_id: str,
     step = 0
     tool_calls = 0
     compactions = 0
-    check_ins = 0            # scope nudges sent (see CHECK_IN_EVERY)
+    check_ins = 0            # scope nudges sent (see CHECK_IN_MIN_CALLS)
     arg_failures = 0         # turns the provider refused for unparsable tool arguments
-    next_check_in = CHECK_IN_EVERY
+    barren = 0               # consecutive tool calls that returned nothing new (cached / refused / empty)
+    next_check_in = CHECK_IN_MIN_CALLS
+    budget_noticed = False   # the "leave room for the report" nudge has been sent once
     documented = False       # the "you wrote nothing to the case" prompt has been sent once
     text_mode = False        # the provider is not doing native tool calling; we parsed the text form
     answer = ""
@@ -618,18 +669,34 @@ async def investigate(store: Any, objective: str, run_id: str,
                 HISTORY.append(run_id, {"kind": "status", "text": note})
                 yield {"type": "status", "text": note, "compactions": compactions, "droppedMessages": dropped}
 
-            # SCOPE CHECK-IN. Injected as a user turn between steps, at most MAX_CHECK_INS times: it
-            # costs nothing when the model was about to finish anyway, and it is the only thing that
-            # interrupts a drill-down that has stopped changing the answer. Never a forced stop — the
-            # model may decline it and keep going, which a genuine reconstruction sometimes should.
-            if tool_calls >= next_check_in and check_ins < MAX_CHECK_INS:
+            # SCOPE CHECK-IN. Injected as a user turn between steps, and ONLY when the last
+            # CHECK_IN_STREAK calls each returned nothing new — a repeat, a refusal or an empty
+            # result. That is the signature of a drill-down that has stopped changing the answer;
+            # a run still finding things is never interrupted, however many calls it has made.
+            # Never a forced stop: the model may decline and carry on, and the copy says so.
+            if (barren >= CHECK_IN_STREAK and tool_calls >= next_check_in
+                    and check_ins < MAX_CHECK_INS):
                 check_ins += 1
-                next_check_in = tool_calls + CHECK_IN_EVERY
-                messages.append({"role": "user", "content": CHECK_IN.format(calls=tool_calls)})
-                note = (f"{tool_calls} tool calls so far — asked the assistant whether it can answer "
-                        f"now rather than keep investigating")
+                next_check_in = tool_calls + CHECK_IN_COOLDOWN
+                barren = 0
+                messages.append({"role": "user", "content": CHECK_IN.format(streak=CHECK_IN_STREAK)})
+                note = (f"the last {CHECK_IN_STREAK} tool calls returned nothing new — asked the "
+                        f"assistant for a different angle, or the report")
                 HISTORY.append(run_id, {"kind": "status", "text": note})
                 yield {"type": "status", "text": note, "checkIn": check_ins}
+            # BUDGET NOTICE. Not "can you stop yet?" but "leave room to write it up": past this point
+            # a hard stop is close, and the failure mode is a run that spends its last steps on one
+            # more search and hands the analyst nothing. Once per run.
+            elif not budget_noticed and (step >= lim["maxSteps"] * BUDGET_NOTICE_AT
+                                         or elapsed() >= lim["maxSeconds"] * BUDGET_NOTICE_AT):
+                budget_noticed = True
+                left = max(0, lim["maxSteps"] - step)
+                messages.append({"role": "user", "content": BUDGET_NOTICE.format(
+                    steps=left, seconds=max(0, int(lim["maxSeconds"] - elapsed())))})
+                note = (f"{left} steps left — reminded the assistant to leave room to write the "
+                        f"report and record what it found")
+                HISTORY.append(run_id, {"kind": "status", "text": note, })
+                yield {"type": "status", "text": note, "budgetNotice": True}
             step += 1
             HISTORY.append(run_id, {"kind": "step", "step": step})
             yield {"type": "step", "step": step, "elapsedSec": round(elapsed(), 1)}
@@ -774,6 +841,7 @@ async def investigate(store: Any, objective: str, run_id: str,
                     payload = {**payload, "argumentsRepaired": repairs}
                 body = _clip(orjson.dumps(payload).decode())
                 messages.append({"role": "tool", "tool_call_id": call.get("id"), "name": name, "content": body})
+                barren = 0 if _returned_something(ok, result) else barren + 1
                 summary = _summarize(name, ok, result)
                 HISTORY.tool_result(run_id, call_id, ok, summary, took)
                 yield {"type": "tool_result", "id": call_id, "name": name, "ok": ok, "tookMs": took,

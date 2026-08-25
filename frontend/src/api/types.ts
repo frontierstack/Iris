@@ -457,10 +457,11 @@ export type AiRunEvent =
   /* `compactions`/`droppedMessages` are set on the status event that reports an automatic context
      compaction ("compacted N earlier steps into a running brief"). Never silent: the analyst has to be
      able to see that the model's view of the run was summarised. */
-  /* `checkIn` marks the "you have made N tool calls — can you answer yet?" nudge and `documentCheck`
-     the "you recorded nothing in the case" one. Both are ordinary status lines; the flags exist so the
-     panel can tell a nudge from a step announcement. */
-  | { type: 'status'; text: string; compactions?: number; droppedMessages?: number; checkIn?: number; documentCheck?: boolean }
+  /* `checkIn` marks the "your last N calls returned nothing new — another angle, or the report?" nudge,
+     `budgetNotice` the "leave room to write it up" one and `documentCheck` the "you recorded nothing in
+     the case" one. All three are ordinary status lines; the flags exist so the panel can tell a nudge
+     from a step announcement. */
+  | { type: 'status'; text: string; compactions?: number; droppedMessages?: number; checkIn?: number; budgetNotice?: boolean; documentCheck?: boolean }
   | { type: 'step'; step: number; elapsedSec: number }
   | { type: 'delta'; text: string; step: number }
   | { type: 'tool_call'; id: string; name: string; arguments: Record<string, unknown>; step: number }
