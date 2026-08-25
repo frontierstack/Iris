@@ -550,7 +550,11 @@ function ParsingCell({ source }: { source: Source }) {
 }
 
 /* ───────────── Upload / parse progress row ───────────── */
-function JobRow({ job, pct }: { job: UploadJob; pct?: number }) {
+function JobRow({ job, pct, localError }: { job: UploadJob; pct?: number; localError?: string }) {
+  // The server's verdict wins; the request's own error covers the case where the server never got
+  // to record one (the handler died with a 500 before failing the job).
+  const error = job.error || (job.state !== 'ready' ? localError : '') || '';
+  const failed = job.state === 'error' || (!!localError && job.state !== 'ready');
   // uploading = bytes still in flight (client knowledge); parsing = the server working on the file.
   // Conflating the two is what made a 6-minute parse look like a stuck upload.
   // `parsing` alone was almost as bad: a 263 MB CSV showed that one word for ten minutes with no way to
@@ -564,7 +568,7 @@ function JobRow({ job, pct }: { job: UploadJob; pct?: number }) {
   const stage = prog ? phaseText(prog) : null;
   const shown = inFlight ? (pct ?? (job.size ? Math.round((job.received / job.size) * 100) : 0))
     : stage ? stage.pct : 100;
-  const label = job.state === 'error' ? (job.interrupted ? 'interrupted' : 'failed')
+  const label = failed ? (job.interrupted ? 'interrupted' : 'failed')
     : job.state === 'ready' ? (job.target === 'library' ? 'in library' : `${fmtInt(job.events)} events`)
     // name the PHASE: 'reading' is now visible from the first tick of a big file (the job adopts its
     // tracker row before it knows its source ids), and calling phase 2 'parsing' told the analyst the
@@ -575,7 +579,7 @@ function JobRow({ job, pct }: { job: UploadJob; pct?: number }) {
     // agree with that reading and fail it at ten minutes.
     : job.state === 'queued' ? 'waiting its turn'
     : `uploading ${shown}%`;
-  const pill = job.state === 'error' ? 'pill--bad' : job.state === 'ready' ? 'pill--ok' : job.state === 'queued' ? 'pill--muted' : 'pill--accent';
+  const pill = failed ? 'pill--bad' : job.state === 'ready' ? 'pill--ok' : job.state === 'queued' ? 'pill--muted' : 'pill--accent';
   const detail = prog
     ? [prog.bytesTotal ? `${fmtBytes(prog.bytesDone)} of ${fmtBytes(prog.bytesTotal)}` : '',
        prog.events ? `${fmtInt(prog.events)} events` : '',
@@ -592,9 +596,10 @@ function JobRow({ job, pct }: { job: UploadJob; pct?: number }) {
         {label}
       </span>
       {noDetail ? <span className="muted" style={{ fontSize: 12 }}>no progress reported yet</span>
-        : <Bar pct={shown} color={job.state === 'error' ? 'var(--bad)' : job.state === 'ready' ? 'var(--ok)' : 'var(--accent)'} />}
-      {detail && <span className="muted" style={{ gridColumn: '1 / -1', fontSize: 12 }}>{detail}</span>}
-      {job.error && <span style={{ gridColumn: '1 / -1', color: 'var(--bad)' }}>{job.error}</span>}
+        : <Bar pct={shown} color={failed ? 'var(--bad)' : job.state === 'ready' ? 'var(--ok)' : 'var(--accent)'} />}
+      {detail && !failed && <span className="muted" style={{ gridColumn: '1 / -1', fontSize: 12 }}>{detail}</span>}
+      {/* The failure names its file (the row's first cell) and says exactly what went wrong. */}
+      {error && <span className="upload-item__err" role="alert">{error}</span>}
     </div>
   );
 }
@@ -729,6 +734,10 @@ export function IngestScreen() {
   });
   // bytes this tab has pushed, per job id — the server cannot know it until the body is complete
   const [localPct, setLocalPct] = useState<Record<string, number>>({});
+  // What the upload REQUEST said when it failed, per job. A 500 from the server never reaches the
+  // job registry (the handler died before it could fail the job), so without this the row sat at
+  // "parsing" and the only trace of the message was a toast that said "details are on the file below".
+  const [localErr, setLocalErr] = useState<Record<string, string>>({});
   // Files this tab has just accepted, shown BEFORE the server knows about them. Registering the transfer
   // is itself a round trip, and on a slow link (or a big drop) that left the analyst staring at a page
   // that had visibly done nothing — "I drag and drop and I often don't see a status".
@@ -794,8 +803,11 @@ export function IngestScreen() {
               bg += (res as Source[]).filter((x) => x.state === 'PARSING').length;
               invalidate();
             }
-          } catch {
+          } catch (e) {
             failed++;
+            const msg = e instanceof Error ? e.message : String(e);
+            if (id) setLocalErr((m) => ({ ...m, [id]: msg }));
+            toast.error(`${job.f.name} was not ingested`, msg);
           } finally {
             if (id) mine.delete(id);
           }
@@ -817,7 +829,7 @@ export function IngestScreen() {
         toast.success(`${added} file${added === 1 ? '' : 's'} ingested`,
           'searchable now — file them into a case from the Case column whenever you need one');
       }
-      if (failed) toast.error(`${failed} upload${failed === 1 ? '' : 's'} failed`, 'the details are on the file below');
+      if (failed > 1) toast.error(`${failed} uploads failed`, 'each failure names its file and the reason in Transfers below');
     },
     [toast, qc, refreshJobs],
   );
@@ -838,9 +850,17 @@ export function IngestScreen() {
         if (j.state === 'ready') return now - Date.parse(j.updatedAt) < JOB_DONE_MS;
         if (j.state === 'error') return now - Date.parse(j.updatedAt) < JOB_FAILED_MS;
         return true;
-      })
-      .slice(0, JOB_ROWS);
+      });
   }, [jobsQ.data, c.data?.id, tick]);
+  // Every FAILURE is shown, first, however many there are — a drop of 300 files that lost nine of
+  // them used to show the eight newest transfers and nothing else, so the failures were invisible
+  // until everything in front of them aged out. Only the in-flight/finished rows are capped, and the
+  // cap says how many it is hiding.
+  const { shownRows, hiddenRows } = useMemo(() => {
+    const failed = jobRows.filter((j) => j.state === 'error');
+    const rest = jobRows.filter((j) => j.state !== 'error');
+    return { shownRows: [...failed, ...rest.slice(0, JOB_ROWS)], hiddenRows: Math.max(0, rest.length - JOB_ROWS) };
+  }, [jobRows]);
   // Only while something is actually counting down — a panel showing nothing but failures has no
   // deadline and must not hold a timer open for the half hour they stay.
   const hasDoneRows = jobRows.some((j) => j.state === 'ready');
@@ -1031,7 +1051,12 @@ export function IngestScreen() {
                   <span className="pill pill--accent"><span className="spinner" />starting</span>
                 </div>
               ))}
-              {jobRows.map((j) => <JobRow key={j.id} job={j} pct={localPct[j.id]} />)}
+              {shownRows.map((j) => <JobRow key={j.id} job={j} pct={localPct[j.id]} localError={localErr[j.id]} />)}
+              {hiddenRows > 0 && (
+                <div className="muted" style={{ fontSize: 'var(--fs-sm)', padding: '4px 0' }}>
+                  and {fmtInt(hiddenRows)} more waiting their turn
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -1218,6 +1243,13 @@ export function IngestScreen() {
               {/* A failure the analyst cannot read is not a report. The tooltip is not enough: the
                   message is what says whether this file needs a mapping, a different parser, or is
                   simply not what it claimed to be. */}
+              {/* Same rule for a parse failure: the tooltip on the state pill was the only place the
+                  message lived, and a tooltip is not a report. The row already names the file. */}
+              {s.state === 'ERROR' && s.error && (
+                <div className="enrich-err" title="Parse error">
+                  failed — {s.error}
+                </div>
+              )}
               {enrichOf(s) === 'error' && s.enrichError && (
                 <div className="enrich-err" title="Enrichment error">
                   enrichment failed — {s.enrichError}

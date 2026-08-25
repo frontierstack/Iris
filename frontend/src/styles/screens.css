@@ -3672,6 +3672,12 @@ mark.hl {
 /* A file accepted by this tab but not yet registered with the server. Same row shape as a real job, so
    nothing jumps when the server's row replaces it. */
 .upload-item--pending { opacity: 0.75; }
+.upload-item__err {
+  grid-column: 1 / -1;
+  color: var(--bad);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
 
 /* ═══════ SEARCH: columns and the + / − filters ═══════
    Any value you can see is a filter you can apply. `+` narrows to it, `−` excludes it — the two

@@ -400,3 +400,28 @@ def test_a_heartbeat_covers_every_id_it_names(c, monkeypatch) -> None:
     assert c.post("/api/jobs/heartbeat", json={"ids": ids}).json()["alive"] == ids
     states = {j["id"]: j["state"] for j in c.get("/api/jobs?limit=500").json()["jobs"]}
     assert all(states.get(jid, "queued") == "queued" for jid in ids), "a heartbeaten job was buried"
+
+
+def test_a_parse_whose_request_died_does_not_say_parsing_forever(c, monkeypatch) -> None:
+    j = REGISTRY.create("orphan.log", 10, "library", "")
+    REGISTRY.begin_parse(j.id, 10)
+    assert _job(c, j.id)["state"] == "parsing"
+    monkeypatch.setattr(jobs_mod, "STALE_UPLOAD_SEC", 1)
+    time.sleep(1.2)
+    row = _job(c, j.id)
+    assert row["state"] == "error" and "registered" in row["error"]
+
+
+def test_an_ingest_exception_fails_the_job_with_the_file_and_the_reason(c, monkeypatch) -> None:
+    """The exception used to escape as a bare 500: the job never heard, the row sat at 'parsing'
+    for good, and the tab was told '500 Internal Server Error' about no file in particular."""
+    def boom(name, display, data=None):
+        raise ValueError("this file is a plain ZIP archive (2 entries), not an Excel workbook")
+    monkeypatch.setattr(store_mod.STORE, "add_library_file", boom)
+    j = c.post("/api/jobs", json={"files": [{"file": "odd.xlsx", "size": 3}], "target": "library"}).json()["jobs"][0]
+    r = c.post(f"/api/library/upload?jobIds={j['id']}", files=[("files", ("odd.xlsx", b"abc", "application/octet-stream"))])
+    assert r.status_code == 500
+    assert "odd.xlsx" in r.json()["detail"] and "plain ZIP archive" in r.json()["detail"]
+    row = _job(c, j["id"])
+    assert row["state"] == "error" and "plain ZIP archive" in row["error"]
+    assert not list(config.LIBRARY_DIR.glob("*odd.xlsx")), "a file that failed to ingest must not stay staged"

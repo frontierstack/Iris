@@ -580,7 +580,11 @@ async def stage_files(files: list[UploadFile], job_ids: list[str] | None = None)
         # Sniff from DISK and from a bounded prefix. `probe_upload` only ever looks at the first
         # PROBE_BYTES anyway; handing it the whole file was the last place a gigabyte was materialised
         # just to read its first two megabytes.
-        probe = await asyncio.to_thread(_probe_file, dest, original, size)
+        try:
+            probe = await asyncio.to_thread(_probe_file, dest, original, size)
+        except Exception as exc:  # noqa: BLE001 — a sniff must never cost the upload
+            print(f"[iris] probe of {original!r} failed: {type(exc).__name__}: {exc}", flush=True)
+            probe = {}
         # Index it NOW, under the index lock, on the copy that is on disk at this moment. It used to
         # be written at the end of the request from an `idx` read at the start: with four lanes in
         # flight the last one to finish overwrote everyone else's entries, and GET /api/library —
@@ -595,9 +599,20 @@ async def stage_files(files: list[UploadFile], job_ids: list[str] | None = None)
         # Parse it into the workspace pool. This is the one thing staging must do WITHOUT touching a
         # case: add_library_file never calls _materialise(), so nothing is written under cases/.
         # No bytes are passed: they are on disk, and the store streams them from there.
-        srcs = await asyncio.to_thread(STORE.add_library_file, name, original)
+        from .sources import _ingest_reason, _report  # local import: sources imports this module
+        try:
+            srcs = await asyncio.to_thread(STORE.add_library_file, name, original)
+        except Exception as exc:  # noqa: BLE001
+            # The job carries the file's name and the reason, and the response carries the SAME
+            # sentence. Before this the exception escaped as a bare 500: the registry never heard,
+            # so the row sat at "parsing" forever and the tab was told "500 Internal Server Error".
+            reason = _ingest_reason(exc)
+            REGISTRY.fail(jid, reason)
+            print(f"[iris] ingest of {original!r} failed: {reason}", flush=True)
+            _update_library_index(lambda idx: idx.pop(name, None) is not None)
+            dest.unlink(missing_ok=True)
+            raise HTTPException(500, f"{original}: {reason}")
         if srcs:
-            from .sources import _report  # local import: sources imports this module
             _report(jid, srcs)            # a >50 MB file is still PARSING in a thread — jobs.sync() finishes it
         else:
             # a container Iris refuses to expand is staged unparsed; the sniff is all we can report

@@ -565,6 +565,7 @@ class JobRegistry:
         """
         case_id, sources = _store_snapshot()
         now = time.time()
+        in_flight = PARSE_PROGRESS.active()
         with self.lock:
             self._ensure_loaded()
             changed = False
@@ -604,6 +605,20 @@ class JobRegistry:
                     job.parser = job.parser or (rows[0][2] if rows else "")
                     job.state = "error" if errs else "ready"
                     job.error = "; ".join(errs)[:2000] if errs else ""
+                    self._touch(job)
+                    changed = True
+                elif (job.state == "parsing" and not job.sourceIds
+                      and now - job.updated_ts > STALE_UPLOAD_SEC
+                      and not any(r["file"] == job.file for r in in_flight)):
+                    # `parsing` with no source ids is the window between begin_parse() and the ingest
+                    # request reporting back. If that request died (a 500 the handler did not catch,
+                    # a client that dropped the connection mid-parse) nothing ever reports, and this
+                    # row said "parsing" for the rest of the process. A tracker row under this file
+                    # name means the parse IS still running; with none, and ten minutes of silence,
+                    # it is not.
+                    job.state = "error"
+                    job.error = ("the upload stopped before this file was registered in the workspace"
+                                 " — the server did not finish reading it (drop the file again to retry)")
                     self._touch(job)
                     changed = True
                 elif job.state in ("queued", "uploading") and now - job.updated_ts > STALE_UPLOAD_SEC:

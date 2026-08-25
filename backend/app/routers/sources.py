@@ -76,14 +76,28 @@ async def upload_sources(response: Response, files: list[UploadFile] = File(...)
             added = await asyncio.to_thread(STORE.ingest_upload_path, name, staged)
         except Exception as exc:
             staged.unlink(missing_ok=True)
-            REGISTRY.fail(jid, f"{type(exc).__name__}: {exc}")
-            raise
+            reason = _ingest_reason(exc)
+            REGISTRY.fail(jid, reason)
+            # The client gets the SAME sentence the job carries. A bare re-raise answered
+            # "500 Internal Server Error", which is what the tab then showed for the file.
+            print(f"[iris] ingest of {name!r} failed: {reason}", flush=True)
+            raise HTTPException(500, f"{name}: {reason}")
         _report(jid, added)
         out.extend(added)
     # a case upload writes new bytes under cases/<id>/uploads — a new row in the library listing
     from .library import invalidate_library_cache
     invalidate_library_cache()
     return out
+
+
+def _ingest_reason(exc: BaseException) -> str:
+    """One sentence an analyst can act on. An OSError never carries the absolute path (that is the
+    data-dir layout and the user name on a native install); anything else is its type and message,
+    because `KeyError: 'x'` on its own is a library internal, not a report."""
+    if isinstance(exc, OSError):
+        return f"could not read or write the file ({config.safe_os_error(exc)})"
+    msg = str(exc).strip()
+    return f"{type(exc).__name__}: {msg}" if msg else f"{type(exc).__name__} while parsing"
 
 
 def _report(job_id: str, added: list[Source]) -> None:
