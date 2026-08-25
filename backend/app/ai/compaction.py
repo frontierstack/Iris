@@ -157,13 +157,18 @@ def _result_gist(body: str) -> str:
 
 
 def compact(messages: list[dict[str, Any]], actions: list[dict[str, Any]], *,
-            keep_tail: int = TAIL_MESSAGES) -> Optional[tuple[list[dict[str, Any]], int]]:
-    """(new transcript, number of messages folded away) — or None when there is nothing worth folding."""
+            keep_tail: int = TAIL_MESSAGES, force: bool = False) -> Optional[tuple[list[dict[str, Any]], int]]:
+    """(new transcript, number of messages folded away) — or None when there is nothing worth folding.
+
+    `force` folds even a short middle. Used when the PROVIDER has refused the transcript for its size
+    (client.ContextTooLong): at that point "not worth summarising" is not a judgement Iris gets to
+    make, because the alternative is the run ending.
+    """
     if len(messages) < 4:
         return None
     start = safe_cut(messages, keep_tail)
     middle = messages[2:start]
-    if len(middle) < MIN_COMPACTIBLE:
+    if len(middle) < (1 if force else MIN_COMPACTIBLE):
         return None
     objective = _text_of(messages[1])
     brief = build_brief(middle, actions, objective)

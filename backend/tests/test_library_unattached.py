@@ -69,17 +69,25 @@ def test_staged_file_is_listed_then_links_to_a_case_later(c) -> None:
     assert c.get("/api/case").json()["eventCount"] > 0
 
 
-def test_deleting_every_case_leaves_the_library_intact(c) -> None:
+def test_deleting_every_case_leaves_unattached_files_and_takes_attached_ones(c) -> None:
+    """A file never filed into a case survives every delete — the library is case-less. A file the case
+    had ATTACHED leaves with the case: it is in the trash entry, not in the library any more, so its
+    events (and their detections) do not come straight back into the pool on the next library load.
+    That resurrection was reported as "deleting a case does not clear its anomalies" — see
+    tests/test_case_delete_clears_derived.py."""
     _wipe_cases(c)
     up = c.post("/api/library/upload", files=[("files", ("survivor.log", LOG, "text/plain"))]).json()[0]
+    loose = c.post("/api/library/upload", files=[("files", ("loose.log", LOG, "text/plain"))]).json()[0]
     c.post("/api/cases", json={"name": "Doomed"})
     c.post("/api/library/attach", json={"items": [{"caseId": "", "fileName": up["fileName"]}]})
 
     _wipe_cases(c)
     assert c.get("/api/cases").json() == []
-    still = [f for f in c.get("/api/library").json() if f["fileName"] == up["fileName"]]
-    assert still, "deleting every case destroyed the unattached library copy"
-    assert (config.LIBRARY_DIR / up["fileName"]).is_file()
+    names = [f["fileName"] for f in c.get("/api/library").json()]
+    assert loose["fileName"] in names and (config.LIBRARY_DIR / loose["fileName"]).is_file()
+    assert up["fileName"] not in names and not (config.LIBRARY_DIR / up["fileName"]).is_file()
+    trash = c.get("/api/cases/trash").json()
+    assert any(t["name"] == "Doomed" for t in trash), "the attached file's bytes live in the trash entry now"
 
 
 def test_prune_never_touches_unattached_files(c) -> None:

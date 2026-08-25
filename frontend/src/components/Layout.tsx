@@ -305,10 +305,6 @@ export function Header() {
           <Icon.Sparkle />
           AI
         </button>
-        <button className="btn btn--accent btn--sm" onClick={() => nav(caseHref)}>
-          <Icon.Export />
-          Export findings
-        </button>
       </div>
     </header>
   );

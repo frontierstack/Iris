@@ -13,7 +13,7 @@ _ACTIONS = {"allow", "deny", "drop", "accept", "reject", "block", "permit", "ale
 _PROTOS = {"tcp", "udp", "icmp", "gre", "esp", "http", "https", "dns", "tls", "ssh"}
 _IPPORT = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?$")
 _KV = re.compile(r"^([A-Za-z_][\w.-]*)=(.*)$")
-_TS_LIKE = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}|^\d{2}/[A-Za-z]{3}/\d{4}|^[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}|^\d{10}(\.\d+)?$")
+_TS_LIKE = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}|^\d{2}/[A-Za-z]{3}/\d{4}|^[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}|^\d{10}(?:\d{3}|\d{6}|\d{9})?(\.\d+)?$")
 _HOST_LIKE = re.compile(r"^[A-Za-z][\w-]*(?:\.[\w-]+)*$")
 _NUM = re.compile(r"^\d+$")
 

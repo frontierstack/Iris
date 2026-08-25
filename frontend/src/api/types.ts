@@ -476,13 +476,15 @@ export type AiRunEvent =
      `budgetNotice` the "leave room to write it up" one and `documentCheck` the "you recorded nothing in
      the case" one. All three are ordinary status lines; the flags exist so the panel can tell a nudge
      from a step announcement. */
-  | { type: 'status'; text: string; compactions?: number; droppedMessages?: number; checkIn?: number; budgetNotice?: boolean; documentCheck?: boolean }
+  | { type: 'status'; text: string; compactions?: number; droppedMessages?: number; checkIn?: number; budgetNotice?: boolean; documentCheck?: boolean; recordNudge?: number; summaryCheck?: boolean }
   | { type: 'step'; step: number; elapsedSec: number }
   | { type: 'delta'; text: string; step: number }
   | { type: 'tool_call'; id: string; name: string; arguments: Record<string, unknown>; step: number }
   | { type: 'tool_result'; id: string; name: string; ok: boolean; tookMs: number; summary: string; data: unknown }
   | { type: 'write'; action: AiAction }
-  | { type: 'warning'; message: string; ids: string[] }
+  /** contextCeiling: the provider refused the transcript for its size and Iris folded it — this run now
+      compacts at that many (estimated) tokens. retry: a transient provider failure being retried. */
+  | { type: 'warning'; message: string; ids: string[]; contextCeiling?: number; compactions?: number; retry?: number }
   | { type: 'answer'; text: string }
   | { type: 'done'; runId: string; reason: string; state: string; steps: number; toolCalls: number; writes: number; actions: AiAction[]; unverifiedCitations: string[]; answer: string; elapsedSec: number;
       /* compactions = how many times the transcript was summarised; cachedToolCalls = repeated reads served

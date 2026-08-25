@@ -30,7 +30,12 @@ _SYSLOG_RE = re.compile(r"^([A-Za-z]{3})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})$"
 _KIBANA_RE = re.compile(
     r"^([A-Za-z]{3,9})\s+(\d{1,2}),\s*(\d{4})\s*@\s*(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?"
     r"\s*(Z|[+-]\d{2}:?\d{2})?$")
-_EPOCH_RE = re.compile(r"^\d{10}(\.\d+)?$|^\d{13}$")
+# Epoch in SECONDS (10 digits, optional fraction), MILLISECONDS (13), MICROSECONDS (16) or NANOSECONDS
+# (19). "Some logs have just epoch": a Suricata/Zeek export, a Kafka dump or a firewall CSV carries
+# nothing but `1724580000123` per line, and the old shape (10 digits or exactly 13) read a 16-digit
+# value as text and a `1724580000123.456` as nothing at all. The unit is decided by the INTEGER digit
+# count in `epoch_to_datetime`, never by magnitude guessing past that.
+_EPOCH_RE = re.compile(r"^(\d{10}|\d{13}|\d{16}|\d{19})(\.\d+)?$")
 _MONTHS = {m: i + 1 for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"])}
 # "looks like a date" gate for the dateutil fallback. THREE number groups joined by separators, a clock
 # time, or a month name — one separator is not enough, or the version string "1.6" parses as 6 January.
@@ -81,7 +86,7 @@ _LEAD_TS = re.compile(
     r'|[A-Za-z]{3,9}\s+\d{1,2},\s*\d{4}\s*@\s*\d{1,2}:\d{2}:\d{2}(?:\.\d{1,6})?'        # Kibana export
     r'|\d{2}/[A-Za-z]{3}/\d{4}:\d{2}:\d{2}:\d{2}(?:\s[+-]\d{4})?'                          # nginx
     r'|[A-Za-z]{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}'                                          # syslog
-    r'|\d{10}(?:\.\d{1,6})?'                                                                 # epoch seconds
+    r'|\d{10}(?:\d{3}|\d{6}|\d{9})?(?:\.\d{1,9})?(?!\d)'                                     # epoch s / ms / us / ns
     r')')
 _LEAD_SCAN = 48          # a leading timestamp is always within this many characters
 # The one shape worth SEARCHING for rather than anchoring: an access log puts the client address
@@ -164,14 +169,9 @@ def _parse_ts_raw(text: str, default_year: Optional[int] = None) -> Optional[dat
                             int((frac or "0")[:6].ljust(6, "0")), tzinfo=_tz_from(tzs)).astimezone(UTC)
         except (ValueError, KeyError):
             return None
-    if _EPOCH_RE.match(text):
-        v = float(text)
-        if v > 1e12:
-            v /= 1000.0
-        try:
-            return datetime.fromtimestamp(v, tz=UTC)
-        except (OverflowError, OSError, ValueError):
-            return None
+    m = _EPOCH_RE.match(text)
+    if m:
+        return epoch_to_datetime(m.group(1), m.group(2) or "")
     # dateutil is the last resort and by far the loosest: it happily reads "1.6", "2096" or a version
     # string as a date. Require a separator-bearing shape (2026-08-18, 18/08/2026, 08.18.26 …) or a month
     # name before handing it the string at all.
@@ -186,6 +186,30 @@ def _parse_ts_raw(text: str, default_year: Optional[int] = None) -> Optional[dat
     try:
         return dt.astimezone(UTC)
     except (ValueError, OverflowError):
+        return None
+
+
+def epoch_to_datetime(digits: str, frac: str = "") -> Optional[datetime]:
+    """An epoch of 10 / 13 / 16 / 19 integer digits -> aware UTC datetime, or None.
+
+    The unit comes from the digit count: seconds, milliseconds, microseconds, nanoseconds. A written
+    fraction (`1724580000.123`, `1724580000123.456`) is kept at whatever precision the unit leaves
+    room for. Integer arithmetic on purpose: `float(<19 digits>)` loses the low digits, and a
+    nanosecond stamp that round-trips to the wrong millisecond is a silently wrong timestamp on an
+    evidence line.
+    """
+    scale = {10: 1, 13: 1_000, 16: 1_000_000, 19: 1_000_000_000}.get(len(digits))
+    if scale is None:
+        return None
+    try:
+        secs, rem = divmod(int(digits), scale)
+        micro = (rem * 1_000_000) // scale
+        # the fraction's digits are sub-UNIT: seconds leave six of them for microseconds, ms three, us none
+        keep = {1: 6, 1_000: 3}.get(scale, 0)
+        if frac and keep:
+            micro += int(frac[1:1 + keep].ljust(keep, "0"))
+        return datetime.fromtimestamp(secs, tz=UTC).replace(microsecond=min(micro, 999_999))
+    except (OverflowError, OSError, ValueError):
         return None
 
 

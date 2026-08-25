@@ -272,7 +272,7 @@ start. Docker compose does **not** support inline comments in `.env` — keep co
 | `IRIS_CA_BUNDLE` | auto (`/data/ca.pem`) | CA bundle for TLS-inspecting proxies. |
 | `IRIS_AI_MAX_STEPS` | 40 (cap 120) | Tool-calling steps per investigation. |
 | `IRIS_AI_MAX_SECONDS` | 600 (cap 900) | Wall clock per run. |
-| `IRIS_AI_MAX_CONTEXT_TOKENS` | 60 000 | Estimated context ceiling; triggers compaction, not a stop. |
+| `IRIS_AI_MAX_CONTEXT_TOKENS` | 60 000 | Estimated context ceiling; triggers compaction, not a stop. The model's OWN window is the real ceiling: when the provider refuses a request for its size (HTTP 400 naming the context), Iris folds the transcript, lowers this run's ceiling below what was refused and retries the same turn. |
 | `IRIS_AI_MAX_COMPACTIONS` | 6 (cap 20) | How many times a run may compact its transcript. |
 | `IRIS_AI_TOOL_SECONDS` | 90 (cap 600) | Wall clock ONE tool call gets. Past it (plus 5 s grace) a read is abandoned and reported to the model as a ToolError naming the narrower call; a write is always awaited. Also how long a stop can take to land inside a tool that never checks it. |
 | `IRIS_AI_DERIVED_WAIT` | 60 (cap 600) | How long a graph / timeline / detection-roll-up tool waits for its background build before refusing with its progress. Keep it below `IRIS_AI_TOOL_SECONDS` so that refusal wins. |
@@ -381,6 +381,10 @@ pipe-delimited, SQLite databases, packet captures (`.pcap`/`.pcapng`/`.cap`), `.
 (strings + IOC extraction), and `zip`/`tar`/`gz`/`bz2`/`xz`/`7z` archives (nested to depth 3). Unknown layouts land
 in state **MAP** — click the row to edit the field mapping or press **Suggest with AI**.
 
+Timestamps are read in ISO-8601, nginx, syslog, Kibana and common locale shapes, and as a bare **epoch** in seconds,
+milliseconds, microseconds or nanoseconds (10 / 13 / 16 / 19 digits, with or without a fraction) — a log whose only
+clock is `1724580000123` sorts and windows like any other. The unit comes from the digit count.
+
 * Filter by name/parser and by state; per-source size and a combined total.
 * **Live parse progress**, and a warning naming any file that is **not** in the pool — a file absent from search is
   indistinguishable from a search that found nothing.
@@ -431,8 +435,14 @@ Press `/` to focus. Examples:
 The Cases page is a card grid (a filter/sort toolbar appears above three cases). Name and analyst are edited
 inline. Deleting a case moves it to the trash (last 5 kept) — **Recently deleted** restores it.
 
-Inside a case: the **timeline**, **notes** (markdown, paste screenshots), **indicators**, its **sources**, and the
-report export (Markdown / JSON / STIX 2.1 / PDF).
+**Export report** (top right, for the active case) builds and downloads the report as Markdown, PDF, JSON or a
+STIX 2.1 bundle — the same file `GET /api/report/export` serves.
+
+Inside a case: the **timeline**, **notes** (markdown, paste screenshots), **indicators** and its **sources**.
+
+Deleting a case also takes the files it had **attached** out of the workspace (they are in the trash with the case,
+not in the library any more), so their detections and graph findings go with it. Files you never filed into the
+case stay in the library.
 
 **The timeline** is the curated events in time order, grouped under sticky date headings, with the gap since the
 previous entry (`+3m 12s`) so the pace of the sequence is visible. Each row leads with **your** sentence — the

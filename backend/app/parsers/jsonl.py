@@ -8,7 +8,9 @@ import orjson
 from ..normalize import parse_ts
 from .base import BaseParser, ParsedEvent, flatten
 
-TS_KEYS = ("ts", "timestamp", "@timestamp", "time", "eventTime", "datetime", "date", "t", "created_at", "logged_at", "asctime")
+TS_KEYS = ("ts", "timestamp", "@timestamp", "time", "eventTime", "datetime", "date", "t", "created_at", "logged_at", "asctime",
+           "epoch", "epoch_ms", "epochMillis", "epoch_millis", "unix_time", "unixtime", "unixTime", "timestamp_ms", "ts_ms",
+           "time_ms", "_time", "time_t", "event_time")
 LEVEL_KEYS = ("level", "severity", "lvl", "loglevel", "log.level", "priority", "sev")
 MSG_KEYS = ("msg", "message", "event", "text", "log", "description", "summary", "action")
 HOST_KEYS = ("host", "hostname", "svc", "service", "app", "application", "server", "node", "container", "source")

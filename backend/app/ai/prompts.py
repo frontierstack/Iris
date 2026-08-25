@@ -106,10 +106,15 @@ INVESTIGATOR_SYSTEM = (
     "search_events(include='raw') or get_events; use graph_find / graph_node / graph_path to test whether "
     "a pivot really connects instead of assuming it does. Do not repeat a call you have already made — a "
     "repeated query is served from cache and tells you nothing new.\n"
-    "6. RECORD WHAT YOU FIND IN THE CASE. A finding that exists only in this chat is lost the moment "
-    "the analyst closes the panel — the case is where an investigation lives, and filling it in is "
-    "part of the job, not an extra the analyst has to ask for. Whenever you have established "
-    "something worth keeping and a case exists, write it, in BATCHES, never one call per item:\n"
+    "6. RECORD AS YOU GO — THE CASE IS WRITTEN DURING THE INVESTIGATION, NOT AT THE END. A finding "
+    "that exists only in this chat is lost the moment the analyst closes the panel, and this "
+    "transcript is FINITE: it is compacted when the model's context fills and a provider failure can "
+    "end the run mid-way, taking every unrecorded finding with it. So do not save the writing up for "
+    "the end. Each time you establish something solid — a decisive event, an indicator, a pivot, a "
+    "verdict on one host — write it to the case RIGHT THEN and carry on investigating; then at the "
+    "END write ONE summary note and set the case summary. If the analyst asked for a case and none "
+    "exists, create_case FIRST, before the first finding, so there is somewhere to put it. Write in "
+    "BATCHES, never one call per item:\n"
     "   - the decisive events: ONE add_events_to_case call carrying every id;\n"
     "   - THE CASE TIMELINE: ONE annotate_case_events call giving each of those events a short label "
     "and note. That IS the timeline — nothing else writes it;\n"
@@ -122,6 +127,9 @@ INVESTIGATOR_SYSTEM = (
     "never found are created for you, so this works even where the sources are still raw. That "
     "picture IS the investigation graph for this case and the analyst reads it on the Graph screen "
     "with scope=case; add_graph_link is the same thing for a single connection.\n"
+    "   - at the END, the SUMMARY: ONE add_note that an analyst opening this case cold can read on its "
+    "own (what happened, in what order, which evidence, what is uncertain, what to do next), and "
+    "update_case with a few-sentence summary.\n"
     "   Then say in the report exactly what you recorded. The exceptions are narrow and real: a plain "
     "factual question ('how many events mention this?') needs no case artefacts; evidence too thin to "
     "stand behind must not be written up as a finding; and with NO case you cannot write at all — say "
@@ -254,6 +262,27 @@ ARG_TOO_BIG = (
     "usually because the call was too long to finish in one reply. Nothing was written and nothing was "
     "read. Send the call again SMALLER: split a long `links`, `eventIds` or note into several calls, "
     "keep `why`/`text` short, and make sure every quote and newline inside a string is escaped.")
+
+# Injected between steps when a run that HAS found things has written none of them down for a while.
+# The analyst's report: findings need to be documented "as it is finding, then build a full summary at
+# the end" — and the reason is not tidiness: the transcript is compacted when the context fills and a
+# provider failure ends a run mid-way, so a finding that lives only in the chat is one crash from gone.
+# Bounded (MAX_RECORD_NUDGES) and explicitly NOT a request to finish.
+RECORD_NUDGE = (
+    "RECORD AS YOU GO — your last {calls} tool calls returned real evidence and NONE of it is in the "
+    "case yet. Write down what is already solid NOW, before continuing: ONE add_events_to_case call "
+    "with the decisive event ids, ONE annotate_case_events call giving each a short label and note "
+    "(that is the timeline), and add_ioc for each indicator you can stand behind — all with "
+    "citedEventIds. Then carry on investigating: this is NOT a request to finish. If nothing so far "
+    "is solid enough to record, say so in one line and continue.")
+
+# Injected once, at the end, when a run recorded findings as it went but never wrote the summary.
+SUMMARY_CHECK = (
+    "BEFORE YOU FINISH — you recorded findings in the case as you went, but the case has no SUMMARY "
+    "yet. Write ONE add_note (with citedEventIds) that an analyst opening this case cold can read on "
+    "its own: what happened, in what order, which evidence, what is uncertain, and what to do next. "
+    "Then set the case summary with update_case (a few sentences). Then give your final report. If "
+    "an earlier turn already left an equivalent summary note, skip this and say so in one line.")
 
 WRAP_UP = ("Your budget for this investigation is spent. Stop calling tools and write your final report "
            "now from what you have already established, citing the event ids you actually saw. State "

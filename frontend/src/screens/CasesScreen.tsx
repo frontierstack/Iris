@@ -1,13 +1,81 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
-import type { CaseSummary, TrashEntry } from '../api/types';
+import type { CaseSummary, ExportFormat, TrashEntry } from '../api/types';
 import { Icon } from '../components/icons';
 import { ConfirmDialog, EmptyState, ErrorState, SectionHead, SkeletonRows } from '../components/ui';
 import { qk, useCases } from '../hooks/queries';
 import { useToast } from '../hooks/useToast';
-import { cx, fmtBytes, fmtCompact, fmtRelative, fmtTs } from '../utils/format';
+import { cx, downloadBlob, fmtBytes, fmtCompact, fmtRelative, fmtTs } from '../utils/format';
+
+/** The four report formats `GET /api/report/export` builds. Markdown first: it is the one an analyst
+ *  pastes into a ticket. */
+const EXPORTS: { format: ExportFormat; label: string; hint: string }[] = [
+  { format: 'md', label: 'Markdown', hint: 'the report as text — paste into a ticket or a wiki' },
+  { format: 'pdf', label: 'PDF', hint: 'title page, paginated tables, page-numbered footer' },
+  { format: 'json', label: 'JSON', hint: 'the full report object, machine-readable' },
+  { format: 'stix', label: 'STIX 2.1', hint: 'the indicators as a STIX bundle for another tool' },
+];
+
+/**
+ * Export the ACTIVE case's report. This used to be a header button labelled "Export findings" that
+ * carried the UPLOAD glyph (arrow out of the tray) and navigated to the case page, which had no export
+ * control at all — a button that looked like an upload and did nothing. The report is built server-side
+ * from the active case (`/api/report/export`), so the control lives here on Cases, named for the case it
+ * exports, with a DOWNLOAD glyph and a real download on click.
+ */
+function ExportReport({ active }: { active: CaseSummary | undefined }) {
+  const toast = useToast();
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState<ExportFormat | null>(null);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onKey); };
+  }, [open]);
+  if (!active) return null;
+  const run = async (format: ExportFormat) => {
+    setBusy(format);
+    try {
+      const { blob, filename } = await api.exportReport(format, 'all');
+      downloadBlob(blob, filename);
+      toast.success('Report exported', `${active.name} · ${filename}`);
+      setOpen(false);
+    } catch (e) {
+      toast.error('Could not export the report', e);
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <div className="export-menu" ref={ref}>
+      <button className="btn btn--sm" onClick={() => setOpen((v) => !v)} aria-haspopup="menu" aria-expanded={open}
+        title={`Build and download the report for ${active.name}`}>
+        <Icon.Download /> Export report
+      </button>
+      {open && (
+        <div className="export-menu__list" role="menu" aria-label={`Export ${active.name}`}>
+          <div className="export-menu__head">
+            <span className="eyebrow">Active case</span>
+            <span className="ellipsis" title={active.name}>{active.name}</span>
+          </div>
+          {EXPORTS.map((x) => (
+            <button key={x.format} role="menuitem" className="export-menu__item" disabled={busy !== null} onClick={() => void run(x.format)}>
+              {busy === x.format ? <span className="btn__spinner" /> : <Icon.Download width={12} height={12} />}
+              <span className="export-menu__label">{x.label}</span>
+              <span className="export-menu__hint">{x.hint}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 interface EditState { id: string; name: string; analyst: string }
 
@@ -174,6 +242,7 @@ export function CasesScreen() {
         hint="one case is active at a time — every screen operates on it"
         actions={
           <>
+            <ExportReport active={all.find((cs) => cs.active)} />
             {(trash.data?.length ?? 0) > 0 && (
               <button className="btn btn--sm btn--ghost" onClick={() => setShowTrash((v) => !v)} aria-expanded={showTrash}
                 title="Cases you deleted recently — still restorable">

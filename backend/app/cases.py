@@ -461,6 +461,69 @@ def _trash_name(case_id: str) -> str:
     return f"{case_id}-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
 
 
+def _release_library_copies(case_id: str, moved_to: Path) -> None:
+    """A deleted case takes its ATTACHED files out of the workspace with it.
+
+    Attaching a staged library file to a case copies the bytes into `cases/<id>/uploads/` and leaves
+    the staged copy in `library/` (Store.attach_library_source — the in-memory `source_library` link
+    is what stopped `restore_library` re-adding it). Deleting the case moved the uploads to the trash
+    and cleared those sources from memory, and then the very next `load_library()` (activating the
+    replacement case) — or the next restart — found the staged copy with no case claiming it and
+    parsed it straight back into the pool as a library source. Reported as *"when deleting a case,
+    associated Anomalies detections / graph detections etc do not clear"*: the detections were on
+    events that had come back through the side door.
+
+    So the staged copy is removed here, ONLY when the trash entry holds the bytes (the copy into the
+    case's uploads can fall back to the staged path on an OSError, in which case the staged file is
+    the only copy and stays). The trash entry is the file's home now: a restore re-parses the case's
+    uploads, and a later detach re-stages it (`Store._stage_into_library`). Files that were never
+    attached to this case are not touched — the library is case-less on purpose.
+    """
+    try:
+        meta = _read_meta_from(moved_to / _latest_trash_entry_for(case_id)) if moved_to else {}
+    except Exception:  # noqa: BLE001 — a delete must not fail on its own bookkeeping
+        meta = {}
+    names: list[str] = []
+    for src in meta.get("sources") or []:
+        name = str((src or {}).get("library") or "")
+        if name and name not in names:
+            names.append(name)
+    if not names:
+        return
+    from .routers.library import _update_library_index, invalidate_library_cache
+    entry_dir = moved_to / _latest_trash_entry_for(case_id)
+    released: list[str] = []
+    for name in names:
+        kept = entry_dir / "uploads" / name
+        staged = config.LIBRARY_DIR / name
+        if not kept.is_file() or not staged.is_file():
+            continue
+        try:
+            staged.unlink()
+            released.append(name)
+        except OSError as exc:
+            log.warning("delete %s: could not release library copy of %s: %s", case_id, name, exc)
+    if released:
+        _update_library_index(lambda idx: any(idx.pop(n, None) is not None for n in list(released)))
+        invalidate_library_cache()
+        log.info("delete %s: released %d library cop%s that the case had attached: %s", case_id,
+                 len(released), "y" if len(released) == 1 else "ies", ", ".join(released))
+
+
+def _latest_trash_entry_for(case_id: str) -> str:
+    entries = sorted(p.name for p in config.TRASH_DIR.iterdir()
+                     if p.is_dir() and p.name.startswith(f"{case_id}-")) if config.TRASH_DIR.exists() else []
+    return entries[-1] if entries else ""
+
+
+def _read_meta_from(case_dir: Path) -> dict[str, Any]:
+    p = case_dir / "case.json"
+    if not p.is_file():
+        return {}
+    with open(p, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
 def _to_trash(case_id: str) -> bool:
     """Move cases/<id> into the trash. True when the case folder is really gone from cases/.
 
@@ -664,6 +727,7 @@ def delete_case(case_id: str) -> None:
             moved = _to_trash(case_id)
         if moved:
             _prune_trash()
+            _release_library_copies(case_id, moved_to=config.TRASH_DIR)
         if not was_active:
             return
         remaining = case_ids()

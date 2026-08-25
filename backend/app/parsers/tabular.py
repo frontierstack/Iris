@@ -9,7 +9,8 @@ from .base import ParsedEvent, clean
 
 TS_NAMES = ("ts", "time", "timestamp", "@timestamp", "date", "datetime", "eventtime", "event_time", "created", "created_at",
             "logged", "logged_at", "occurred", "start_time", "starttime", "when", "generated", "receipttime", "receipt_time",
-            "date_time", "date/time", "time_generated", "timegenerated", "utc", "epoch")
+            "date_time", "date/time", "time_generated", "timegenerated", "utc", "epoch", "epoch_ms", "epochmillis",
+            "epoch_millis", "unix_time", "unixtime", "unix_ts", "timestamp_ms", "ts_ms", "time_ms", "_time", "time_t")
 HOST_NAMES = ("host", "hostname", "computer", "computername", "computer_name", "device", "devicename", "device_name", "server",
               "machine", "node", "system", "src_host", "source_host", "workstation", "asset", "sensor")
 USER_NAMES = ("user", "username", "user_name", "account", "accountname", "account_name", "userid", "user_id", "actor", "principal",
@@ -25,7 +26,7 @@ TS_IN_TEXT = [
     re.compile(r"((?:[A-Z][a-z]{2}\s+){1,2}\d{1,2},?\s+(?:\d{4}\s+)?\d{2}:\d{2}:\d{2})"),
     re.compile(r"(\d{1,2}/\d{1,2}/\d{4}[ ,T]+\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AP]M)?)", re.I),
     re.compile(r"(\d{4}/\d{2}/\d{2}[ ,T]+\d{2}:\d{2}:\d{2})"),
-    re.compile(r"\b(\d{10}(?:\.\d{1,6})?)\b"),
+    re.compile(r"\b(\d{10}(?:\d{3}|\d{6}|\d{9})?(?:\.\d{1,9})?)\b"),
 ]
 _LEVEL_RE = re.compile(r"\b(EMERG|FATAL|CRIT(?:ICAL)?|ALERT|ERR(?:OR)?|WARN(?:ING)?|NOTICE|INFO|DEBUG|TRACE)\b", re.I)
 

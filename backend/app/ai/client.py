@@ -49,6 +49,41 @@ class AIError(Exception):
     pass
 
 
+class ContextTooLong(AIError):
+    """The provider refused the request because the TRANSCRIPT no longer fits the model's context window.
+
+    Reported live as `openai HTTP 400 at .../v1/chat/completions (the response body is in the server log)`
+    followed by the run dying. The analyst's gateway (llama.cpp, context shift enabled) refuses a
+    PROMPT larger than n_ctx outright; context shift only helps with generated tokens. Iris's own
+    compaction threshold (IRIS_AI_MAX_CONTEXT_TOKENS, an estimate) sat above the real window, so Iris
+    never compacted and the provider said no. This is the signal the investigator compacts on: it is
+    not a failure of the run, it is the moment to fold the transcript and carry on.
+
+    `limit` / `requested` are the token counts when the body states them (OpenAI-style "maximum
+    context length is 8192 tokens ... you requested 9021"), else 0. Only those two integers are taken
+    from the body; see `_http_error` for why the body itself is never echoed.
+    """
+
+    def __init__(self, message: str, status: int = 400, limit: int = 0, requested: int = 0) -> None:
+        super().__init__(message)
+        self.status = status
+        self.limit = limit
+        self.requested = requested
+
+
+class ProviderUnavailable(AIError):
+    """A TRANSIENT provider failure: 5xx, 429, a timeout, a dropped connection. Worth retrying.
+
+    The investigator retries these a bounded number of times with a backoff before failing the run;
+    nothing of the turn has reached the transcript when they happen, so re-sending is safe. A 4xx
+    that is not a context overflow is NOT one of these: a wrong key or URL will not fix itself.
+    """
+
+    def __init__(self, message: str, status: int = 0) -> None:
+        super().__init__(message)
+        self.status = status
+
+
 class BadToolArguments(AIError):
     """The provider could not parse the ARGUMENTS the model wrote for a tool call.
 
@@ -421,6 +456,16 @@ class LLMClient:
             raise AIError("AI provider is not configured (settings.ai.provider = none)")
         body = self._chat_body(messages, temperature, True, tools, tool_choice)
         bases = [self.resolved_base] if self.resolved_base else self.candidate_bases()
+        try:
+            async for item in self._stream_bases(body, bases, tools):
+                yield item
+        except httpx.HTTPError as exc:
+            # ConnectError, ReadTimeout, RemoteProtocolError (the gateway closed the stream mid-reply),
+            # ReadError: none of these is a fact about the transcript, so the caller may retry the turn.
+            raise ProviderUnavailable(f"could not reach the AI provider ({type(exc).__name__}: {exc})") from exc
+
+    async def _stream_bases(self, body: dict[str, Any], bases: list[str],
+                            tools: Optional[list[dict[str, Any]]]) -> AsyncIterator[dict[str, Any]]:
         async with httpx.AsyncClient(timeout=self.timeout, verify=self.verify) as client:
             for i, cand in enumerate(bases):
                 url = f"{cand}/chat/completions"
@@ -442,6 +487,17 @@ class LLMClient:
                                 f"unescaped quote or newline inside a long string. If it keeps happening, "
                                 f"prefer a model with constrained/grammar-based tool output, or ask for "
                                 f"less in one call.")
+                        if _context_overflow(resp.status_code, text):
+                            limit, requested = _context_numbers(text)
+                            raise ContextTooLong(
+                                f"the conversation no longer fits the model's context window - the provider "
+                                f"refused the request (HTTP {resp.status_code} at {url}"
+                                + (f", limit {limit:,} tokens" if limit else "")
+                                + (f", requested {requested:,}" if requested else "") + ")",
+                                status=resp.status_code, limit=limit, requested=requested)
+                        if _transient_status(resp.status_code):
+                            raise ProviderUnavailable(self._http_error(resp.status_code, text, url, tried=bases),
+                                                      status=resp.status_code)
                         if tools and _rejects_tools(resp.status_code, text):
                             # Fail LOUDLY and specifically. Retrying without `tools` would produce a model
                             # that cannot act, narrating tool calls it never made — which is the failure
@@ -627,6 +683,45 @@ _ARG_PARSE_FAIL = (
     ("parse error", "tool_call"),
     ("failed to parse", "arguments"),
 )
+
+
+_CTX_WORDS = ("context length", "context_length", "context window", "context size", "maximum context",
+              "max context", "too many tokens", "prompt is too long", "prompt too long", "exceeds the available",
+              "exceed the context", "exceeds the context", "reduce the length", "n_ctx", "input length",
+              "tokens to process", "context shift", "request too large", "prompt_tokens")
+
+
+def _context_overflow(status: int, body: str) -> bool:
+    """Is this 4xx the provider saying the PROMPT does not fit its context window?
+
+    OpenAI: 400 `context_length_exceeded` / "This model's maximum context length is N tokens".
+    llama.cpp: 400 "the request exceeds the available context size. try increasing the context size or
+    enable context shift". vLLM / Ollama / LM Studio say "input length", "prompt is too long",
+    "context window". 413 is what a proxy in front of any of them says.
+    """
+    if status not in (400, 413, 422):
+        return False
+    low = (body or "").lower()
+    return any(w in low for w in _CTX_WORDS)
+
+
+_CTX_LIMIT_RE = re.compile(r"(?:maximum|max)[^.\d]{0,40}?(\d{3,7})\s*tokens", re.I)
+_CTX_REQ_RE = re.compile(r"(?:requested|resulted in|your messages? (?:resulted in|contains?))\D{0,30}?(\d{3,8})\s*tokens", re.I)
+
+
+def _context_numbers(body: str) -> tuple[int, int]:
+    """(limit, requested) token counts from an overflow body, 0 when it does not state them."""
+    def _n(rx: "re.Pattern[str]") -> int:
+        m = rx.search(body or "")
+        try:
+            return int(m.group(1)) if m else 0
+        except (TypeError, ValueError):
+            return 0
+    return _n(_CTX_LIMIT_RE), _n(_CTX_REQ_RE)
+
+
+def _transient_status(status: int) -> bool:
+    return status in (408, 425, 429, 500, 502, 503, 504)
 
 
 def _model_wrote_bad_json(status: int, body: str) -> bool:

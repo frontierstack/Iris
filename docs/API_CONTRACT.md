@@ -692,7 +692,11 @@ interface CaseSummary { id:string; name:string; analyst:string; createdAt:string
    destroying it; a case holds the only copy of its uploads, so an rmtree was an unrecoverable loss of evidence. If it was
    active, the most recent remaining case is activated; if nothing remains the store holds a pending id (see `Case.pending`).
    `.trash` is a SIBLING of `cases/`, so `case_ids()` never lists it. The newest `config.TRASH_KEEP` (5) entries are kept,
-   older ones are pruned oldest-first on each delete.
+   older ones are pruned oldest-first on each delete. **A deleted case takes its ATTACHED files out of the workspace
+   with it**: the staged `library/` copy an attach left behind is released (only when the trash entry holds the
+   bytes), so the file does not come straight back into the pool as a library source — with its detections — on
+   the next library load or restart. A restore re-parses the case's uploads; a later detach re-stages the file.
+   Files never attached to the case are untouched (the library is case-less).
 - `GET  /api/cases/trash` → `{entry, caseId, name, deletedAt, events, sources, sizeBytes}[]` — restorable deletes, newest
    first. Declared BEFORE `/{case_id}` in the router: FastAPI matches in order and a dynamic route would swallow `/trash`.
 - `POST /api/cases/trash/{entry}/restore` → CaseSummary — moves the folder back and re-parses its uploads. If the original
@@ -1132,23 +1136,40 @@ type AiRunEvent =
       (it fires on a BARREN STREAK, never on the call count: a run still finding things is never
       interrupted); budgetNotice = the "leave room to write it up" one; documentCheck = the "you
       recorded nothing in the case" one. All three are ordinary status lines. */
-  | { type:'status'; text:string; checkIn?:number; budgetNotice?:boolean; documentCheck?:boolean }
+  | { type:'status'; text:string; checkIn?:number; budgetNotice?:boolean; documentCheck?:boolean;
+      recordNudge?:number; summaryCheck?:boolean }
+  /** recordNudge = the "record as you go" nudge: N productive reads and nothing written to the case yet — record
+      what is solid, then CONTINUE (never a request to finish; at most 3 per run). summaryCheck = the end-of-run
+      "you recorded findings as you went, now write the summary note + case summary" one (once, only when the run
+      wrote something and no add_note / update_case landed). */
   | { type:'step'; step:number; elapsedSec:number }
   | { type:'delta'; text:string; step:number }                       // the model's prose, streamed
   | { type:'tool_call'; id:string; name:string; arguments:object; step:number }
   | { type:'tool_result'; id:string; name:string; ok:boolean; tookMs:number; summary:string; data:unknown }
   | { type:'write'; action:AiAction }                                // something in the case actually changed
-  | { type:'warning'; message:string; ids:string[] }                 // cited ids that do not exist
+  | { type:'warning'; message:string; ids:string[];                  // cited ids that do not exist, or:
+      contextCeiling?:number; compactions?:number; retry?:number }
+  /** contextCeiling: the PROVIDER refused the transcript for its size (HTTP 400/413 naming the context window —
+      llama.cpp's "exceeds the available context size", OpenAI's context_length_exceeded). Iris folded the
+      transcript, lowered this run's ceiling to that many estimated tokens, and re-sent the SAME turn; nothing of
+      the turn had reached the transcript. Bounded (4 per turn, 12 per run); when even the objective alone does
+      not fit, the run ends with an `error` naming the real fix (a larger n_ctx). retry: a transient provider
+      failure (5xx / 429 / timeout / dropped connection) being retried with a backoff, 3 times, before the run
+      fails. Both are warnings because they are facts about the run the analyst should see. */
   | { type:'answer'; text:string }
   | { type:'done'; runId:string; threadId:string; parentId:string; reason:string; state:string; steps:number;
       toolCalls:number; writes:number;
-      actions:AiAction[]; unverifiedCitations:string[]; answer:string; elapsedSec:number }
+      actions:AiAction[]; unverifiedCitations:string[]; answer:string; elapsedSec:number;
+      compactions:number; contextCeiling:number; recordNudges:number }
   | { type:'error'; message:string; actions?:AiAction[] };
 ```
 - `POST /api/ai/investigate` body `AiInvestigateRequest` → SSE (`text/event-stream`) of `AiRunEvent`. The response
    header `X-Iris-Run-Id` carries the run id, and the first event is always `run` with the same id and the limits in
    force. The stream NEVER 500s: a provider failure, a disabled provider or an internal error is one terminal
-   `error` event.
+   `error` event. **A failed run is not a lost one**: the error message says how many tool calls and case writes
+   are kept, and a follow-up (`continueFrom` = that run's id) is seeded with the failed turn's calls AND the prose
+   it wrote along the way, marked "ended early — continue from where it stopped", so "continue" resumes rather
+   than re-running the investigation.
 - `POST /api/ai/investigate/{runId}/stop` → `{ok:boolean, runId}` — ask a live run to stop. Checked before every
    step and after every tool call, so a stop lands within one tool call. `ok:false` means there is no live run with
    that id (already finished, or never started). Pass your own `runId` on the request if you want to be able to stop

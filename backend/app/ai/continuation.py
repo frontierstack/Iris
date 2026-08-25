@@ -33,11 +33,17 @@ from typing import Any, Optional
 
 from . import eventids
 
-MAX_BRIEF_CHARS = 9000        # the whole prior-conversation block handed to a follow-up
+MAX_BRIEF_CHARS = 12000       # the whole prior-conversation block handed to a follow-up
 MAX_TURNS = 8                 # earlier turns folded in; older ones are dropped with a line saying so
 MAX_ANSWER_RECENT = 2600      # the previous turn's report, kept near-verbatim
 MAX_ANSWER_OLDER = 900
 MAX_CALLS_PER_TURN = 14
+# The turn being continued gets far more of its calls listed than an older one. A 46-call run that a
+# provider error ended was being folded to 14 lines, and the follow-up then re-ran the other 32.
+MAX_CALLS_RECENT = 48
+# A turn that ENDED EARLY (a provider error, a stop, an interrupted process) has no report — but it
+# has the prose it wrote along the way, and that prose IS its findings so far. Carry the tail of it.
+MAX_NOTES_UNFINISHED = 3000
 MAX_IDS = 120
 
 _ID_RE = eventids.BARE     # hex, not decimal — see ai/eventids.py
@@ -71,6 +77,15 @@ def _ids_from(rec: dict[str, Any], out: list[str]) -> None:
             v = m.group(1)
             if v not in out and len(out) < MAX_IDS:
                 out.append(v)
+
+
+def _notes_of(rec: dict[str, Any]) -> str:
+    """The prose a turn wrote between its tool calls — what it had worked out before it ended."""
+    chunks = [str(e.get("text") or "").strip() for e in rec.get("transcript") or [] if e.get("kind") == "text"]
+    text = "\n".join(c for c in chunks if c)
+    if len(text) > MAX_NOTES_UNFINISHED:
+        text = "… " + text[-MAX_NOTES_UNFINISHED:]
+    return text
 
 
 def _calls_of(rec: dict[str, Any]) -> list[str]:
@@ -116,16 +131,29 @@ def build(records: list[dict[str, Any]], *, max_chars: int = MAX_BRIEF_CHARS) ->
         n = dropped + i + 1
         head = f"\n--- TURN {n} — the analyst asked: {_clip(rec.get('prompt'), 600)}"
         state = str(rec.get("state") or "")
-        if state and state != "done":
-            head += f"  [this turn ended: {state}{' / ' + str(rec.get('reason')) if rec.get('reason') else ''}]"
+        unfinished = bool(state) and state != "done"
+        if unfinished:
+            why = str(rec.get("reason") or state)
+            err = _clip(rec.get("error"), 160)
+            head += (f"  [THIS TURN ENDED EARLY: {why}{' - ' + err if err else ''}. Its work below is "
+                     f"still valid — CONTINUE FROM WHERE IT STOPPED; do not restart the investigation.]")
         parts.append(head)
         calls = _calls_of(rec)
         if calls:
+            cap = MAX_CALLS_RECENT if i == len(turns) - 1 else MAX_CALLS_PER_TURN
+            shown = calls[:cap]
+            more = len(calls) - len(shown)
             parts.append("Tools already run (their answers are below — do not run them again):\n" +
-                         "\n".join(f"  {c}" for c in calls[:MAX_CALLS_PER_TURN]))
+                         "\n".join(f"  {c}" for c in shown) +
+                         (f"\n  … and {more} more call(s) not listed" if more > 0 else ""))
         answer = str(rec.get("answer") or "").strip()
         if answer:
             parts.append("You reported:\n" + _clip(answer, MAX_ANSWER_RECENT if recent else MAX_ANSWER_OLDER))
+        elif unfinished:
+            notes = _notes_of(rec)
+            if notes:
+                parts.append("It never reached a report. What it had established, in its own words as it "
+                             "went (treat as your findings so far):\n" + notes)
         _ids_from(rec, ids)
         writes.extend(_writes_of(rec))
 
