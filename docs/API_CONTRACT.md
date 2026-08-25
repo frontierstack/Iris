@@ -228,7 +228,14 @@ interface McpStatus {                              // GET /api/mcp/status — dr
 }
 
 interface ComputeStatus { available:boolean; active:'cuda'|'cpu'; mode:'auto'|'cuda'|'cpu'; gpus:{index:number;name:string;memoryTotalMB:number;memoryUsedMB:number;driver?:string}[];
-  cudaVersion?:string; backend:'cupy'|'torch'|'numpy'; lastCheck:string; checking:boolean; error?:string; note?:string }
+  cudaVersion?:string; backend:'cupy'|'torch'|'numpy'; lastCheck:string; checking:boolean; error?:string; note?:string;
+  resources?: { machine: { cpuLogical:number; cpuPhysical:number; cpuUsable:number; cpuQuota?:number; memTotalMB:number;
+                           memAvailableMB:number; memLimitMB?:number; container:boolean; platform:string };
+                profile: { parseWorkers:number; graphWorkers:number; enrichWorkers:number; uploadLanes:number;
+                           pinned:Record<string,number>; reasons:string[] } } }
+// resources = what the machine has (cores this process may USE — affinity and container quota, not the host count —
+//             and memory, the container limit when there is one) and the worker counts Iris derived from it
+//             (app/resources.py). `pinned` lists every IRIS_*_WORKERS env var that overrode the derived value.
 // error = something is wrong (mode 'cuda' with no backend, or a GPU lib that is installed but broken — raw probe detail included).
 // note  = informational, not a failure: on a CPU install in mode 'auto'/'cpu' neither cupy nor torch is present, which is the
 //         expected supported configuration. The UI must render `note` as a hint, never as an error.

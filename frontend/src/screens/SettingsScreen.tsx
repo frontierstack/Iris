@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
-import type { AiTestResult, ComputeMode, Settings, ThemeName } from '../api/types';
+import type { AiTestResult, ComputeMode, ComputeStatus, Settings, ThemeName } from '../api/types';
 import { Icon } from '../components/icons';
 import { useAuthStatus } from '../components/LoginGate';
 import { Bar, ConfirmDialog, ErrorState, Loading, Toggle } from '../components/ui';
@@ -158,6 +158,39 @@ function Appearance({ settings }: { settings: Settings }) {
   );
 }
 
+/* ───────── Machine + worker sizing ─────────
+   What the process can actually use (not the host's core count — a container quota or the WSL VM's
+   allotment is what decides) and the worker pools Iris derived from it, with the reasoning. The
+   numbers are the answer to "is it using all my cores?", so they are printed, not implied. */
+function ResourceBlock({ r }: { r: NonNullable<ComputeStatus['resources']> }) {
+  const { machine: m, profile: p } = r;
+  const gb = (mb: number) => `${(mb / 1024).toFixed(1)} GB`;
+  const pinned = Object.entries(p.pinned ?? {});
+  return (
+    <div className="field">
+      <span className="field__label">Machine &amp; worker sizing</span>
+      <div className="compute-head">
+        <span className="badge">{m.cpuUsable} usable cores{m.cpuUsable !== m.cpuLogical ? ` of ${m.cpuLogical}` : ''} · {m.cpuPhysical} physical</span>
+        {m.cpuQuota != null && <span className="badge badge--warn">container CPU quota {m.cpuQuota}</span>}
+        <span className="badge">{m.memTotalMB ? `${gb(m.memAvailableMB)} free of ${gb(m.memTotalMB)}` : 'memory unknown'}</span>
+        {m.memLimitMB != null && <span className="badge badge--warn">memory limit {gb(m.memLimitMB)}</span>}
+        <span className="badge">{m.container ? 'container' : m.platform}</span>
+      </div>
+      <div className="res-grid">
+        <div className="res-tile"><span className="res-tile__n">{p.parseWorkers}</span><span className="res-tile__l">parse workers<br /><span className="muted">files over the parallel threshold</span></span></div>
+        <div className="res-tile"><span className="res-tile__n">{p.graphWorkers}</span><span className="res-tile__l">graph workers<br /><span className="muted">entity extraction</span></span></div>
+        <div className="res-tile"><span className="res-tile__n">{p.enrichWorkers}</span><span className="res-tile__l">enrichment lanes<br /><span className="muted">small sources, in parallel</span></span></div>
+      </div>
+      <div className="field__hint">
+        {p.reasons.map((line, i) => <div key={i}>{line}</div>)}
+        {pinned.length > 0
+          ? <div>Pinned by environment: {pinned.map(([k, v]) => `${k}=${v}`).join(', ')} — unset to let Iris size it.</div>
+          : <div>Sized automatically on every start. IRIS_PARSE_WORKERS, IRIS_GRAPH_WORKERS and IRIS_ENRICH_WORKERS pin any one of them.</div>}
+      </div>
+    </div>
+  );
+}
+
 /* ───────── Compute ───────── */
 function Compute({ settings }: { settings: Settings }) {
   const qc = useQueryClient();
@@ -220,6 +253,7 @@ function Compute({ settings }: { settings: Settings }) {
           </div>
         </>
       )}
+      {s?.resources && <ResourceBlock r={s.resources} />}
       <div className="field">
         <span className="field__label">Live processing &amp; performance</span>
         <PerfPanel />

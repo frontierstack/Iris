@@ -212,7 +212,12 @@ def status() -> ComputeStatus:
         if active == "cpu" and mode != "cuda" and no_libs and not error:
             note = _NO_LIBS_HINT
         backend = _state.backend if active == "cuda" else "numpy"
-        return ComputeStatus(
+        try:
+            from . import resources as _res
+            res_block: Optional[dict] = _res.as_dict()
+        except Exception:
+            res_block = None
+        return ComputeStatus(resources=res_block,
             available=available, active=active, mode=mode, gpus=list(_state.gpus),
             cudaVersion=_state.cuda_version, backend=backend,  # type: ignore[arg-type]
             lastCheck=_state.last_check.strftime("%Y-%m-%dT%H:%M:%SZ"), checking=_state.checking, error=error, note=note,

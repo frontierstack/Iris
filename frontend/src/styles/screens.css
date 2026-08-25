@@ -3759,3 +3759,13 @@ mark.hl {
   border-top: 1px solid var(--border);
   margin-top: 4px;
 }
+
+/* ═══════ SETTINGS: machine & worker sizing ═══════ */
+.res-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 10px 0 6px; }
+.res-tile {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-1);
+}
+.res-tile__n { font-family: var(--font-mono); font-size: 22px; font-weight: 600; color: var(--accent); min-width: 2ch; text-align: right; }
+.res-tile__l { font-size: var(--fs-sm); line-height: 1.3; }
+@media (max-width: 720px) { .res-grid { grid-template-columns: 1fr; } }

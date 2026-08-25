@@ -397,7 +397,8 @@ class EnrichQueue:
         try:
             from .graph_parts import workers_by_memory
             from .parsers.parallel import min_parallel_bytes
-            cap = min(PARALLEL_SMALL_MAX, workers_by_memory(PARALLEL_SMALL_MAX))
+            width = small_parallel_max()
+            cap = min(width, workers_by_memory(width))
         except Exception:
             return []
         if cap < 2:
@@ -433,7 +434,8 @@ class EnrichQueue:
             self._committing = True
         self._set_phase("parsing")
         try:
-            pool = ProcessPoolExecutor(max_workers=min(len(tasks), PARALLEL_SMALL_MAX),
+            width = small_parallel_max()
+            pool = ProcessPoolExecutor(max_workers=min(len(tasks), width),
                                        mp_context=get_context("spawn"), initializer=background_worker_init)
         except Exception as exc:
             log.warning("parallel enrichment unavailable (%s); parsing one at a time", exc)
@@ -476,7 +478,7 @@ class EnrichQueue:
             ok = sum(1 for r in res if r is not None and r.ok)
             bad = [f"{r.sid}: {r.error}" for r in res if r is not None and not r.ok]
             print(f"[iris] enrichment: parsed {len(tasks)} small sources in parallel "
-                  f"({min(len(tasks), PARALLEL_SMALL_MAX)} workers, {time.time() - t0:.1f}s; "
+                  f"({min(len(tasks), width)} workers, {time.time() - t0:.1f}s; "
                   f"{ok} committed{', ' + '; '.join(bad) if bad else ''})", flush=True)
 
     # --------------------------------------------------------------- worker
@@ -615,5 +617,15 @@ BATCH_SECONDS = 30.0
 # Small sources are parsed in PARALLEL processes (one file per worker) and committed here in order.
 # Big ones keep the chunked pool. Bound is the memory-aware worker count, never more than this.
 PARALLEL_SMALL_MAX = 6
+
+
+def small_parallel_max() -> int:
+    """Workers for the small-source parallel parse: `resources.profile().enrichWorkers` (cores, memory
+    and the IRIS_ENRICH_WORKERS pin), never more than HARD_MAX. The constant above is the fallback."""
+    try:
+        from .resources import profile
+        return max(1, profile().enrichWorkers)
+    except Exception:
+        return PARALLEL_SMALL_MAX
 
 QUEUE = EnrichQueue()

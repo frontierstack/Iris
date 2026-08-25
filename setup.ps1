@@ -278,6 +278,38 @@ function Ensure-Tesseract {
 # Print what Iris needs and what this machine has, BEFORE doing anything. A dependency that is
 # checked silently is indistinguishable from one that is not checked at all - which is exactly how
 # "there is no check for Python" gets reported about code that does check.
+function Get-HostResources {
+  $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
+  $cpu = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue
+  $logical = [int]$env:NUMBER_OF_PROCESSORS
+  $physical = 0
+  foreach ($c in @($cpu)) { $physical += [int]$c.NumberOfCores }
+  if ($physical -le 0) { $physical = $logical }
+  $mem = if ($cs) { [double]$cs.TotalPhysicalMemory / 1GB } else { 0 }
+  return @{ Logical = $logical; Physical = $physical; MemGB = $mem }
+}
+
+function Optimal-Workers([int]$logical, [int]$physical) {
+  # the same rule as backend/app/resources.py: two cores for the API process, SMT siblings count
+  # at 1.5x physical (measured: 8 logical / 4 physical saturated at six), never above 32
+  $byLogical = $logical - 2
+  $byPhysical = [Math]::Max($physical, [int][Math]::Round($physical * 1.5))
+  return [Math]::Max(1, [Math]::Min(32, [Math]::Min($byLogical, $byPhysical)))
+}
+
+function Get-WslAllotment {
+  # what .wslconfig gives the VM; WSL's own defaults are every core and HALF the host RAM
+  $procs = $env:NUMBER_OF_PROCESSORS; $mem = 'half of host RAM (WSL default)'
+  $path = Join-Path $env:USERPROFILE '.wslconfig'
+  if (Test-Path $path) {
+    foreach ($line in Get-Content -LiteralPath $path) {
+      if ($line -match '^\s*processors\s*=\s*(\d+)') { $procs = $Matches[1] }
+      if ($line -match '^\s*memory\s*=\s*(\S+)') { $mem = $Matches[1] }
+    }
+  }
+  return @{ Processors = $procs; Memory = $mem }
+}
+
 function Show-Preflight {
   param([string]$For)
   Log "Preflight ($For):"
@@ -296,6 +328,17 @@ function Show-Preflight {
   $gpu = if ($smi) { 'driver OK' } elseif ($hw) { "$hw - NO DRIVER" } else { 'none (CPU mode)' }
   $rows += ,@('NVIDIA GPU', $gpu)
   $rows += ,@('winget', $(if (Get-Command winget -ErrorAction SilentlyContinue) { 'present' } else { 'MISSING - cannot auto-install' }))
+  # The machine itself. Iris sizes its parse / graph / enrichment worker pools from the cores and
+  # memory the PROCESS can see (backend/app/resources.py) - on Docker Desktop that is the WSL VM's
+  # allotment, so the VM row is what actually decides, and wsl.ps1 sets it from the host's hardware.
+  $hw2 = Get-HostResources
+  $rows += ,@('CPU', ("{0} logical / {1} physical cores" -f $hw2.Logical, $hw2.Physical))
+  $rows += ,@('Memory', ("{0:n1} GB" -f $hw2.MemGB))
+  if ($For -ne 'local') {
+    $vm = Get-WslAllotment
+    $rows += ,@('WSL 2 VM', ("{0} cores, {1} - what the container gets" -f $vm.Processors, $vm.Memory))
+  }
+  $rows += ,@('Iris workers', ("~{0} per pool (usable cores - 2, at most 1.5x physical, capped 32); IRIS_*_WORKERS pins it" -f (Optimal-Workers $hw2.Logical $hw2.Physical)))
   foreach ($r in $rows) {
     $mark = if ("$($r[1])" -match 'MISSING|NO DRIVER') { '  !' } else { '  .' }
     Write-Host ("{0} {1,-14} {2}" -f $mark, $r[0], $r[1])

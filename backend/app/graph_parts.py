@@ -116,8 +116,12 @@ def workers() -> int:
             return max(0, int(env))
         except ValueError:
             pass
-    from .parsers.parallel import default_worker_count
-    return workers_by_memory(default_worker_count(MAX_WORKERS))
+    try:
+        from .resources import profile
+        return profile().graphWorkers          # cores AND memory, derived — see resources.py
+    except Exception:
+        from .parsers.parallel import default_worker_count
+        return workers_by_memory(default_worker_count(MAX_WORKERS))
 
 
 # ----------------------------------------------------------------------------- the rows a worker sees

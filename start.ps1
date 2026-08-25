@@ -154,6 +154,17 @@ function Show-Summary {
     $gpu = 'CPU (numpy)'
     if ($comp.active -eq 'cuda' -and $comp.gpus.Count -gt 0) { $gpu = "$($comp.gpus[0].name) - $($comp.backend)" }
     Write-Host "  compute   $gpu" -ForegroundColor DarkGray
+    # Iris sizes its worker pools from what the CONTAINER/process can see (app/resources.py); on
+    # Docker Desktop that is the WSL VM's share, not the host - Check-Wsl says when they differ.
+    $r = $comp.resources
+    if ($r) {
+      $m = $r.machine; $p = $r.profile
+      Write-Host ("  workers   parse {0} - graph {1} - enrichment {2}  (sees {3} cores, {4:n1} GB RAM)" -f `
+        $p.parseWorkers, $p.graphWorkers, $p.enrichWorkers, $m.cpuUsable, ($m.memTotalMB / 1024)) -ForegroundColor DarkGray
+      if ($p.pinned.PSObject.Properties.Count -gt 0) {
+        Write-Host ("  pinned    " + (($p.pinned.PSObject.Properties | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ', ')) -ForegroundColor DarkGray
+      }
+    }
   } catch { }
   if ($c) {
     $srcs = $c.sources.Count + $c.librarySources.Count

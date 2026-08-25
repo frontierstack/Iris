@@ -35,6 +35,11 @@ services:
       IRIS_AI_BASE_URL: ${IRIS_AI_BASE_URL:-}
       IRIS_AI_API_KEY: ${IRIS_AI_API_KEY:-}
       IRIS_POOL_MAX_MB: ${IRIS_POOL_MAX_MB:-}
+      # Worker pools size themselves from what the container can see (a `cpus:`/`mem_limit` here
+      # would be honoured - Iris reads the cgroup quota); these pin them instead.
+      IRIS_PARSE_WORKERS: ${IRIS_PARSE_WORKERS:-}
+      IRIS_GRAPH_WORKERS: ${IRIS_GRAPH_WORKERS:-}
+      IRIS_ENRICH_WORKERS: ${IRIS_ENRICH_WORKERS:-}
       IRIS_MCP_ENABLED: ${IRIS_MCP_ENABLED:-}
       IRIS_MCP_ALLOW_WRITES: ${IRIS_MCP_ALLOW_WRITES:-}
       IRIS_MCP_TOKEN: ${IRIS_MCP_TOKEN:-}

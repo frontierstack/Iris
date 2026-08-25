@@ -177,6 +177,26 @@ preflight() {
   elif [[ -n "$hw"  ]]; then row "NVIDIA GPU" "$hw - NO DRIVER"
   else                       row "NVIDIA GPU" "none (CPU mode)"; fi
   row "pkg manager"  "$(detect_pkg_mgr)"
+  # The machine itself. Iris sizes its parse / graph / enrichment worker pools from the cores and
+  # memory the PROCESS can see (backend/app/resources.py); IRIS_*_WORKERS pins any of them.
+  local logical physical memgb
+  logical="$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 2)"
+  physical="$(lscpu -p=core 2>/dev/null | grep -v '^#' | sort -u | wc -l | tr -d ' ')"
+  [[ "$physical" =~ ^[0-9]+$ && "$physical" -gt 0 ]] || physical="$(sysctl -n hw.physicalcpu 2>/dev/null || echo "$logical")"
+  memgb="$(awk '/MemTotal/ {printf "%.1f", $2/1048576}' /proc/meminfo 2>/dev/null || echo "$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))")"
+  row "CPU"          "$logical logical / $physical physical cores"
+  row "Memory"       "${memgb} GB"
+  [[ "$ENV_KIND" == "wsl" ]] && row "WSL 2 VM" "this is the VM's allotment, not the host's - .wslconfig on Windows decides it"
+  row "Iris workers" "~$(optimal_workers "$logical" "$physical") per pool (usable cores - 2, at most 1.5x physical, capped 32)"
+}
+
+optimal_workers() {   # the same rule as backend/app/resources.py
+  local logical="$1" physical="$2" by_logical by_physical n
+  by_logical=$(( logical - 2 ))
+  by_physical=$(( (physical * 3 + 1) / 2 )); (( by_physical < physical )) && by_physical=$physical
+  n=$by_logical; (( by_physical < n )) && n=$by_physical
+  (( n > 32 )) && n=32; (( n < 1 )) && n=1
+  echo "$n"
 }
 
 # The GPU libraries need a working driver, not just a card. Offer the distro's driver package when

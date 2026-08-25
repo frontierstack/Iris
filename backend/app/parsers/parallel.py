@@ -102,14 +102,21 @@ def default_worker_count(cap: int) -> int:
 
 
 def parallel_workers() -> int:
-    """How many parse workers to use. 1 (or 0) disables the parallel path entirely."""
+    """How many parse workers to use. 1 (or 0) disables the parallel path entirely.
+
+    Sized by `resources.profile()` from the cores this process may use and the memory it has — the
+    old `MAX_WORKERS = 6` was one host's measurement and left a 50-core machine running six."""
     env = os.environ.get("IRIS_PARSE_WORKERS", "").strip()
     if env:
         try:
             return max(0, int(env))
         except ValueError:
             pass
-    return default_worker_count(MAX_WORKERS)
+    try:
+        from ..resources import profile
+        return profile().parseWorkers
+    except Exception:
+        return default_worker_count(MAX_WORKERS)
 
 
 def min_parallel_bytes() -> int:

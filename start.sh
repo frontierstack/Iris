@@ -141,6 +141,13 @@ if d.get("active") == "cuda" and gpus:
     backend = d.get("backend", "")
     gpu = name + " - " + str(backend)
 print("  compute   " + gpu)
+r = d.get("resources") or {}
+m, p = r.get("machine") or {}, r.get("profile") or {}
+if p:
+    print(f"  workers   parse {p['parseWorkers']} - graph {p['graphWorkers']} - enrichment {p['enrichWorkers']}"
+          f"  (sees {m.get('cpuUsable')} cores, {m.get('memTotalMB', 0) / 1024:.1f} GB RAM)")
+    if p.get("pinned"):
+        print("  pinned    " + ", ".join(f"{k}={v}" for k, v in p["pinned"].items()))
 '
   echo "$c" | json_fmt '
 import sys, json

@@ -326,6 +326,13 @@ export interface ComputeStatus {
   backend: 'cupy' | 'torch' | 'numpy'; lastCheck: string; checking: boolean; error?: string;
   /** Informational, not a failure (e.g. a CPU install with no GPU libraries) — render as a hint, never as an error. */
   note?: string;
+  /** What the machine has and the worker counts Iris sized itself to (backend/app/resources.py). */
+  resources?: {
+    machine: { cpuLogical: number; cpuPhysical: number; cpuUsable: number; cpuQuota?: number | null; memTotalMB: number;
+               memAvailableMB: number; memLimitMB?: number | null; container: boolean; platform: string };
+    profile: { parseWorkers: number; graphWorkers: number; enrichWorkers: number; uploadLanes: number;
+               pinned: Record<string, number>; reasons: string[] };
+  } | null;
 }
 
 export interface EventLocationLine { n: number; text: string; current: boolean }

@@ -322,15 +322,35 @@ Two things to know about what is on disk: `settings.json` in the data dir holds 
 store, but the data dir is the bind mount you back up and copy around. And AI conversation transcripts in
 `ai/history.json` quote log lines verbatim, so they are evidence: `clear all data` deletes them for that reason.
 
+### Automatic sizing
+Iris sizes its worker pools itself on every start, from what the **process can actually use** — not
+from the host's core count:
+- **Cores**: the affinity mask, then a container CPU quota (`--cpus`, `deploy.resources`). Two are
+  kept for the API process (measured: with one, `/api/health` stalled 3-7 s whenever a pool started).
+  SMT siblings count at 1.5x the physical cores — on the 8-logical/4-physical host this was measured
+  on, every pool saturated at six, and hyper-threads are not cores for pure-Python string work.
+- **Memory**: the cgroup limit inside a container, otherwise free RAM, minus 2 GB reserved for the
+  pool itself; each parse worker is budgeted 512 MB, each graph worker 300 MB, each enrichment lane
+  768 MB (a whole small file per worker).
+- **Ceiling 32** per pool — past that the parent (unpickling and merging every worker's result) is the
+  bottleneck and more workers only cost memory.
+So a 50-core / 256 GB box gets 32 parse and graph workers; a laptop with 4 cores gets 2; a container
+given `--cpus=4` gets 2 whatever the host has. Settings → Compute shows the machine, the numbers and
+the reasoning; `start.*` prints them; the `IRIS_*_WORKERS` variables below pin any one of them.
+**On Docker Desktop for Windows the container sees the WSL 2 VM, not the host** — WSL's default is
+half the RAM — so `.\wsl.ps1 -Apply` writes `memory` (75 % of the host), `swap` and `processors`
+into `.wslconfig` from the machine's real hardware; `setup.ps1` prints both sides in its preflight.
+
 ### Performance and limits (rarely needed)
 | Variable | Default | What it does |
 |---|---|---|
 | `IRIS_POOL_MAX_MB` | **unset — unlimited** | Megabytes of **source log** the pool may load at startup. There is no cap by default: a file that was uploaded as evidence and is not in search is worse than a slow Iris, because nothing about a search tells you it was answered over part of the corpus. Set it (a shared box, a small VM) and anything over the cap stays in the library, listed by name, loadable one file at a time. Not a RAM figure — parsed events cost several times the source bytes. |
 | `IRIS_AUTO_ENRICH` | `1` (on) | Seeds `settings.ingest.autoEnrich` on first run. `0` = a log lands as raw searchable lines and phase 2 (timestamps, fields, entities, detections) never starts on its own — see *Two-phase ingest* below. Like every `IRIS_*` variable it only seeds settings the first time; after that Settings wins. |
-| `IRIS_PARSE_WORKERS` | `cpu_count − 2`, max 6 | Parallel parse workers. `1` disables parallel parsing. |
+| `IRIS_PARSE_WORKERS` | **derived** (see *Automatic sizing*) | Parallel parse workers for files over `IRIS_PARSE_MIN_MB`. `1` disables parallel parsing. |
+| `IRIS_ENRICH_WORKERS` | **derived**, at most half the parse count | Lanes that interpret SMALL sources in parallel during phase 2. `1` = one at a time. |
 | `IRIS_PARSE_MIN_MB` | 32 | File size above which parallel parsing kicks in. |
 | `IRIS_PARSE_CHUNK_MB` | 4 | Byte-range chunk size per worker, in MB. |
-| `IRIS_GRAPH_WORKERS` | `min(6, cpu_count − 1)` | Entity-extraction workers. `1` disables parallel graph building. |
+| `IRIS_GRAPH_WORKERS` | **derived** (see *Automatic sizing*) | Entity-extraction workers. `1` disables parallel graph building. |
 | `IRIS_GRAPH_PARALLEL_MIN` | 50 000 | Events below which the graph is built in-process. |
 | `IRIS_GRAPH_CHUNK` | 25 000 | Events per graph chunk. |
 | `IRIS_GRAPH_CACHE` | `1` | `0` disables persisting the built graph to `cache/graph-<scope>.pkl`. |

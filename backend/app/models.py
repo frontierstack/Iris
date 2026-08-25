@@ -732,6 +732,8 @@ class ComputeStatus(BaseModel):
     checking: bool
     error: Optional[str] = None
     note: Optional[str] = None  # informational (e.g. CPU install with no GPU libs) — not a failure
+    # what the machine has and how many workers Iris sized itself to — see app/resources.py
+    resources: Optional[dict] = None
 
 
 class Finding(BaseModel):

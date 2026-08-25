@@ -31,6 +31,11 @@ async def lifespan(_: FastAPI):
     compute.start_background()
     metrics.start_background()
     try:
+        from . import resources
+        print(resources.describe(), flush=True)
+    except Exception as exc:  # noqa: BLE001 — a banner must never stop the app
+        print(f"[iris] resource probe failed: {exc}", flush=True)
+    try:
         from . import cases as _cases
         from .store import STORE
         # Before the pool loads: the first warm can then read the packed index off disk instead of

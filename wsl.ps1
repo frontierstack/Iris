@@ -48,10 +48,18 @@ $Wanted = [ordered]@{
   'wsl2/maxCrashDumpCount'          = '0'
   'experimental/autoMemoryReclaim'  = 'disabled'
 }
-# only applied when the key is MISSING — never overwrite a deliberate choice
+# only applied when the key is MISSING — never overwrite a deliberate choice.
+# Sized from THIS host: WSL's own default is half the RAM and every core, and Iris inside the VM sizes
+# its worker pools from what the VM has (backend/app/resources.py) — so a 64 GB / 32-core machine on
+# WSL defaults hands the container 32 GB. Three quarters of the RAM (never below 8 GB), swap a quarter
+# of that (capped 16 GB), and processors written out explicitly so the allotment is visible.
+$HostMemGB = [Math]::Floor((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
+$WantMemGB = [Math]::Max(8, [Math]::Floor($HostMemGB * 0.75))
+$WantSwapGB = [Math]::Max(2, [Math]::Min(16, [Math]::Floor($WantMemGB / 4)))
 $Defaults = [ordered]@{
-  'wsl2/memory' = '24GB'
-  'wsl2/swap'   = '8GB'
+  'wsl2/memory'     = "${WantMemGB}GB"
+  'wsl2/swap'       = "${WantSwapGB}GB"
+  'wsl2/processors' = "$env:NUMBER_OF_PROCESSORS"
 }
 
 function Read-WslConfig {
