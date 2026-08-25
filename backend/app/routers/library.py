@@ -73,22 +73,63 @@ class LibraryFile(BaseModel):
     enrichedAt: str = ""
 
 
+# ONE writer at a time for library/index.json. Four upload lanes stage files concurrently and
+# GET /api/library rewrites the index too (it sniffs any staged file that has no `parser` entry yet),
+# and every one of them used to do read -> modify -> write with no lock and ONE shared `.tmp` name.
+# Two things went wrong at once: entries were silently lost (the last writer's stale copy won, so a
+# freshly staged file lost its original name), and on Windows `tmp.replace()` raises PermissionError
+# while another thread still has the .tmp open for writing or index.json open for reading — which
+# surfaced as `POST /api/library/upload` answering 500 mid-drop. RLock: `_update_library_index`
+# calls `_write_library_index` while holding it.
+_INDEX_LOCK = threading.RLock()
+
+
 def _library_index() -> dict[str, dict]:
     """on-disk name -> {file, size, uploadedAt}. Without it the original filename is only recoverable
     by stripping the sid prefix, which loses anything the sanitizer replaced."""
-    try:
-        data = json.loads(config.LIBRARY_INDEX.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+    with _INDEX_LOCK:
+        try:
+            data = json.loads(config.LIBRARY_INDEX.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
     return data if isinstance(data, dict) else {}
 
 
 def _write_library_index(idx: dict[str, dict]) -> None:
     invalidate_library_cache()
-    config.LIBRARY_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = config.LIBRARY_INDEX.with_suffix(".tmp")
-    tmp.write_text(json.dumps(idx, indent=2), encoding="utf-8")
-    tmp.replace(config.LIBRARY_INDEX)
+    with _INDEX_LOCK:
+        config.LIBRARY_DIR.mkdir(parents=True, exist_ok=True)
+        # a PRIVATE tmp name: a shared one is a second file two writers could hold open at once
+        tmp = config.LIBRARY_INDEX.with_name(f".index-{uuid.uuid4().hex[:8]}.tmp")
+        tmp.write_text(json.dumps(idx, indent=2), encoding="utf-8")
+        # Windows refuses to replace a file another handle has open. Readers of index.json are
+        # under the same lock, but an indexer / antivirus / backup agent can hold it for a moment,
+        # so retry briefly before giving up rather than failing an upload that already parsed.
+        delay = 0.02
+        for attempt in range(8):
+            try:
+                tmp.replace(config.LIBRARY_INDEX)
+                break
+            except PermissionError:
+                if attempt == 7:
+                    tmp.unlink(missing_ok=True)
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 2, 0.5)
+
+
+def _update_library_index(mutate) -> dict[str, dict]:
+    """Read -> `mutate(idx)` -> write, atomically with respect to every other writer.
+
+    `mutate` returns True when it changed something; a no-op costs a read and nothing else. Callers
+    must NOT hold an `idx` read earlier across this — the point is that the copy being written is the
+    one on disk right now, so a concurrent lane's entry is never overwritten with a stale snapshot.
+    """
+    with _INDEX_LOCK:
+        idx = _library_index()
+        if mutate(idx):
+            _write_library_index(idx)
+        return idx
 
 
 def library_entries() -> list[tuple[str, str]]:
@@ -111,9 +152,7 @@ def library_entries() -> list[tuple[str, str]]:
 
 def forget_staged(file_name: str) -> None:
     """Drop a staged file's index entry (the bytes are removed by the caller)."""
-    idx = _library_index()
-    if idx.pop(Path(file_name).name, None) is not None:
-        _write_library_index(idx)
+    _update_library_index(lambda idx: idx.pop(Path(file_name).name, None) is not None)
     invalidate_library_cache()
     # The parsed-pool cache is keyed on this file; leaving it behind would keep a copy of the events
     # of a file the analyst removed, and the entry could never be reached again to be invalidated.
@@ -407,7 +446,23 @@ def _build_library_listing() -> list[LibraryFile]:
                                                  if getattr(s, "enrich", "") == "error"), ""),
                                enrichedAt=(getattr(srcs[0], "enrichedAt", "") or "") if srcs else ""))
     if dirty:
-        _write_library_index(idx)
+        # Merge, do not overwrite: an upload lane may have indexed a file since `idx` was read, and
+        # its entry (original name, upload time) must survive this write. Only names that STILL have
+        # no parser take the sniff made above.
+        probed = {name: meta for name, meta in idx.items() if "parser" in meta}
+
+        def _merge(live: dict[str, dict]) -> bool:
+            changed = False
+            for name, meta in probed.items():
+                cur = live.get(name) or {}
+                if "parser" not in cur:
+                    live[name] = {**cur, **meta}
+                    changed = True
+            return changed
+        try:
+            _update_library_index(_merge)
+        except OSError as exc:
+            print(f"[iris] library index not updated: {config.safe_os_error(exc)}", flush=True)
     return out
 
 
@@ -501,7 +556,6 @@ async def stage_files(files: list[UploadFile], job_ids: list[str] | None = None)
     from .jobs import resolve_job  # local import: routers.jobs imports the store, this module is imported by it
 
     config.LIBRARY_DIR.mkdir(parents=True, exist_ok=True)
-    idx = _library_index()
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     ids = list(job_ids or [])
     out: list[LibraryFile] = []
@@ -527,7 +581,17 @@ async def stage_files(files: list[UploadFile], job_ids: list[str] | None = None)
         # PROBE_BYTES anyway; handing it the whole file was the last place a gigabyte was materialised
         # just to read its first two megabytes.
         probe = await asyncio.to_thread(_probe_file, dest, original, size)
-        idx[name] = {"file": original, "size": size, "uploadedAt": now, **probe}
+        # Index it NOW, under the index lock, on the copy that is on disk at this moment. It used to
+        # be written at the end of the request from an `idx` read at the start: with four lanes in
+        # flight the last one to finish overwrote everyone else's entries, and GET /api/library —
+        # seeing a staged file with no entry — sniffed it again and raced the same file. A failed
+        # index write is logged, never a failed upload: the bytes are staged and the parse below
+        # still happens; the listing falls back to the name on disk.
+        entry = {"file": original, "size": size, "uploadedAt": now, **probe}
+        try:
+            await asyncio.to_thread(_update_library_index, lambda idx: idx.__setitem__(name, entry) or True)
+        except OSError as exc:
+            print(f"[iris] library index not updated for {original}: {config.safe_os_error(exc)}", flush=True)
         # Parse it into the workspace pool. This is the one thing staging must do WITHOUT touching a
         # case: add_library_file never calls _materialise(), so nothing is written under cases/.
         # No bytes are passed: they are on disk, and the store streams them from there.
@@ -545,7 +609,6 @@ async def stage_files(files: list[UploadFile], job_ids: list[str] | None = None)
                                state=str(probe.get("state") or ""), lines=int(probe.get("lines") or 0),
                                linesEstimated=bool(probe.get("linesEstimated")), sample=str(probe.get("sample") or ""),
                                sourceId=srcs[0].id if srcs else "", events=sum(s.events for s in srcs)))
-    _write_library_index(idx)
     return out
 
 

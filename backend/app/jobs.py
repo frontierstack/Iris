@@ -540,8 +540,14 @@ class JobRegistry:
                 continue
             keep[jid] = j
         if len(keep) > MAX_JOBS:
+            # The cap is on FINISHED rows only. It used to fall through to deleting the oldest ACTIVE
+            # jobs once the finished ones were gone, and on a drop of a few hundred files the oldest
+            # active jobs are the QUEUED ones of that very batch: each was created, pruned by the
+            # creation of the 201st, and then reported by its tab with `PATCH /api/jobs/{id}` — 404,
+            # for every file in the batch — after which the upload request minted a replacement row
+            # under a new id. A live transfer is bounded by what a tab actually queued; a registry
+            # that forgets it is the bug, not the size of jobs.json.
             ordered = sorted(keep.values(), key=lambda j: j.created_ts)
-            # never drop something still running just because it is old — cut finished jobs first
             excess = len(keep) - MAX_JOBS
             for j in ordered:
                 if excess <= 0:
@@ -549,9 +555,6 @@ class JobRegistry:
                 if j.state in TERMINAL_STATES:
                     del keep[j.id]
                     excess -= 1
-            if excess > 0:
-                for j in sorted(keep.values(), key=lambda j: j.created_ts)[:excess]:
-                    del keep[j.id]
         self._jobs = keep
 
     def sync(self) -> None:

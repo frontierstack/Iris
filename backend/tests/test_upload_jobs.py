@@ -377,3 +377,15 @@ def test_uploading_with_no_case_still_stages_and_tracks(c) -> None:
              if j["id"] not in before and j["file"] == "no-case.log"]
     assert len(fresh) == 1 and fresh[0]["target"] == "library" and fresh[0]["state"] == "ready"
     assert c.get("/api/cases").json() == []
+
+
+def test_the_cap_never_prunes_a_live_transfer(c, monkeypatch) -> None:
+    """A drop of more files than MAX_JOBS used to prune the QUEUED jobs of that very batch: every
+    `PATCH /api/jobs/{id}` from the tab then answered 404, and each upload minted a replacement row."""
+    monkeypatch.setattr(jobs_mod, "MAX_JOBS", 5)
+    ids = [REGISTRY.create(f"drop-{i}.log", 100, "library", "").id for i in range(12)]
+    for jid in ids:
+        r = c.patch(f"/api/jobs/{jid}", json={"received": 50})
+        assert r.status_code == 200, f"queued job {jid} was forgotten by the cap"
+    kept = {j["id"] for j in c.get("/api/jobs?limit=500").json()["jobs"]}
+    assert set(ids) <= kept
