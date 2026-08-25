@@ -161,7 +161,9 @@ PROVIDER_BACKOFF = (2.0, 5.0, 10.0)
 RECORD_MIN_CALLS = 4
 RECORD_EVERY = 6
 MAX_RECORD_NUDGES = 3
-# Writes that count as "the summary is written": the end-of-run SUMMARY_CHECK is skipped when one exists.
+# What counts as "the summary is written", so the end-of-run SUMMARY_CHECK is skipped: a note of
+# kind='summary', or update_case setting the case summary. A FINDING note does not count — those are
+# written as findings are found, and the summary is the one that ties them together.
 SUMMARY_TOOLS = ("add_note", "update_case")
 
 
@@ -282,7 +284,16 @@ def _fit_context(messages: list[dict[str, Any]], actions: list[dict[str, Any]],
 
 
 def _has_summary(actions: list[dict[str, Any]]) -> bool:
-    return any(str(a.get("tool") or "") in SUMMARY_TOOLS and not a.get("undone") for a in actions)
+    for a in actions:
+        if a.get("undone") or str(a.get("tool") or "") not in SUMMARY_TOOLS:
+            continue
+        s = str(a.get("summary") or "").lower()
+        if a.get("tool") == "update_case" and "summary" in s:
+            return True
+        if a.get("tool") == "add_note" and ("summary note" in s or not s.startswith("wrote a finding note")):
+            # a pre-`kind` action ("wrote a case note") is taken as a summary — never nag a run twice
+            return True
+    return False
 
 
 def build_context(store: Any) -> str:

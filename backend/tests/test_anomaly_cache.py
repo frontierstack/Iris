@@ -266,3 +266,26 @@ def test_clear_all_drops_the_cached_aggregation(client):
     client.post("/api/admin/clear-all", json={"confirm": "DELETE ALL DATA"})
     assert ANOMALY_CACHE.peek("all", _key()) is None
     assert client.get("/api/anomalies?limit=50").json()["anomalies"] == []
+
+
+def test_each_anomaly_says_which_case_its_hits_are_in(client):
+    """"Rules with hits in the active case — should also show what specific case it was detected on in
+    case there are many cases." The pool holds the active case's sources plus the library, so a row
+    names the case (id + name) for filed hits and says 'library' for unfiled ones."""
+    import time
+    c = client
+    load_sample_case(c)          # earlier tests in this module wipe or switch the case
+    case = c.get("/api/case").json()
+    for _ in range(100):
+        r = c.get("/api/anomalies").json()
+        if (r.get("status") or {}).get("state") != "building":
+            break
+        time.sleep(0.05)
+    rows = r["anomalies"]
+    assert rows, "the sample case fires rules"
+    for a in rows:
+        assert a["cases"], a["ruleId"]
+        assert sum(x["hits"] for x in a["cases"]) == a["hits"]
+    filed = [x for a in rows for x in a["cases"] if x["caseId"]]
+    assert filed and all(x["caseId"] == case["id"] and x["caseName"] == case["name"] for x in filed)
+

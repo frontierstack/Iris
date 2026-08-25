@@ -751,9 +751,11 @@ export interface RuleTestResult { hits: number; sample: Event[]; tookMs: number;
 export interface RulePreviewResult extends RuleTestResult { trigger: string; mechanism: string }
 export interface RuleSuggestRequest { prompt: string; examples?: string[] }
 export interface RuleSuggestResult { rule: Rule; rationale: string; source: 'ai' | 'heuristic' }
+/** Where a rule's hits are: a case the file was filed into, or the library (caseId ''). */
+export interface AnomalyCase { caseId: string; caseName: string; hits: number }
 export interface Anomaly {
   ruleId: string; name: string; sev: Severity; hits: number; firstSeen: string | null; lastSeen: string | null;
-  sources: string[]; sample: Event[]; kind: RuleKind;
+  sources: string[]; cases: AnomalyCase[]; sample: Event[]; kind: RuleKind;
 }
 /** The per-rule aggregation is a DERIVED structure (see DerivedState): built once per store version AND
  *  rules revision, in the background. While `status.state === 'building'` the list is empty on purpose —

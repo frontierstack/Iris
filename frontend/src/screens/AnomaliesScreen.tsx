@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { SEVERITIES, type Anomaly, type Event, type Exclusion, type ExclusionInput, type ExclusionSuggestion, type GraphFinding, type Rule, type RuleCondition, type RuleField, type RuleInput, type RuleOp, type RuleParamKind, type RuleSuggestResult, type RuleTestResult, type Severity } from '../api/types';
@@ -7,6 +7,7 @@ import { DerivedPauseActions } from '../components/Enrichment';
 import { Icon } from '../components/icons';
 import { BuildingState, ConfirmDialog, Drawer, EmptyState, ErrorState, SectionHead, SevTag, SkeletonRows, Toggle } from '../components/ui';
 import { qk, useAnomalies, useInvalidateCaseData, useRules, useSettings } from '../hooks/queries';
+import { useSectionOpen as useSharedSectionOpen } from '../hooks/useSectionOpen';
 import { useDebounce } from '../hooks/useDebounce';
 import { useToast } from '../hooks/useToast';
 import { cx, fmtInt, fmtTs, sevVar } from '../utils/format';
@@ -19,19 +20,8 @@ import { cx, fmtInt, fmtTs, sevVar } from '../utils/format';
    page one scroll of tables; the heads with their counts are the overview, and a section opens when
    it is the one being worked in. The choice is remembered per section. */
 const OPEN_KEY = 'iris.anomalies.open';
-function readOpen(): Record<string, boolean> {
-  try { return JSON.parse(localStorage.getItem(OPEN_KEY) || '{}') as Record<string, boolean>; } catch { return {}; }
-}
 function useSectionOpen(key: string): [boolean, () => void] {
-  const [open, setOpen] = useState<boolean>(() => !!readOpen()[key]);
-  const toggle = useCallback(() => {
-    setOpen((v) => {
-      const next = !v;
-      try { localStorage.setItem(OPEN_KEY, JSON.stringify({ ...readOpen(), [key]: next })); } catch { /* private mode */ }
-      return next;
-    });
-  }, [key]);
-  return [open, toggle];
+  return useSharedSectionOpen(OPEN_KEY, key);
 }
 
 function AnomalyRow({ a, open, onToggle }: { a: Anomaly; open: boolean; onToggle: () => void }) {
@@ -56,9 +46,17 @@ function AnomalyRow({ a, open, onToggle }: { a: Anomaly; open: boolean; onToggle
         <div className="cell-mono num">{fmtInt(a.hits)}</div>
         <div className="cell-mono cell-dim" style={{ fontSize: 'var(--fs-xs)' }}>{a.firstSeen ? fmtTs(a.firstSeen) : '—'}</div>
         <div className="cell-mono cell-dim" style={{ fontSize: 'var(--fs-xs)' }}>{a.lastSeen ? fmtTs(a.lastSeen) : '—'}</div>
-        <div className="anom__sources ellipsis" title={a.sources.join(', ')}>
-          {a.sources.slice(0, 3).map((s) => <span key={s} className="tag">{s}</span>)}
-          {a.sources.length > 3 && <span className="tag">+{a.sources.length - 3}</span>}
+        <div className="anom__sources ellipsis" title={[...(a.cases ?? []).map((c) => `${c.caseId ? `${c.caseId} · ${c.caseName}` : 'library (not filed in a case)'}: ${fmtInt(c.hits)} hit${c.hits === 1 ? '' : 's'}`), ...a.sources].join('\n')}>
+          {/* WHICH CASE first — with many cases on disk "hits in the active case" says nothing about which
+              one, and a screenshot read later needs the id. Library hits are said to be unfiled. */}
+          {(a.cases ?? []).map((c) => (
+            <span key={c.caseId || 'library'} className={cx('tag', c.caseId ? 'tag--case' : 'tag--quiet')}>
+              {c.caseId ? <><b>{c.caseId}</b> {c.caseName}</> : 'unfiled'}
+              {(a.cases?.length ?? 0) > 1 && <span className="tag__n">{fmtInt(c.hits)}</span>}
+            </span>
+          ))}
+          {a.sources.slice(0, 2).map((s) => <span key={s} className="tag">{s}</span>)}
+          {a.sources.length > 2 && <span className="tag">+{a.sources.length - 2}</span>}
         </div>
         <div className="anom__caret"><Icon.Chevron style={{ transform: open ? 'rotate(180deg)' : undefined }} /></div>
       </div>

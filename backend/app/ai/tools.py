@@ -1688,11 +1688,18 @@ def _add_ioc(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
 
 
 @tool("add_note",
-      "Write a note into the case file: your reasoning, a finding, or the timeline you reconstructed. "
-      "Cite the event ids behind it — they are attached to the note as clickable references and are "
-      "verified before the note is saved. It is stored under your name, not the analyst's.",
+      "Write a note into the case file. kind='finding' (the default) is ONE finding, written THE MOMENT "
+      "you establish it — what you found, the evidence (event ids), why it matters — so the case fills in "
+      "as the investigation goes; kind='summary' is the single end-of-run narrative that ties the "
+      "findings together. Cite the event ids behind it — they are attached to the note as clickable "
+      "references and are verified before the note is saved. It is stored under your name, not the "
+      "analyst's.",
       {"text": {"type": "string", "description": "the note, Markdown allowed"},
        "citedEventIds": {"type": "array", "items": {"type": "string"}, "description": "events this note is based on"},
+       "kind": {"type": "string", "enum": ["finding", "summary"],
+                "description": "'finding' (default): one finding, recorded as soon as it is established; "
+                               "'summary': the end-of-run narrative, once per investigation"},
+       "title": {"type": "string", "description": "optional short title; becomes the note's heading"},
        "searchRefs": {"type": "array", "items": {"type": "string"}, "description": "optional saved queries to attach"}},
       ["text", "citedEventIds"], writes=True)
 def _add_note(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
@@ -1703,6 +1710,14 @@ def _add_note(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
     text = _prose(args.get("text"), 12000).strip()
     if not text:
         raise ToolError("text is required")
+    kind = str(args.get("kind") or "finding").strip().lower()
+    if kind not in ("finding", "summary"):
+        raise ToolError("kind must be 'finding' or 'summary'")
+    title = _s(args.get("title") or "", 120).strip()
+    if title and not text.lstrip().startswith("#"):
+        text = f"## {title}\n\n{text}"
+    elif kind == "summary" and not text.lstrip().startswith("#"):
+        text = "## Summary\n\n" + text
     cited = _cited(args, text, "a note",
                    "one id per claim is enough, and they become the note's clickable references")
     refs = [NoteRef(kind="event", value=i, label=i) for i in cited]
@@ -1711,9 +1726,11 @@ def _add_note(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
             refs.append(NoteRef(kind="search", value=_s(q, 300), label=_s(q, 60)))
     store = _store()
     note = cases.add_note(store.case_id, text, refs, author=_ai_author(ctx))
-    action = ctx.record("add_note", f"wrote a case note ({len(cited)} citation(s))",
-                        {"kind": "note", "noteId": note.id, "caseId": store.case_id})
-    return {"ok": True, "noteId": note.id, "author": note.author, "citedEventIds": cited, "action": action}
+    what = "the case summary note" if kind == "summary" else ("a finding note" + (f": {title}" if title else ""))
+    action = ctx.record("add_note", f"wrote {what} ({len(cited)} citation(s))",
+                        {"kind": "note", "noteId": note.id, "caseId": store.case_id, "noteKind": kind})
+    return {"ok": True, "noteId": note.id, "kind": kind, "author": note.author, "citedEventIds": cited,
+            "action": action}
 
 
 # The node id the agent writes: "<type>:<value>". An authored node is not evidence — it is a

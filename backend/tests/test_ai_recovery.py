@@ -197,18 +197,26 @@ def test_the_record_nudges_are_bounded(client):
 
 
 def test_a_run_that_recorded_findings_is_asked_for_the_summary(client):
+    """Finding notes and indicators land as they are found; they are NOT the summary, so the end-of-run
+    check still asks for the one note that ties them together."""
     eid = an_event_id()
     evs, fake, _rid = drive("investigate", [
-        {"calls": [_read(1)]}, {"calls": [_read(2)]},
+        {"calls": [_read(1)]},
+        {"calls": [("add_note", {"text": f"Brute force from one address, see `{eid}`", "kind": "finding",
+                                 "title": "SSH brute force", "citedEventIds": [eid]})]},
+        {"calls": [_read(2)]},
         {"calls": [("add_events_to_case", {"eventIds": [eid]})]},
-        {"text": "Recorded the events; done."},
-        {"calls": [("add_note", {"text": f"Summary, see `{eid}`", "citedEventIds": [eid]})]},
+        {"text": "Recorded the finding; done."},
+        {"calls": [("add_note", {"text": f"Overall, see `{eid}`", "kind": "summary", "citedEventIds": [eid]})]},
         {"text": "Summary written."},
     ])
     assert any(s.get("summaryCheck") for s in of(evs, "status"))
     assert not any(s.get("documentCheck") for s in of(evs, "status"))
     assert any("no SUMMARY yet" in str(m["content"]) for m in fake.seen[-1]["messages"] if m["role"] == "user")
-    assert [w["action"]["tool"] for w in of(evs, "write")] == ["add_events_to_case", "add_note"]
+    writes = of(evs, "write")
+    assert [w["action"]["tool"] for w in writes] == ["add_note", "add_events_to_case", "add_note"]
+    assert writes[0]["action"]["summary"].startswith("wrote a finding note: SSH brute force")
+    assert writes[-1]["action"]["summary"].startswith("wrote the case summary note")
 
 
 def test_a_run_that_wrote_the_note_itself_is_not_asked_again(client):
@@ -216,7 +224,18 @@ def test_a_run_that_wrote_the_note_itself_is_not_asked_again(client):
     evs, _fake, _rid = drive("investigate", [
         {"calls": [_read(1)]}, {"calls": [_read(2)]},
         {"calls": [("add_events_to_case", {"eventIds": [eid]})]},
-        {"calls": [("add_note", {"text": f"Summary `{eid}`", "citedEventIds": [eid]})]},
+        {"calls": [("add_note", {"text": f"Summary `{eid}`", "kind": "summary", "citedEventIds": [eid]})]},
+        {"text": "done"},
+    ])
+    assert not any(s.get("summaryCheck") for s in of(evs, "status"))
+
+
+def test_setting_the_case_summary_also_counts(client):
+    eid = an_event_id()
+    evs, _fake, _rid = drive("investigate", [
+        {"calls": [_read(1)]}, {"calls": [_read(2)]},
+        {"calls": [("add_note", {"text": f"Finding `{eid}`", "citedEventIds": [eid]})]},
+        {"calls": [("update_case", {"summary": "One address brute-forced ssh; contained."})]},
         {"text": "done"},
     ])
     assert not any(s.get("summaryCheck") for s in of(evs, "status"))

@@ -1156,6 +1156,18 @@ class GraphFindings(BaseModel):
     tookMs: int = 0
 
 
+class AnomalyCase(BaseModel):
+    """Where a rule's hits live: a CASE (the file was filed into it) or the case-less library.
+
+    The pool holds the ACTIVE case's sources plus the library, so at most one real case appears —
+    but with many cases on disk the analyst needs the row to SAY which one, rather than reading
+    "hits in the active case" and guessing which case that was when the screenshot is looked at later.
+    `caseId` is '' for library (unfiled) hits."""
+    caseId: str
+    caseName: str
+    hits: int
+
+
 class Anomaly(BaseModel):
     ruleId: str
     name: str
@@ -1164,5 +1176,6 @@ class Anomaly(BaseModel):
     firstSeen: Optional[str]
     lastSeen: Optional[str]
     sources: list[str]
+    cases: list[AnomalyCase] = []
     sample: list[EventOut]
     kind: Literal["regex", "builtin", "conditions"]

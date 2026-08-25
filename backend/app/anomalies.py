@@ -24,7 +24,7 @@ import os
 from typing import Any, Optional
 
 from .derived import DEFAULT_SYNC_LIMIT, AsyncCache
-from .models import SEV_ORDER, Anomaly
+from .models import AnomalyCase, SEV_ORDER, Anomaly
 from .rules import RULES_STORE
 from .store import STORE
 
@@ -55,6 +55,12 @@ def _build() -> list[Anomaly]:
     rules = {r.id: r for r in RULES_STORE.all_rules()}
     with STORE.lock:
         events = STORE.events
+        # which case each source's hits belong to — a few dozen entries, resolved once, never per event
+        case_id = "" if getattr(STORE, "pending", False) else str(getattr(STORE, "case_id", "") or "")
+        case_name = str(getattr(STORE, "name", "") or "")
+        origin = dict(getattr(STORE, "source_origin", {}) or {})
+    lib_key = ("", "Library — not filed in a case")
+    case_key = (case_id, case_name)
     agg: dict[str, dict] = {}
     for i, e in enumerate(events):
         if not e.detections:
@@ -66,8 +72,10 @@ def _build() -> list[Anomaly]:
                 a = agg[d.id] = {"ruleId": d.id, "name": r.name if r else d.name,
                                  "sev": r.sev if r else d.level, "hits": 0,
                                  "firstSeen": e.ts, "lastSeen": e.ts, "sources": set(), "sample": [],
-                                 "kind": r.kind if r else "builtin"}
+                                 "kind": r.kind if r else "builtin", "cases": {}}
             a["hits"] += 1
+            ck = case_key if (case_id and origin.get(e.sourceId, "case") == "case") else lib_key
+            a["cases"][ck] = a["cases"].get(ck, 0) + 1
             if e.ts < a["firstSeen"]:
                 a["firstSeen"] = e.ts
             if e.ts > a["lastSeen"]:
@@ -80,6 +88,8 @@ def _build() -> list[Anomaly]:
     out = []
     for a in agg.values():
         a["sources"] = sorted(a["sources"])
+        a["cases"] = [AnomalyCase(caseId=k[0], caseName=k[1], hits=n)
+                      for k, n in sorted(a["cases"].items(), key=lambda kv: (-kv[1], kv[0]))]
         out.append(Anomaly(**a))
     # sorted ONCE, here: every filtered response is a slice of this order, so the endpoint never sorts
     out.sort(key=lambda x: (-SEV_ORDER.get(x.sev, 0), -x.hits, x.ruleId))

@@ -904,7 +904,10 @@ interface Rule { id:string; name:string; description:string; sev:Severity; enabl
     use one; the rest match purely on fields/thresholds. Only ever part of the condition — windows, counts and
     cross-event joins stay in code.*/ }
 interface RuleTestResult { hits:number; sample:Event[] /*≤ 20*/; tookMs:number; error?:string }
-interface Anomaly { ruleId:string; name:string; sev:Severity; hits:number; firstSeen:string|null; lastSeen:string|null; sources:string[]; sample:Event[] /*≤ 5*/; kind:'regex'|'builtin'|'conditions' }
+interface AnomalyCase { caseId:string /* '' = library, not filed in a case */; caseName:string; hits:number }
+interface Anomaly { ruleId:string; name:string; sev:Severity; hits:number; firstSeen:string|null; lastSeen:string|null; sources:string[];
+                    cases:AnomalyCase[] /* WHICH case the hits are in — the active case and/or the library; hits descending */;
+                    sample:Event[] /*≤ 5*/; kind:'regex'|'builtin'|'conditions' }
 ```
 
 ### Custom rules built from conditions — added

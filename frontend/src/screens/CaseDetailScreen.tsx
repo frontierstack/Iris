@@ -10,6 +10,7 @@ import { IocPanel } from '../components/IocPanel';
 import { Icon } from '../components/icons';
 import { EmptyState, ErrorState, Loading, SectionHead } from '../components/ui';
 import { useCase, useCaseDetail, useGraph } from '../hooks/queries';
+import { useSectionOpen } from '../hooks/useSectionOpen';
 import { useToast } from '../hooks/useToast';
 import { fmtInt, fmtRelative, fmtTs, sevVar } from '../utils/format';
 
@@ -97,6 +98,9 @@ export function CaseDetailScreen() {
   // exactly one at a time
   // the Indicators "Add indicator" control lives in that section's header, so the panel is told when to open
   const [addingIoc, setAddingIoc] = useState(false);
+  // "IOCs found in this case — should also be collapsible": closed by default like the Anomalies cards,
+  // remembered, and forced open by the Add control (adding into a closed section is a hidden form).
+  const [iocOpen, toggleIoc] = useSectionOpen('iris.case.open', 'iocs');
 
   const activate = useMutation({
     mutationFn: () => api.activateCase(id!),
@@ -183,13 +187,17 @@ export function CaseDetailScreen() {
       {isActive && (
         <section>
           <SectionHead eyebrow="Indicators" title="IOCs found in this case"
+            open={iocOpen} onToggle={toggleIoc}
             hint="extracted from detection-bearing events · expand one to jump to the log it came from"
             actions={
-              <button className="btn btn--sm btn--accent" onClick={() => setAddingIoc((v) => !v)} aria-expanded={addingIoc}>
+              <button className="btn btn--sm btn--accent" aria-expanded={addingIoc}
+                onClick={() => { setAddingIoc((v) => !v); if (!iocOpen) toggleIoc(); }}>
                 <Icon.Plus /> Add indicator
               </button>
             } />
-          <IocPanel adding={addingIoc} onAddingDone={() => setAddingIoc(false)} />
+          {iocOpen && (<div className="sec-card__body">
+            <IocPanel adding={addingIoc} onAddingDone={() => setAddingIoc(false)} />
+          </div>)}
         </section>
       )}
 
