@@ -483,7 +483,11 @@ R = {
         description="A credential was written into a log. Logs are copied, shipped and read far more widely than the "
                     "secret store is - from here the key is wherever this file went.",
         trigger="The raw line of ANY source matches the secret regex (AWS access key id, a PEM private key header, a "
-                "JWT, or an assigned password / api key / token).",
+                "JWT, a Slack / GitHub / Stripe token or webhook, or an assigned password / api key / token). An "
+                "ASSIGNED value is then checked: it does not fire when the value is a placeholder or mask "
+                "(NO_AUTH, null, <redacted>, ********), a template (${VAR}, {{x}}), a working directory after "
+                "pwd=, or a PUBLIC web-API key in a URL query string (?apikey=, &apikey=) - the msn.com / maps / "
+                "analytics keys every proxy log carries. password= / secret= / token= in a URL still fire.",
         mechanism="regex"),
     "APP-0075": Rule(
         "SIGMA-APP-0075", "Encoded command line", "high",
@@ -749,10 +753,61 @@ _ATTACHMENT_BAD = re.compile(r"\.(exe|scr|pif|com|bat|cmd|ps1|vbs|vbe|js|jse|jar
 _LONG_LABEL = re.compile(r"(?:^|\.)[A-Za-z0-9+/=_-]{40,}(?:\.|$)")
 _SUSPICIOUS_SNI = re.compile(r"\.(tk|top|xyz|gq|ml|cf|ru|su|cc|pw|buzz|click|zip|mov)$"
                              r"|(duckdns|no-ip|noip|hopto|ddns|dynu|serveo|ngrok|trycloudflare|localtunnel|pagekite|portmap|onion)\.", re.I)
+# The FORMAT branches are high confidence on their own (an AWS key id, a PEM header, a JWT, a Slack /
+# GitHub / Stripe token, a Slack webhook). The ASSIGNED branch — `password=…`, `apikey: …` — is where the
+# false positives live, so its key name and value are captured as `name` / `value` and every match goes
+# through `_secret_real` before it fires. See that function for what it refuses.
 _SECRET = re.compile(r"\bAKIA[0-9A-Z]{16}\b|\bASIA[0-9A-Z]{16}\b|-----BEGIN [A-Z ]*PRIVATE KEY-----"
                      r"|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
-                     r"|\b(?:password|passwd|pwd|api[_-]?key|apikey|secret|token|client[_-]?secret)\s*[=:]\s*[\"']?[^\s\"'&;,]{8,}"
-                     r"|\bxox[baprs]-[0-9A-Za-z-]{10,}|\bghp_[0-9A-Za-z]{30,}", re.I)
+                     r"|\b(?P<name>password|passwd|pwd|api[_-]?key|apikey|secret|token|client[_-]?secret)"
+                     r"\s*[=:]\s*[\"']?(?P<value>[^\s\"'&;,]{8,})"
+                     r"|\bxox[baprs]-[0-9A-Za-z-]{10,}|\bghp_[0-9A-Za-z]{30,}|\bgithub_pat_[0-9A-Za-z_]{20,}"
+                     r"|\bgh[oprsu]_[0-9A-Za-z]{30,}|\bsk_live_[0-9A-Za-z]{20,}"
+                     r"|hooks\.slack\.com/services/T[0-9A-Z]+/B[0-9A-Z]+/[0-9A-Za-z]{10,}", re.I)
+# Values that are not a secret whatever the key name says: masked, templated, or a sentinel.
+_SECRET_PLACEHOLDERS = ("no_auth, null, none, undefined, redacted, <redacted>, [redacted], [filtered], "
+                        "[masked], changeme, password, example, hidden, omitted")
+# Query-string parameters that carry a PUBLIC key when they appear in a URL a browser requested: the
+# msn.com / Bing / maps / analytics style `?apikey=…` is a routing token for a public web API, present
+# in every proxy log on earth, and reported here as a false positive on a Sophos web-proxy export.
+# `password=` / `secret=` / `token=` in a URL are NOT on this list: credentials in a GET are a real leak.
+_SECRET_URL_PUBLIC = "apikey, api_key, api-key"
+_SECRET_TEMPLATE_STARTS = ("${", "{{", "%", "<", "[", "{", "$(")
+_DRIVE_RE = re.compile(r"[A-Za-z]:[\\/]")
+
+
+def _secret_real(raw: str, rx: "re.Pattern[str]", url_public: set[str], placeholders: set[str]) -> bool:
+    """Does `raw` carry secret material, or only something SHAPED like it?
+
+    Reported as a false positive on a web-proxy log: every browser request to api.msn.com carries
+    `apikey=qrUeHGGY…`, a public front-end key, and the rule fired 776 times on the analyst's evidence
+    for zero credentials. The regex cannot know that; this can, from the CONTEXT of the match:
+      • a format match (AKIA…, a PEM header, a JWT, a vendor token) is always real;
+      • an assigned value that is a placeholder (`NO_AUTH`, `null`, `<redacted>`), a template
+        (`${DB_PASSWORD}`, `{{secret}}`, `%s`), or a mask (`********`, `xxxxxxxx`) is not;
+      • `pwd=/home/alice/project` is a working directory, not a password;
+      • a URL query parameter on the public list (`?apikey=` / `&apikey=`) is a public key.
+    A line with a public `apikey=` AND a real `password=` still fires: every match is checked, and one
+    real one is enough. An analyst override regex with no `name`/`value` groups is treated as all-real.
+    """
+    for m in rx.finditer(raw):
+        gd = m.groupdict()
+        name, value = gd.get("name"), gd.get("value")
+        if not name or not value:
+            return True                                # a format match, or an override without the groups
+        low = value.strip("\"'").lower()
+        if low in placeholders or low.startswith(_SECRET_TEMPLATE_STARTS):
+            continue
+        if len(set(low)) <= 2:                         # ******** / xxxxxxxx / 00000000
+            continue
+        n = name.lower().replace("-", "_")
+        if n == "pwd" and (low[0] in "/\\" or _DRIVE_RE.match(low)):
+            continue
+        start = m.start("name")
+        if start > 0 and raw[start - 1] in "?&" and n in url_public:
+            continue
+        return True
+    return False
 _ENCODED_CMD = re.compile(r"powershell(\.exe)?[^\n]*\s-(?:e|en|enc|enco|encod|encode|encoded|encodedcommand)\s+[A-Za-z0-9+/=]{24,}"
                           r"|FromBase64String\s*\(|certutil(\.exe)?[^\n]*-decode|base64\s+(?:-d|--decode)[^\n]*\|\s*(?:ba|z)?sh"
                           r"|\[Convert\]::FromBase64String|echo\s+[A-Za-z0-9+/=]{40,}\s*\|\s*base64\s+(?:-d|--decode)", re.I)
@@ -1056,7 +1111,15 @@ PARAMS: dict[str, tuple[Param, ...]] = {
         P("standardPorts", "Standard TLS ports", "values", "443, 8443, 993, 995, 465, 587, 990, 4443", "dst_port", "Ports where TLS is unremarkable; anything else fires."),
     ),
     "SIGMA-APP-0070": (
-        P("pattern", "Secret material", "regex", _SECRET.pattern, "raw", "Matched against the raw line of every event, whatever its source."),
+        P("pattern", "Secret material", "regex", _SECRET.pattern, "raw",
+          "Matched against the raw line of every event, whatever its source. Keep the (?P<name>…)/(?P<value>…) "
+          "groups on the assigned-secret branch: they are what the placeholder / URL checks below read."),
+        P("urlPublicParams", "Public URL parameters", "values", _SECRET_URL_PUBLIC, "raw",
+          "Query-string names that carry a PUBLIC key when found in a URL (?name= / &name=): ignored there. "
+          "password / secret / token are deliberately not listed - credentials in a URL are a real leak."),
+        P("placeholders", "Placeholder values", "values", _SECRET_PLACEHOLDERS, "raw",
+          "Assigned values that are never a secret (sentinels and masks). Templates (${…}, {{…}}, %s) and "
+          "repeated-character masks are always ignored."),
     ),
     "SIGMA-APP-0075": (
         P("pattern", "Encoded command", "regex", _ENCODED_CMD.pattern, "raw", "Matched against the raw line of every event, whatever its source."),
@@ -2265,6 +2328,8 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     # common case is one regex over `raw` and nothing else. The whole pass is skipped when all three
     # rules are off — a disabled rule must not cost a scan of the evidence.
     rx_secret = _prx("SIGMA-APP-0070", "pattern", _SECRET)
+    s70_public = set(_pl("SIGMA-APP-0070", "urlPublicParams"))
+    s70_placeholders = set(_pl("SIGMA-APP-0070", "placeholders"))
     rx_encoded = _prx("SIGMA-APP-0075", "pattern", _ENCODED_CMD)
     rx_ransom = _prx("SIGMA-APP-0080", "pattern", _RANSOM)
     universal = [(rx_secret, R["APP-0070"], "credential exposure"),
@@ -2279,9 +2344,13 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
                 if not raw or not screen.search(raw):
                     continue
                 for rx, rule, tactic in universal:
-                    if rx.search(raw):
-                        _tag(e, rule)
-                        e.set_field_default("tactic", tactic)
+                    if not rx.search(raw):
+                        continue
+                    # the secret rule alone has a second opinion: shape is not enough - see _secret_real
+                    if rule is R["APP-0070"] and not _secret_real(raw, rx, s70_public, s70_placeholders):
+                        continue
+                    _tag(e, rule)
+                    e.set_field_default("tactic", tactic)
 
 
     _tick(80.0)

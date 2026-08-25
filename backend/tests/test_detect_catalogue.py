@@ -169,6 +169,49 @@ def test_secrets_encoded_commands_and_ransomware_are_found_in_any_source() -> No
         assert rid in hits, rid
 
 
+def _secret_fires(raw: str) -> bool:
+    return "SIGMA-APP-0070" in _run([_ev(1, "delimited", "line", {}, raw=raw)])
+
+
+def test_a_public_api_key_in_a_proxied_url_is_not_a_leaked_secret() -> None:
+    """The reported false positive, verbatim shape: a Sophos web-proxy row of a browser fetching MSN news
+    with the public front-end key every such request carries. 776 hits for zero credentials."""
+    proxy = ('"Aug 23, 2026 @ 20:43:24.915","Content Filtering","10.0.0.100","150.171.27.12",443,"api.msn.com","-",'
+             '"https://api.msn.com/v1/news/Feed/Windows?msnup=7dE5WGLOEk7iOuyA2jG5CQ%3d%3d'
+             '&apikey=qrUeHGGYvVowZJuHA3XaH0uUvg1ZJ0GUZnXk3mxxPF&activityId=d7e49831-285b-43a5-9494-450fc412f76a"')
+    assert not _secret_fires(proxy)
+    telemetry = ('"https://browser.events.data.msn.com/OneCollector/1.0?cors=true&client-id=NO_AUTH'
+                 '&client-version=1DS-Web-JS-3.2.8&apikey=0ded60c75e44443aa3fcb7a4ec6a8d3a-abcdef"')
+    assert not _secret_fires(telemetry)
+
+
+def test_a_credential_in_a_url_still_fires() -> None:
+    assert _secret_fires('GET https://intranet.corp/login?user=alice&password=Hunter22Winter! HTTP/1.1')
+    assert _secret_fires('https://api.example.com/v2/export?token=8f3a9c1d2e4b5a6f7c8d9e0f1a2b3c4d')
+    # a line with a public apikey AND a real password: the real one wins
+    assert _secret_fires('https://api.msn.com/x?apikey=qrUeHGGYvVowZJuHA3XaH0uUvg1ZJ0GUZnXk3mxxPF&password=Hunter22Winter!')
+
+
+def test_placeholders_masks_templates_and_working_directories_do_not_fire() -> None:
+    for raw in ('db.password=${DB_PASSWORD}', 'api_key: {{ vault.api_key }}', 'password=********',
+                'token=xxxxxxxxxxxxxxxx', 'client_secret=<redacted>', 'secret: [FILTERED]',
+                'pwd=/home/alice/projects/iris', 'PWD=C:\\Users\\alice\\Desktop', 'password=%s'):
+        assert not _secret_fires(raw), raw
+
+
+def test_real_secrets_in_any_shape_fire() -> None:
+    # The vendor-shaped tokens are ASSEMBLED here rather than written out: GitHub's push protection
+    # scans the repository text for exactly these formats and refuses the push. Nothing here is real.
+    gh_pat = "github_" + "pat_" + "11ABCDEFG0123456789abcdefghijklmnop"
+    gh_app = "gh" + "s_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    stripe = "sk_" + "live_" + "4eC39HqLyjWDarjtT1zdp7dc"
+    slack = "https://hooks.slack.com/" + "services/" + "T0000000000/B0000000000/" + "X" * 24
+    for raw in ('password=Hunter22Winter!', 'api_key: qrUeHGGYvVowZJuHA3XaH0uUvg1ZJ0GUZnXk3mxxPF',
+                f'export GITHUB_TOKEN={gh_pat}', f'STRIPE={stripe}', gh_app, f'curl -X POST {slack}',
+                '{"aws_key":"AKIAIOSFODNN7EXAMPLE"}', '-----BEGIN RSA PRIVATE KEY-----'):
+        assert _secret_fires(raw), raw
+
+
 def test_the_any_source_pass_is_skipped_when_those_rules_are_off() -> None:
     """A disabled rule must not cost a scan of the evidence — the pass is the one that touches every
     event, so 'it does nothing' is not good enough."""
