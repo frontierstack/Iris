@@ -583,6 +583,8 @@ export function GraphScreen() {
 
   /* ── selected node detail (server-side: full neighbours + timeline) ── */
   const detail = useQuery({ queryKey: ['graph-node', selected, scope], queryFn: () => api.graphNode(selected!, scope), enabled: !!selected });
+  const [showDets, setShowDets] = useState(false);
+  useEffect(() => { setShowDets(false); }, [selected]);
   const sel = selected ? byId.get(selected) ?? null : null;
   const hov = hover ? byId.get(hover) ?? null : null;
 
@@ -994,7 +996,37 @@ export function GraphScreen() {
                   <div className="graph__ent-kind">{TYPE_META[sel.type].label} · {fmtInt(sel.count)} events · first {fmtRelative(sel.first)}</div>
                 </div>
               </div>
-              {sel.detections > 0 && <div className="graph__ent-det" style={{ borderColor: sevVar(sel.sev), color: sevVar(sel.sev) }}>{sel.detections} detection{sel.detections === 1 ? '' : 's'} · max {sel.sev}</div>}
+              {sel.detections > 0 && (
+                <>
+                  {/* "473 detections · max high" on its own says nothing about WHAT fired. The badge
+                      opens the per-rule breakdown (exact, from the node detail), and every rule is a
+                      search over exactly these events. */}
+                  <button type="button" className={cx('graph__ent-det', 'graph__ent-det--btn', showDets && 'on')}
+                    style={{ borderColor: sevVar(sel.sev), color: sevVar(sel.sev) }}
+                    aria-expanded={showDets} onClick={() => setShowDets((v) => !v)}
+                    title="Which rules fired on this entity's events">
+                    {sel.detections} detection{sel.detections === 1 ? '' : 's'} · max {sel.sev} <span aria-hidden="true">{showDets ? '▾' : '▸'}</span>
+                  </button>
+                  {showDets && (
+                    <div className="graph__det-list">
+                      {detail.isLoading && <div className="muted" style={{ fontSize: 'var(--fs-sm)' }}><span className="spinner" style={{ width: 10, height: 10, display: 'inline-block', marginRight: 6 }} />counting by rule…</div>}
+                      {detail.data && (detail.data.detectionRules ?? []).length === 0 && <div className="muted" style={{ fontSize: 'var(--fs-sm)' }}>No rule breakdown available for this node.</div>}
+                      {(detail.data?.detectionRules ?? []).map((r) => {
+                        const q = `${detail.data?.query ?? `entity:"${sel.value.replace(/:/g, '\\:')}"`} detection:"${r.id}"`;
+                        return (
+                          <button key={r.id} type="button" className="graph__det-row" title={`${r.id} — open these ${fmtInt(r.count)} events in Search`}
+                            onClick={() => nav(`/search?q=${encodeURIComponent(q)}${srcSel.length ? `&sources=${encodeURIComponent(srcSel.join(','))}` : ''}`)}>
+                            <span className="graph__det-dot" style={{ background: sevVar(r.sev) }} aria-label={r.sev} />
+                            <span className="graph__det-name">{r.name}</span>
+                            <span className="graph__det-id">{r.id}</span>
+                            <span className="graph__det-n">{fmtInt(r.count)}×</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </>
+              )}
               <div className="kv-list" style={{ marginTop: 12 }}>
                 {sel.facts.filter(([k]) => !['type', 'events', 'first seen', 'last seen'].includes(k.toLowerCase())).map(([k, v], i) => (
                   <div key={`${k}-${i}`} className="kv"><span className="kv__k">{k}</span><span className="kv__v">{v}</span></div>

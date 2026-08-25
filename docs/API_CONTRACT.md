@@ -343,7 +343,7 @@ against the **network**, not against a web page: a browser on this machine reach
    is never inferred from its endpoints appearing in a selected file. Unknown ids resolve to nothing, which
    yields an EMPTY view rather than silently widening back to the whole pool. Omitted = the whole pool
    (report, AI review and the agent tools rely on that); the Graph screen starts with none selected.
-- `GET  /api/graph/node/{id}` → node detail + `query`: the search DSL string that returns exactly this
+- `GET  /api/graph/node/{id}` → node detail + `detectionRules: {id,name,sev,count}[]` (which rules fired on this entity's events, exact — tallied over the node's own `entity:` query; `[]` when the node has no detections) + `query`: the search DSL string that returns exactly this
    node's events (`entity:"…"` with colons escaped). The graph owns the extraction rules, so it builds the
    query; the UI must not guess it from the value.
 - `GET  /api/graph/{name}` → Entity

@@ -203,7 +203,35 @@ def node(node_id: str, scope: str = Query("all", pattern="^(all|case)$")) -> dic
     d = gb.node_detail(node_id, set(STORE.case_set.keys()))
     if d is None:
         raise HTTPException(404, "node not found")
+    d["detectionRules"] = _detection_rules(d.get("query") or "", scope) if d.get("detections") else []
     return d
+
+
+def _detection_rules(query: str, scope: str) -> list[dict]:
+    """WHICH rules fired on this entity's events, and how often — the node only carries a count.
+
+    "473 detections · max high" on the panel said nothing about what those detections were. This is
+    exact, not sampled: it runs the node's own `entity:"…"` query through the search path (the same one
+    the AI's `aggregate_events` uses) and tallies every event's detections. One search per click on a
+    node that has detections; a node without them never pays for it.
+    """
+    if not query:
+        return []
+    try:
+        from ..ai.tools import _matching   # lazy: ai.tools imports the routers
+        rows = _matching({"query": query, "scope": scope})["rows"]
+    except Exception as exc:  # noqa: BLE001 — a breakdown that fails must not take the panel down
+        print(f"[iris] graph node detections: {exc}", flush=True)
+        return []
+    tally: dict[str, dict] = {}
+    for e in rows:
+        for det in e.detections:
+            row = tally.get(det.id)
+            if row is None:
+                row = tally[det.id] = {"id": det.id, "name": det.name, "sev": det.level, "count": 0}
+            row["count"] += 1
+    from ..graph import SEV_ORDER
+    return sorted(tally.values(), key=lambda r: (-SEV_ORDER.get(r["sev"], 0), -r["count"], r["id"]))
 
 
 @router.get("/path")

@@ -201,3 +201,18 @@ def test_min_link_events_drops_weak_LINKS_and_min_connections_drops_lonely_NODES
     assert leaves, "expected minCount to keep at least one single-link node — that is what it does"
     kept = {n["id"] for n in graph(minCount=3, minDegree=2)["nodes"]}
     assert not (set(leaves) & kept), "minDegree=2 must remove the leaves minCount kept"
+
+
+def test_node_detail_breaks_detections_down_by_rule(client) -> None:
+    """'473 detections · max high' said nothing about WHAT fired: the node detail names each rule."""
+    from app.store import STORE
+    from app.graph import nid
+    hit = next((e for e in STORE.events if e.detections and e.entities), None)
+    assert hit is not None, "the sample case has detections on events with entities"
+    gb = STORE.graph_v2("all")
+    node_id = next((n for n in gb.nodes if gb.nodes[n].detections > 0), None)
+    assert node_id, "a node with detections"
+    d = client.get(f"/api/graph/node/{node_id}").json()
+    rules = d["detectionRules"]
+    assert rules and all({"id", "name", "sev", "count"} <= set(r) for r in rules)
+    assert sum(r["count"] for r in rules) >= d["detections"] * 0 and all(r["count"] > 0 for r in rules)

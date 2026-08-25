@@ -514,3 +514,18 @@ button.link-item__name:hover { color: var(--accent); }
 }
 .graph__note svg { flex: none; color: var(--warn); margin-top: 2px; }
 .graph__note b { color: var(--text-bright); }
+
+/* the detections badge is a disclosure: the per-rule breakdown sits under it */
+.graph__ent-det--btn { cursor: pointer; background: transparent; font: inherit; }
+.graph__ent-det--btn:hover, .graph__ent-det--btn.on { background: color-mix(in srgb, currentColor 10%, transparent); }
+.graph__det-list { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+.graph__det-row {
+  display: grid; grid-template-columns: 8px minmax(0, 1fr) auto auto; gap: 8px; align-items: center;
+  padding: 5px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-1); color: var(--text); font: inherit; font-size: var(--fs-sm); text-align: left; cursor: pointer;
+}
+.graph__det-row:hover { border-color: var(--accent-border); background: var(--surface-2); }
+.graph__det-dot { width: 8px; height: 8px; border-radius: 50%; }
+.graph__det-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.graph__det-id { font-family: var(--font-mono); color: var(--muted); font-size: 11px; }
+.graph__det-n { font-family: var(--font-mono); color: var(--text-2); }

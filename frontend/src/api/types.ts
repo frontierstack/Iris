@@ -133,6 +133,8 @@ export interface GraphQuery { scope?: Scope; types?: EntityType[]; relations?: R
   lean?: boolean }
 export interface GraphNodeDetail extends GraphNode {
   neighbours: GraphEdge[]; timeline: { ts: string; eventId: string; msg: string; sev: Severity }[];
+  /** Which rules fired on this entity's events and how often — exact, over the node's own query. */
+  detectionRules?: { id: string; name: string; sev: Severity; count: number }[];
   /** The search DSL query that returns EXACTLY this node's events (`entity:"…"`, colons escaped). Built
    *  by the graph, which owns the extraction rules — the UI must not guess it from the value. */
   query?: string;
