@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { SEVERITIES, type Anomaly, type Event, type Exclusion, type ExclusionInput, type ExclusionSuggestion, type GraphFinding, type Rule, type RuleCondition, type RuleField, type RuleInput, type RuleOp, type RuleParamKind, type RuleSuggestResult, type RuleTestResult, type Severity } from '../api/types';
@@ -12,6 +12,27 @@ import { useToast } from '../hooks/useToast';
 import { cx, fmtInt, fmtTs, sevVar } from '../utils/format';
 
 /* ───────────────────────── Anomalies list ───────────────────────── */
+
+
+/* Every section on this page is a DISCLOSURE and starts CLOSED — on request. Four long sections
+   (the anomaly list, graph findings, the whole rule catalogue, the exclusions) stacked open made the
+   page one scroll of tables; the heads with their counts are the overview, and a section opens when
+   it is the one being worked in. The choice is remembered per section. */
+const OPEN_KEY = 'iris.anomalies.open';
+function readOpen(): Record<string, boolean> {
+  try { return JSON.parse(localStorage.getItem(OPEN_KEY) || '{}') as Record<string, boolean>; } catch { return {}; }
+}
+function useSectionOpen(key: string): [boolean, () => void] {
+  const [open, setOpen] = useState<boolean>(() => !!readOpen()[key]);
+  const toggle = useCallback(() => {
+    setOpen((v) => {
+      const next = !v;
+      try { localStorage.setItem(OPEN_KEY, JSON.stringify({ ...readOpen(), [key]: next })); } catch { /* private mode */ }
+      return next;
+    });
+  }, [key]);
+  return [open, toggle];
+}
 
 function AnomalyRow({ a, open, onToggle }: { a: Anomaly; open: boolean; onToggle: () => void }) {
   const nav = useNavigate();
@@ -67,6 +88,7 @@ function AnomalyRow({ a, open, onToggle }: { a: Anomaly; open: boolean; onToggle
 }
 
 function AnomaliesSection() {
+  const [secOpen, toggleSec] = useSectionOpen('anomalies');
   const [sevs, setSevs] = useState<Severity[]>([]);
   const [text, setText] = useState('');
   const [open, setOpen] = useState<string | null>(null);
@@ -94,10 +116,12 @@ function AnomaliesSection() {
     <section>
       <SectionHead
         eyebrow="01 · Anomalies"
+        open={secOpen} onToggle={toggleSec}
         title="Rules with hits in the active case"
         hint={building ? 'aggregating rule hits across the pool…'
           : q.data ? `${fmtInt(q.data.total)} rule${q.data.total === 1 ? '' : 's'} fired` : 'sorted by severity, then hits'}
       />
+      {secOpen && (<>
       {/* Rules are evaluated against interpreted events. Until a source is enriched it has no parsed
           fields, no severity and no timestamp, so no rule has been given the chance to fire on it —
           and "no rule has fired" would be a false statement about that evidence. */}
@@ -149,6 +173,7 @@ function AnomaliesSection() {
           {list.map((a) => <AnomalyRow key={a.ruleId} a={a} open={open === a.ruleId} onToggle={() => setOpen((o) => (o === a.ruleId ? null : a.ruleId))} />)}
         </div>
       )}
+      </>)}
     </section>
   );
 }
@@ -907,6 +932,7 @@ function RuleDrawer({ open, rule, onClose }: { open: boolean; rule: Rule | null;
 /* ───────────────────────── Rules manager ───────────────────────── */
 
 function RulesSection() {
+  const [secOpen, toggleSec] = useSectionOpen('rules');
   const rules = useRules(true); // includes removed built-ins so the "removed" filter can restore them
   const qc = useQueryClient();
   const toast = useToast();
@@ -984,7 +1010,8 @@ function RulesSection() {
   return (
     <section>
       <SectionHead
-        eyebrow="02 · Rules"
+        eyebrow="03 · Rules"
+        open={secOpen} onToggle={toggleSec}
         title="Detection rules"
         hint={rules.data ? `${nBuiltin} built-in · ${nCustom} custom` : 'built-in Sigma-like rules plus your regex rules'}
         actions={
@@ -1005,6 +1032,7 @@ function RulesSection() {
           </>
         }
       />
+      {secOpen && (<>
       <div className="anom__toolbar">
         <div className="chip-row">
           <span className="chip-row__label">Show</span>
@@ -1136,6 +1164,7 @@ function RulesSection() {
         onConfirm={() => clearAll.mutate('all')}
         onCancel={() => setClearing(false)}
       />
+      </>)}
     </section>
   );
 }
@@ -1171,6 +1200,7 @@ function GraphFindingRow({ f }: { f: GraphFinding }) {
 }
 
 function GraphFindingsSection() {
+  const [secOpen, toggleSec] = useSectionOpen('graph');
   const [sev, setSev] = useState<Severity[]>([]);
   const q = useQuery({
     queryKey: ['graph-anomalies'],
@@ -1194,6 +1224,7 @@ function GraphFindingsSection() {
     <section>
       <SectionHead
         eyebrow="02 · Entity graph"
+        open={secOpen} onToggle={toggleSec}
         title={<>Graph findings {q.data?.evaluated && <span className="sec__count">{q.data.findings.length}</span>}</>}
         hint={
           <>
@@ -1203,6 +1234,7 @@ function GraphFindingsSection() {
           </>
         }
       />
+      {secOpen && (<>
       {q.isError && <ErrorState error={q.error} onRetry={() => void q.refetch()} />}
       {q.isLoading && <SkeletonRows n={3} />}
       {/* NOT built is not the same as nothing found, and the screen must never render the first as the
@@ -1246,6 +1278,7 @@ function GraphFindingsSection() {
           </div>
         </>
       )}
+      </>)}
     </section>
   );
 }
@@ -1374,6 +1407,7 @@ function ExclusionEditor({ open, current, onClose }: { open: boolean; current: E
 }
 
 function ExclusionsSection() {
+  const [secOpen, toggleSec] = useSectionOpen('exclusions');
   const qc = useQueryClient();
   const toast = useToast();
   const invalidate = useInvalidateCaseData();
@@ -1414,6 +1448,7 @@ function ExclusionsSection() {
     <section>
       <SectionHead
         eyebrow="04 · Exclusions"
+        open={secOpen} onToggle={toggleSec}
         title={<>Exclusions {rows.length > 0 && <span className="sec__count">{rows.length}</span>}</>}
         hint={
           <>
@@ -1438,6 +1473,7 @@ function ExclusionsSection() {
           </>
         }
       />
+      {secOpen && (<>
       {q.isLoading && <SkeletonRows n={2} />}
       {q.isError && <ErrorState error={q.error} onRetry={() => void q.refetch()} />}
 
@@ -1512,6 +1548,7 @@ function ExclusionsSection() {
         </div>
       )}
       <ExclusionEditor open={editing.open} current={editing.current} onClose={() => setEditing({ open: false, current: null })} />
+      </>)}
     </section>
   );
 }

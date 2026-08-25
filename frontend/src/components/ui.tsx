@@ -214,15 +214,30 @@ export function Toggle({ on, onChange, label, disabled }: { on: boolean; onChang
 }
 
 /* ───── Section header with eyebrow ───── */
-export function SectionHead({ eyebrow, title, hint, actions, id }: { eyebrow?: string; title: ReactNode; hint?: ReactNode; actions?: ReactNode; id?: string }) {
-  return (
-    <div className="sec" id={id}>
-      <div>
-        {eyebrow && <div className="sec__eyebrow">{eyebrow}</div>}
-        <div className="sec__title">{title}</div>
+export function SectionHead({ eyebrow, title, hint, actions, id, open, onToggle }: {
+  eyebrow?: string; title: ReactNode; hint?: ReactNode; actions?: ReactNode; id?: string;
+  /** When `onToggle` is given the head is a DISCLOSURE: the title toggles the section body. The hint
+   *  stays visible either way (it carries the counts, which is what a collapsed section should still
+   *  say); the actions only exist while the body they act on is on screen. */
+  open?: boolean; onToggle?: () => void;
+}) {
+  const collapsible = typeof onToggle === 'function';
+  const head = (
+    <>
+      {eyebrow && <div className="sec__eyebrow">{eyebrow}</div>}
+      <div className="sec__title">
+        {collapsible && <span className={cx('sec__chev', open && 'open')} aria-hidden="true" />}
+        {title}
       </div>
+    </>
+  );
+  return (
+    <div className={cx('sec', collapsible && 'sec--collapsible', collapsible && !open && 'sec--closed')} id={id}>
+      {collapsible
+        ? <button type="button" className="sec__toggle" aria-expanded={!!open} onClick={onToggle}>{head}</button>
+        : <div>{head}</div>}
       {hint && <div className="sec__hint">{hint}</div>}
-      {actions && <div className="sec__actions">{actions}</div>}
+      {actions && (!collapsible || open) && <div className="sec__actions">{actions}</div>}
     </div>
   );
 }

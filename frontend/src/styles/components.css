@@ -2014,3 +2014,11 @@
 .fontpick__sample { font-size: 16px; line-height: 1.1; color: var(--text-bright); flex: 0 0 auto; }
 .fontpick__name { font-size: var(--fs-sm); color: var(--text); min-width: 0; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
+
+/* collapsible section heads (Anomalies): the title is the toggle, the hint stays as the summary */
+.sec__toggle { background: none; border: 0; padding: 0; margin: 0; text-align: left; color: inherit; font: inherit; cursor: pointer; border-radius: var(--radius-sm); }
+.sec__toggle:hover .sec__title { color: var(--accent); }
+.sec__toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+.sec__chev { display: inline-block; width: 0.55em; height: 0.55em; margin-right: 10px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: translateY(-0.15em) rotate(-45deg); transition: transform 120ms; opacity: 0.7; }
+.sec__chev.open { transform: translateY(-0.3em) rotate(45deg); }
+.sec--closed { margin-bottom: 0; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
