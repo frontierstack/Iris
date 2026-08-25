@@ -75,7 +75,10 @@ async def upload_sources(response: Response, files: list[UploadFile] = File(...)
             # in the process waits for it (see routers/library.stage_files)
             added = await asyncio.to_thread(STORE.ingest_upload_path, name, staged)
         except Exception as exc:
-            staged.unlink(missing_ok=True)
+            try:
+                staged.unlink(missing_ok=True)
+            except OSError:
+                pass
             reason = _ingest_reason(exc)
             REGISTRY.fail(jid, reason)
             # The client gets the SAME sentence the job carries. A bare re-raise answered
@@ -110,7 +113,8 @@ def _report(job_id: str, added: list[Source]) -> None:
     if any(s.state == "PARSING" for s in added):
         REGISTRY.attach_sources(job_id, sids)
         return
-    errors = "; ".join(s.error for s in added if s.state == "ERROR" and s.error)
+    # each failure names ITS file — a job for a zip with three failed members read "X; Y; Z"
+    errors = "; ".join(f"{s.file}: {s.error}" for s in added if s.state == "ERROR" and s.error)
     REGISTRY.finish(job_id, parser=added[0].parser if added else "",
                     events=sum(s.events for s in added), confidence=added[0].confidence if added else 0.0,
                     source_ids=sids, error=errors)

@@ -474,6 +474,15 @@ class EnrichQueue:
                 self._current = ""
                 self._committing = False
             self._set_phase("idle")
+            # A submit that raised, or a commit that never ran, leaves the OTHER peeled sources at
+            # `enriching` with nothing in flight. Fail every one that did not get a result.
+            fail = getattr(store, "enrich_failed", None)
+            for s in tasks:
+                if self.last.get(s) is None:
+                    msg = "parallel enrichment did not complete for this file (retry with Enrich)"
+                    self.last[s] = EnrichResult(sid=s, ok=False, error=msg)
+                    if fail is not None:
+                        fail(s, msg)
             res = [self.last.get(s) for s in tasks]
             ok = sum(1 for r in res if r is not None and r.ok)
             bad = [f"{r.sid}: {r.error}" for r in res if r is not None and not r.ok]
@@ -577,8 +586,13 @@ class EnrichQueue:
                             self._set_phase("parsing")
                             self.last[nxt] = store.enrich_source(nxt)
                         except Exception as exc:   # one bad file must not lose the whole batch
-                            self.last[nxt] = EnrichResult(sid=nxt, ok=False,
-                                                          error=f"{type(exc).__name__}: {exc}")
+                            msg = f"{type(exc).__name__}: {exc}"
+                            self.last[nxt] = EnrichResult(sid=nxt, ok=False, error=msg)
+                            # ...and must not stay at `enriching` either — the outer handler only
+                            # ever failed the FIRST source of the batch
+                            fail = getattr(store, "enrich_failed", None)
+                            if fail is not None:
+                                fail(nxt, msg)
             except Exception as exc:  # a bad file may never take the worker down
                 # ...but it must never be SILENT either: an exception here left four sources at
                 # `enriching` with nothing in flight and no message anywhere. Log the traceback and

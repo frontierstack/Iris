@@ -291,6 +291,16 @@ def _store_snapshot() -> tuple[str, dict[str, tuple[str, int, str, str, str]]]:
         return "", {}
 
 
+def _pool_settled() -> bool:
+    """False while the library is still loading — a source missing from the pool then is one that has
+    not been restored yet, not one the analyst removed."""
+    try:
+        from .store import STORE
+        return not STORE.pool_loading
+    except Exception:
+        return False
+
+
 class JobRegistry:
     def __init__(self) -> None:
         self.lock = threading.RLock()
@@ -564,6 +574,7 @@ class JobRegistry:
         calls back when the thread finishes, so the job is resolved the next time anybody reads the list.
         """
         case_id, sources = _store_snapshot()
+        settled = _pool_settled()
         now = time.time()
         in_flight = PARSE_PROGRESS.active()
         with self.lock:
@@ -574,6 +585,18 @@ class JobRegistry:
                 # case id — it would have sat in `parsing` forever now that finish() defers to us.
                 if job.state == "parsing" and job.sourceIds and job.caseId in (case_id, ""):
                     rows = [sources[s] for s in job.sourceIds if s in sources]
+                    if (not rows and settled
+                            and not any(r["sourceId"] in job.sourceIds for r in in_flight)):
+                        # Every source this job produced is GONE from a settled pool: the analyst
+                        # deleted the file before phase 2 landed. Nothing is in flight and nothing is
+                        # in the workspace to report on, so the row has nothing left to say — it used
+                        # to poll `parsing` until the next restart.
+                        job.state = "ready"
+                        job.events = 0
+                        job.error = ""
+                        self._touch(job)
+                        changed = True
+                        continue
                     if not rows or any(r[0] == "PARSING" for r in rows):
                         continue
                     # Ingest has two phases (app/enrich.py) and the job covers BOTH: the raw phase is

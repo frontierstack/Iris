@@ -150,10 +150,20 @@ class Expanded:
     # deciding "this 1.9 GB capture is not an archive" costs a 64 KB read instead of 1.9 GB — which is
     # the whole point of having a path-based entry point at all.
     passthrough: bool = False
+    # `expand`/`expand_path`: the single member IS the file, but its BYTES are not — a UTF-16 text export
+    # was transcoded to UTF-8 in memory. Anything that re-reads the file (phase 2, a remap, the raw
+    # viewer) must re-apply the transcode, or it reads the raw UTF-16 as UTF-8 and every line comes
+    # back full of NULs while the source still reports `enriched`. See `TRANSCODE_MEMBER`.
+    transcoded: bool = False
 
     @property
     def ok(self) -> bool:
         return not self.errors
+
+
+# The pseudo member name `read_member` accepts for "the whole file, transcoded from UTF-16". Recorded
+# as `<file>!<marker>` in `Store.source_member` so the re-read path is the same as for an archive member.
+TRANSCODE_MEMBER = "#utf-16"
 
 
 class _Budget:
@@ -307,7 +317,12 @@ def expand_path(filename: str, path) -> Expanded:
     if (head.startswith((GZIP_MAGIC, BZIP2_MAGIC, XZ_MAGIC, ZSTD_MAGIC, SEVENZ_MAGIC, RAR_MAGIC))
             or lower.endswith((".gz", ".bz2", ".xz", ".lzma", ".zst", ".7z", ".rar"))
             or (head[:2] in (b"\xff\xfe", b"\xfe\xff") and lower.endswith(_TEXT_EXTENSIONS))):
-        return expand(filename, _read_all(path))
+        try:
+            return expand(filename, _read_all(path))
+        except OSError as exc:
+            out = Expanded()
+            out.errors.append(f"{filename}: could not be read ({type(exc).__name__}: {exc.strerror or exc}).")
+            return out
 
     # Not a container. Say so instead of reading it: the caller has the path and is about to parse
     # from it anyway, and this is the branch every large log takes.
@@ -315,11 +330,8 @@ def expand_path(filename: str, path) -> Expanded:
 
 
 def _read_all(path) -> bytes:
-    try:
-        with open(path, "rb") as fh:
-            return fh.read()
-    except OSError:
-        return b""
+    with open(path, "rb") as fh:      # an unreadable file is the CALLER's error to report, by name
+        return fh.read()
 
 
 def _bytes_of(data: Optional[bytes], fileobj) -> bytes:
@@ -350,6 +362,10 @@ def read_member(path, member: str) -> bytes:
     parts = member.split("!")
     if len(parts) < 2:
         raise ValueError(f"{member!r} does not name a member inside a container")
+    if parts[-1] == TRANSCODE_MEMBER:
+        # a UTF-16 text export, transcoded at ingest: hand back the SAME bytes the parsers first saw
+        with open(path, "rb") as fh:
+            return fh.read().decode("utf-16").encode("utf-8")
     blob: Optional[bytes] = None
     for i, want in enumerate(parts[1:]):
         if i == 0:
@@ -363,7 +379,14 @@ def read_member(path, member: str) -> bytes:
 
 
 def _read_one(fh, want: str) -> Optional[bytes]:
-    """One member out of an open zip or tar, by its (already sanitised) inner path."""
+    """One member out of an open zip, tar, or single-file compressor, by its (sanitised) inner path.
+
+    A .gz/.bz2/.xz/.zst that is NOT a tar has exactly one payload, and that payload is the member —
+    `_expand_single` names it after the file minus its suffix. This used to be unreachable: only zip
+    and tar were walked, so a `auth.log.gz` staged into the library parsed fine in phase 1 and then
+    failed phase 2 with "'auth.log' does not name a member inside a container" — every compressed
+    log, every time, on the path uploads now take by default.
+    """
     head = fh.read(SNIFF_BYTES)
     fh.seek(0)
     if head.startswith(ZIP_MAGIC):
@@ -374,15 +397,43 @@ def _read_one(fh, want: str) -> Optional[bytes]:
                 if safe_member_name(info.filename) == want:
                     return zf.read(info)
         return None
+    if head.startswith((GZIP_MAGIC, BZIP2_MAGIC, XZ_MAGIC, ZSTD_MAGIC)):
+        try:
+            if head.startswith(ZSTD_MAGIC):
+                raise tarfile.ReadError("zstd")       # tarfile cannot open zstd; the payload path handles it
+            with tarfile.open(fileobj=fh, mode="r:*") as tf:
+                return _read_tar_member(tf, want)
+        except tarfile.ReadError:
+            fh.seek(0)
+            blob = _decompress_single(fh.read())
+            # the payload may itself be a container (a zipped log inside a .gz): keep walking
+            if blob.startswith(ZIP_MAGIC) or _is_tar(blob):
+                return _read_one(io.BytesIO(blob), want)
+            return blob
     with tarfile.open(fileobj=fh, mode="r:*") as tf:
-        while True:
-            m = tf.next()
-            if m is None:
-                return None
-            if not m.isfile() or safe_member_name(m.name) != want:
-                continue
-            got = tf.extractfile(m)
-            return got.read() if got is not None else b""
+        return _read_tar_member(tf, want)
+
+
+def _read_tar_member(tf, want: str) -> Optional[bytes]:
+    while True:
+        m = tf.next()
+        if m is None:
+            return None
+        if not m.isfile() or safe_member_name(m.name) != want:
+            continue
+        got = tf.extractfile(m)
+        return got.read() if got is not None else b""
+
+
+def _decompress_single(data: bytes) -> bytes:
+    if data.startswith(GZIP_MAGIC):
+        return gzip.decompress(data)
+    if data.startswith(BZIP2_MAGIC):
+        return bz2.decompress(data)
+    if data.startswith(XZ_MAGIC):
+        return lzma.decompress(data)
+    import zstandard  # guarded at expansion time; a stream that expanded once has the module
+    return zstandard.ZstdDecompressor().decompress(data, max_output_size=MAX_MEMBER_BYTES)
 
 
 # ------------------------------------------------------------------------ internals
@@ -447,6 +498,7 @@ def _expand_into(out: Expanded, budget: _Budget, filename: str, data: bytes, dep
     if depth == 0 and data[:2] in (b"\xff\xfe", b"\xfe\xff") and lower.endswith(_TEXT_EXTENSIONS):
         try:  # UTF-16 text export (PowerShell Out-File default): transcode so text parsers can read it
             out.members.append((filename, data.decode("utf-16").encode("utf-8")))
+            out.transcoded = True
             return
         except UnicodeDecodeError:
             pass

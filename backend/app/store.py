@@ -1022,10 +1022,14 @@ class Store:
         else:
             expanded = self.expand_upload_ex(display or name, data)
         members = expanded.members
+        own = display or name
         if expanded.errors:
-            # a container Iris refuses to open stays a staged blob: parsing it as binary strings would
-            # put noise in the pool. It is still attachable, where ingest reports the refusal properly.
-            return []
+            # The container came back as its own member when it could not be opened; parsing that as
+            # binary strings on top of the ERROR notice would be noise. Everything ELSE that came out
+            # is real evidence and is ingested below — this used to `return []` on any error, so a zip
+            # with 200 good members and one `../` entry put NOTHING in the pool and the job reported
+            # `ready`, and a password-protected zip dropped here went silently "not parsed".
+            members = [(n, b) for n, b in members if n != own]
         out: list[Source] = []
         if expanded.passthrough:
             # not a container: this file IS the single source, and its bytes stay on disk
@@ -1034,8 +1038,10 @@ class Store:
                 exists = sid in self.sources
             if exists:
                 return []
-            src = self.add_file(display or name, None, background_ok=background_ok, sid=sid, path=path,
-                                origin="library", library_name=name, id_prefix=f"l{sid}")
+            # via _add_member: a raise here (the sniff, the queueing, phase 1) is that FILE's error
+            # source, not an exception escaping the request with the row stuck at PARSING
+            src = self._add_member(own, None, background_ok=background_ok, sid=sid, path=path,
+                                   origin="library", library_name=name, id_prefix=f"l{sid}")
             pool_store.save_manifest(name, [src.id])
             return [src]
         for i, (member_name, blob) in enumerate(members):
@@ -1046,10 +1052,27 @@ class Store:
             # A single member carrying the file's own name is the file itself (the byte path's way of
             # saying "not a container"); anything else is a real member and records where it came from
             # so `source_bytes` can read it back out of the container instead of re-reading the archive.
-            is_self = len(members) == 1 and member_name == (display or name)
+            # The provenance ALWAYS carries the container: `_expand_single` names a decompressed .gz
+            # payload `auth.log` with no `!`, and `read_member` needs the `<container>!<payload>` shape.
+            is_self = len(members) == 1 and member_name == own
+            if is_self:
+                member = f"{own}!{archives.TRANSCODE_MEMBER}" if expanded.transcoded else ""
+            elif "!" in member_name:
+                member = member_name
+            else:
+                member = f"{own}!{member_name}"
             out.append(self._add_member(member_name, blob, background_ok=background_ok, sid=sid, path=path,
                                         origin="library", library_name=name, id_prefix=f"l{sid}",
-                                        member="" if is_self else member_name))
+                                        member=member))
+        if expanded.errors:
+            # the refusal is a SOURCE, in state ERROR, naming the file the analyst uploaded — never a
+            # silent skip (CLAUDE.md: a password-protected archive is reported, not skipped)
+            err_sid = uuid.uuid5(uuid.NAMESPACE_URL, f"iris-library/{name}#error").hex[:8]
+            with self.lock:
+                have = err_sid in self.sources
+            if not have:
+                out.append(self._failed_source(err_sid, own, " ".join(expanded.errors)[:2000],
+                                               path=path, origin="library", library_name=name))
         if out:
             # Which members this file expands into. Written here because this is the only place that
             # knows: an archive's member list needs the archive expanded, which is what a cache HIT
@@ -1430,7 +1453,7 @@ class Store:
         try:
             self.upload_dir.mkdir(parents=True, exist_ok=True)
             if staged.is_file():
-                dest.write_bytes(staged.read_bytes())
+                shutil.copyfile(staged, dest)      # not read_bytes(): a multi-GB capture whole in RAM
             else:
                 dest = staged
         except OSError:
@@ -1472,15 +1495,10 @@ class Store:
         # The library index is what gives a staged file its display name and upload time; without an
         # entry the Sources page would show the sanitized on-disk name instead.
         try:
-            idx = {}
-            if config.LIBRARY_INDEX.is_file():
-                loaded = json.loads(config.LIBRARY_INDEX.read_text(encoding="utf-8"))
-                idx = loaded if isinstance(loaded, dict) else {}
-            idx[name] = {"file": original, "size": target.stat().st_size,
-                         "uploadedAt": to_iso(datetime.now(UTC))}
-            tmp = config.LIBRARY_INDEX.with_suffix(".tmp")
-            tmp.write_text(json.dumps(idx, indent=2), encoding="utf-8")
-            tmp.replace(config.LIBRARY_INDEX)
+            from .routers.library import _update_library_index  # lazy: routers import the store
+            entry = {"file": original, "size": target.stat().st_size, "uploadedAt": to_iso(datetime.now(UTC))}
+            # under the ONE index lock — an unlocked read-modify-write here raced the upload lanes
+            _update_library_index(lambda idx: idx.__setitem__(name, entry) or True)
         except (OSError, ValueError):
             pass  # the file is staged either way; only its pretty name is lost
         with self.lock:
@@ -1662,8 +1680,13 @@ class Store:
             # an empty container: keep the upload visible rather than reporting nothing at all
             out = [self.add_file(filename, None, path=staged)]
         else:
-            # the members were written to their own files; the staged copy has no reader left
-            staged.unlink(missing_ok=True)
+            # the members were written to their own files; the staged copy has no reader left.
+            # Best effort: on Windows a scanner can hold a freshly written file for a moment, and a
+            # PermissionError here must not fail an upload whose sources are already in the pool.
+            try:
+                staged.unlink(missing_ok=True)
+            except OSError as exc:
+                print(f"[iris] staged copy of {filename} not removed: {config.safe_os_error(exc)}", flush=True)
         return out
 
     def add_error_source(self, filename: str, data: Optional[bytes], message: str,
@@ -1721,8 +1744,10 @@ class Store:
             try:
                 self.upload_dir.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(data or b"")
-            except OSError:
-                pass
+            except OSError as exc:
+                # Swallowing this registered a source whose bytes were never on disk: phase 2 later
+                # failed with a bare FileNotFoundError and a restart lost the member for good.
+                raise OSError(f"could not write {filename} into the case ({config.safe_os_error(exc)})") from exc
         streamed = data is None
         if streamed:
             # Never read the whole file to answer "what is this?" — the sniffer only ever looks at a
@@ -1816,8 +1841,24 @@ class Store:
                                        first_id=first_id, progress=tick)
         PARSE_PROGRESS.advance(sid, done=total, events=len(events), phase="merging")
         if not prefix:
+            # Reserve the id range AFTER the parse, in one step, exactly as `_finish_batches` does.
+            # `base` was read before the parse and the counter advanced after it, so two of the four
+            # upload lanes both minted e{base+1}... — measured: two 120 k-line files in parallel gave
+            # 240 000 events with 120 000 distinct ids. The ids were stamped from the provisional
+            # base as the lines streamed in; if another lane moved the counter meanwhile, re-stamp.
             with self.lock:
+                start = self._event_seq
                 self._event_seq += len(events)
+                self.source_id_base[sid] = start
+            if start != base:
+                for i, ev in enumerate(events):
+                    ev.id = f"e{start + i + 1:x}"
+        with self.lock:
+            gone = sid not in self.sources
+        if gone:
+            # deleted while phase 1 was reading it: nothing may put its lines into the pool now
+            PARSE_PROGRESS.finish(sid)
+            return
         with self.lock:
             src.events = len(events)
             src.state = state  # type: ignore[assignment]
@@ -1957,10 +1998,12 @@ class Store:
                 data = self.source_bytes(sid)
                 PARSE_PROGRESS.start(sid, src.file, len(data))
                 PARSE_PROGRESS.advance(sid, done=0, phase="enriching")
-            except (OSError, KeyError, ValueError) as exc:
+            except Exception as exc:  # OSError/KeyError/ValueError, but also BadZipFile, ReadError, MemoryError
+                msg = str(exc) or type(exc).__name__
                 with self.lock:
-                    src.enrich, src.enrichError = "error", str(exc)  # type: ignore[assignment]
-                return enrich.EnrichResult(sid=sid, ok=False, error=str(exc))
+                    src.enrich, src.enrichError = "error", msg  # type: ignore[assignment]
+                    src.state, src.error = "ERROR", msg  # type: ignore[assignment]
+                return enrich.EnrichResult(sid=sid, ok=False, error=msg)
 
         old_ids = [e.id for e in self.events if e.sourceId == sid]
         try:
@@ -2352,13 +2395,34 @@ class Store:
         if data is None:
             try:
                 data = self.source_bytes(sid)
-            except (OSError, KeyError, ValueError) as exc:
+            except Exception as exc:  # OSError, a missing member, a MemoryError on a multi-GB capture
                 with self.lock:
                     src.state = "ERROR"
                     src.error = f"could not read the file back: {type(exc).__name__}: {exc}"
                 self.bump()
                 return
         PARSE_PROGRESS.start(sid, src.file, len(data))
+        try:
+            self._parse_source_body(sid, src, parser, data, state, confidence)
+        except Exception as exc:
+            # ANYTHING escaping here — the parser, id assignment, the merge, detection stamping —
+            # used to leave the source at PARSING for the life of the process. On the parse thread
+            # the exception was simply lost; `jobs.sync()` skips a job whose source is PARSING, so
+            # the job never resolved either. The source is marked ERROR (if it still exists) and
+            # the state is retryable.
+            traceback.print_exc()
+            PARSE_PROGRESS.finish(sid)
+            with self.lock:
+                cur = self.sources.get(sid)
+                if cur is not None:
+                    cur.state = "ERROR"
+                    cur.error = f"{type(exc).__name__}: {exc}"
+            self.bump()
+
+    def _parse_source_body(self, sid: str, src: Source, parser: BaseParser, data: bytes,
+                           state: str, confidence: float) -> None:
+        from .jobs import PARSE_PROGRESS
+
         try:
             batches = self._parse_batches(sid, src, parser, data)
         except Exception as exc:  # parser blew up on this file
@@ -2372,6 +2436,13 @@ class Store:
         events, skew, unmapped = self._finish_batches(sid, batches)
         del batches
         self._tail(sid, "finishing", 100)
+        with self.lock:
+            gone = sid not in self.sources
+        if gone:
+            # Deleted (or the case switched) while the thread was parsing. Merging these events would
+            # put evidence the analyst removed back into the pool, under a source id nothing owns.
+            PARSE_PROGRESS.finish(sid)
+            return
         with self.lock:
             src.events = len(events)
             src.state = state  # type: ignore[assignment]
