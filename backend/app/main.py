@@ -110,6 +110,24 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Iris", version=VERSION, lifespan=lifespan)
 
+
+class SelectiveGZip:
+    """GZipMiddleware for a fixed set of GET paths (prefix match), plain pass-through for the rest."""
+
+    def __init__(self, app, paths: tuple[str, ...], minimum_size: int = 1024) -> None:
+        from starlette.middleware.gzip import GZipMiddleware
+        self.app = app
+        self.gz = GZipMiddleware(app, minimum_size=minimum_size)
+        self.paths = paths
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http" and scope.get("method") == "GET":
+            path = scope.get("path", "")
+            if any(path == p or path.startswith(p + "/") or path.startswith(p + "?") for p in self.paths):
+                await self.gz(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
 # NEVER `allow_origins=["*"]`. Iris is unauthenticated, so the wildcard is not a convenience — it is a
 # standing grant to every page the analyst has open to read the whole evidence pool, and (through the
 # preflight) to be told that DELETE is allowed on cases and sources. The SPA is served from this same
@@ -117,6 +135,15 @@ app = FastAPI(title="Iris", version=VERSION, lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=security.cors_origins(), allow_credentials=False,
                    allow_methods=["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"],
                    allow_headers=["*"], max_age=600)
+
+# Compression for the BIG JSON answers only. A 2,000-node graph is 5-8 MB of repetitive JSON even
+# after the edge cap (37 MB before it) and every Search page is a few hundred KB; gzip takes them down
+# 5-8x, which matters through Docker Desktop's port proxy and over any link that is not loopback.
+# Starlette's GZipMiddleware would also wrap the SSE streams (the AI investigator, the graph review),
+# buffering tokens inside zlib — so it is applied only to GET requests on an explicit list of paths.
+app.add_middleware(SelectiveGZip, paths=("/api/graph", "/api/events", "/api/timeline", "/api/anomalies",
+                                         "/api/library", "/api/case", "/api/jobs", "/api/ai/runs"),
+                   minimum_size=2048)
 
 # Added last, so it is the OUTERMOST layer: it must refuse a cross-site write before CORSMiddleware can
 # decorate the response, and it must not be inside anything that buffers a body (the AI investigator and

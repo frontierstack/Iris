@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Literal, Optional
 
 import orjson
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -20,6 +20,8 @@ from ..models import Entity, GraphEdge, GraphFindingOut, GraphFindings, GraphLin
 from ..store import STORE
 
 router = APIRouter(prefix="/graph", tags=["graph"])
+# Strongest edges kept per response when the node cap lets more through — see `graph()` below.
+DEFAULT_MAX_EDGES = 20_000
 UTC = timezone.utc
 
 
@@ -86,7 +88,8 @@ def graph(scope: str = Query("all", pattern="^(all|case)$"),
           types: str = "", relations: str = "", minCount: int = Query(1, ge=1),
           minDegree: int = Query(1, ge=1, le=100),
           focus: Optional[str] = None, hops: int = Query(1, ge=0, le=4),
-          limit: int = Query(DEFAULT_LIMIT, ge=10, le=2000), q: str = "", sources: str = "") -> GraphV2:
+          limit: int = Query(DEFAULT_LIMIT, ge=10, le=2000), q: str = "", sources: str = "",
+          maxEdges: int = Query(DEFAULT_MAX_EDGES, ge=100, le=500_000), lean: bool = False) -> GraphV2:
     """The typed graph.
 
     `q` is a free-text filter over node values/labels (case-insensitive substring) — the graph's own
@@ -125,7 +128,7 @@ def graph(scope: str = Query("all", pattern="^(all|case)$"),
     # outside them (measured: q=claude -> 0 nodes on a graph holding 21,676).
     nodes, edges, stats = gb.select(types=tset, relations=rset, min_count=minCount, focus=focus, hops=hops,
                                     limit=limit, in_case=in_case, files=_files_for(sources), query=q,
-                                    min_degree=minDegree)
+                                    min_degree=minDegree, max_edges=maxEdges, lean=lean)
     if q.strip():
         stats = {**stats, "query": q.strip()}
     # Authored nodes and links are OVERLAYS: exempt from minCount/minDegree (they carry no event count
@@ -142,13 +145,25 @@ def graph(scope: str = Query("all", pattern="^(all|case)$"),
     seen: set[str] = set()
     edges = [e for e in edges
              if e.source in node_ids and e.target in node_ids and not (e.id in seen or seen.add(e.id))]
+    # `limit` caps NODES; nothing capped edges, and 2,000 well-connected nodes carried 113,457 of
+    # them — a 37.6 MB payload that took 3.7 s and drew at ~1 fps, because every frame rasterises
+    # every curve. `select` keeps the strongest `maxEdges` (severity, then event count) BEFORE it
+    # builds a model for any of them; overlays (analyst/AI links, appended above) are never subject
+    # to it — they carry no count to rank by. The cut is REPORTED in `stats.hiddenEdges` and the
+    # screen says so: a graph missing links it does not mention is the silent-omission bug this
+    # project keeps fighting. `lean` drops the per-edge event ids and stamps (8.5 MB of that payload)
+    # that the canvas never reads — the node detail request carries them.
     included, pending = STORE.graph_coverage()
     # The graph no longer waits for the interpretation queue: it covers the sources that are ready
     # and says how many are still to come. An analyst reading a graph must know it is over PART of
     # the workspace — that is the silent-omission class of bug this project keeps fighting.
-    stats = {**stats, "edges": len(edges), "status": status,
+    stats = {**stats, "edges": len(edges), "status": status, "maxEdges": maxEdges,
              "sourcesIncluded": included, "sourcesPending": pending}
-    return GraphV2(nodes=nodes, edges=edges, stats=stats)
+    # Serialised HERE: handing FastAPI the model makes it validate 22,000 GraphEdge/GraphNode objects a
+    # second time (they were validated on construction) before it serialises them. `response_model`
+    # stays on the decorator for the OpenAPI schema; a Response return bypasses the re-validation.
+    body = GraphV2(nodes=nodes, edges=edges, stats=stats).model_dump_json()
+    return Response(content=body, media_type="application/json")
 
 
 @router.get("/anomalies", response_model=GraphFindings)

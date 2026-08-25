@@ -337,7 +337,7 @@ against the **network**, not against a web page: a browser on this machine reach
    status:DerivedState }` — see **Derived structures are built in the background** below. While
    `status.state === 'building'` the response is prompt and EMPTY (`clusters: []`, zeroed stats); it is not a
    result, and the screen must say so rather than render "no activity".
-- `GET  /api/graph` → `{ entities:Entity[]; edges:Edge[] }`
+- `GET  /api/graph` → `{ entities:Entity[]; edges:Edge[] }`. Query: `limit` caps NODES (≤ 2000); `maxEdges` (default 20 000, ≤ 500 000) keeps the strongest edges by severity then event count — the cut is `stats.hiddenEdges`, and analyst/AI overlay links are never subject to it; `lean=1` omits per-edge `eventIds`/`first`/`last` (the canvas never reads them; `/graph/node/{id}` carries them). The response is gzip-encoded when the client accepts it.
    `?sources=<id,id>` restricts the graph to entities and relations SEEN IN those log files. Exact on both
    sides — a node keeps a per-file tally, an edge keeps the set of files that produced it — so a relation
    is never inferred from its endpoints appearing in a selected file. Unknown ids resolve to nothing, which
@@ -580,7 +580,8 @@ interface GraphV2 { nodes:GraphNode[]; edges:GraphEdge[]; stats:GraphStats }
    partial cache (app/graph_parts.py), so a rebuild after one more source lands costs that source. A
    source in phase 2 right now is left out (its events are about to be replaced) and counted in
    `sourcesPending`; it joins on the next build. A graph over part of the workspace must say so. */
-interface GraphStats { nodes:number; edges:number; truncated:boolean;
+interface GraphStats { hiddenEdges?:number; maxEdges?:number;  // edges dropped by the strongest-first edge cap (`?maxEdges=`, default 20000)
+   nodes:number; edges:number; truncated:boolean;
   totalNodes:number; totalEdges:number;          // the whole built graph, before limit/filters
   byType:Record<EntityType,number>; byRelation:Record<Relation,number>;
   /* How many nodes `minDegree` removed. Reported so the screen can say the FILTER did it rather than

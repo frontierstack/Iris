@@ -117,6 +117,8 @@ export interface GraphStats { nodes: number; edges: number; truncated: boolean; 
   /** How many nodes `minDegree` removed. Reported so the screen can say the filter did it, rather than
    *  quietly showing a smaller graph. */
   hiddenByDegree?: number;
+  /** Edges the strongest-first cap (`maxEdges`, default 20 000) left out, and the cap itself. */
+  hiddenEdges?: number; maxEdges?: number;
   /** The graph covers `sourcesIncluded` sources; `sourcesPending` are still being interpreted and join
    *  it the moment they land — it no longer waits for the queue to drain. */
   sourcesIncluded?: number; sourcesPending?: number }
@@ -124,7 +126,11 @@ export interface GraphV2 { nodes: GraphNode[]; edges: GraphEdge[]; stats: GraphS
 export interface GraphQuery { scope?: Scope; types?: EntityType[]; relations?: Relation[]; minCount?: number; minDegree?: number; focus?: string; hops?: number; limit?: number; q?: string;
   /** Source ids the graph is restricted to — entities and relations actually seen in those files.
    *  Empty/omitted means the whole pool; the Graph screen starts with none selected. */
-  sources?: string[] }
+  sources?: string[];
+  /** Keep the strongest N edges (by event count); overlays are never dropped. Default 20 000. */
+  maxEdges?: number;
+  /** Omit per-edge event ids and first/last stamps — the canvas never reads them. */
+  lean?: boolean }
 export interface GraphNodeDetail extends GraphNode {
   neighbours: GraphEdge[]; timeline: { ts: string; eventId: string; msg: string; sev: Severity }[];
   /** The search DSL query that returns EXACTLY this node's events (`entity:"…"`, colons escaped). Built

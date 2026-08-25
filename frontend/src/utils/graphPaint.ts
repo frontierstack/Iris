@@ -45,7 +45,7 @@ export interface PaintState {
 }
 export interface PaintView { x: number; y: number; k: number }
 
-export interface PaintSimNode { name: string; x?: number; y?: number; r: number }
+export interface PaintSimNode { name: string; x?: number; y?: number; r: number; index?: number }
 export interface PaintSimLink { id: string; source: PaintSimNode; target: PaintSimNode }
 
 const EMPTY_STATE: PaintState = {
@@ -82,6 +82,8 @@ interface SpriteKey { r: number; ring: string; width: number; selected: boolean;
 
 /* Edge style buckets — see the edge pass in `draw`. */
 const S_PLAIN = 0, S_AI = 1, S_BAD = 2, S_ON = 3, S_ON_BAD = 4, S_PATH = 5, S_DIM = 6;
+/** Extra CSS px rendered around the viewport in the cached edge layer, so a small pan is a blit. */
+const EDGE_MARGIN = 160;
 
 export class GraphPainter {
   private ctx: CanvasRenderingContext2D | null = null;
@@ -98,6 +100,18 @@ export class GraphPainter {
   private strokeBatch = new Map<number, Path2D>();
   private fillBatch = new Map<number, Path2D>();
   private hues = new Map<string, string>();
+  private pairSeen = new Set<number>();
+  /* The EDGE LAYER of a settled graph, kept between frames. Once the layout is cold the edges only
+   * change with the data, the selection/path state, the palette, the canvas size or the zoom — none of
+   * which a hover, a pan or a tooltip touches. Rasterising 20,000 curves was the whole frame (the
+   * profiler put the JS thread at 93 % idle — the time was the raster, not the script), so a settled
+   * graph is blitted from this bitmap and only the nodes are redrawn. A pan at the same zoom is the
+   * same bitmap at an offset; a zoom re-renders it once. */
+  private edgeLayer: HTMLCanvasElement | null = null;
+  private edgeLayerKey = '';
+  private edgeLayerView: PaintView = { x: 0, y: 0, k: 1 };
+  private dataVersion = 0;
+  private paletteVersion = 0;
 
   constructor(palette: PaintPalette) {
     this.palette = palette;
@@ -113,6 +127,7 @@ export class GraphPainter {
     this.sprites.clear();          // colours are baked into the sprites
     this.glyphs.clear();
     this.hues.clear();
+    this.paletteVersion++;
   }
 
   /** Type glyphs pre-rendered per (character, colour, size). Setting `ctx.font` re-parses a font shorthand
@@ -155,6 +170,12 @@ export class GraphPainter {
   setData(nodes: PaintNode[], edges: PaintEdge[]): void {
     this.nodes = new Map(nodes.map((n) => [n.id, n]));
     this.edges = new Map(edges.map((e) => [e.id, e]));
+    this.dataVersion++;
+  }
+
+  /** Force the next frame to re-rasterise the edge layer (a node was dragged while the layout was cold). */
+  invalidateEdges(): void {
+    this.edgeLayerKey = '';
   }
 
   setState(s: PaintState): void {
@@ -235,17 +256,14 @@ export class GraphPainter {
   }
 
   // ------------------------------------------------------------------ frame
-  draw(simNodes: readonly PaintSimNode[], simLinks: readonly PaintSimLink[], view: PaintView): void {
+  /** `hot` = the layout is still moving (or a node is being dragged): the edge layer cannot be cached. */
+  draw(simNodes: readonly PaintSimNode[], simLinks: readonly PaintSimLink[], view: PaintView, hot = true): void {
     const ctx = this.ctx;
     if (!ctx) return;
-    const p = this.palette;
     const st = this.state;
     const { w, h, dpr } = this;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
-    ctx.save();
-    ctx.translate(view.x, view.y);
-    ctx.scale(view.k, view.k);
 
     // world-space viewport for culling (generous margin so labels/arrows never pop at the edge)
     const m = 80 / view.k;
@@ -254,8 +272,57 @@ export class GraphPainter {
     const vx1 = (w - view.x) / view.k + m;
     const vy1 = (h - view.y) / view.k + m;
 
-    const hasSel = !!st.selected;
+    // ---------------------------------------------------------------- edge layer
+    // Hot: straight into the frame. Cold: from the cached bitmap when its key matches (same data,
+    // selection, path, palette, size, zoom), re-rasterised once otherwise. The margin makes a small
+    // pan at the same zoom a pure blit; a pan beyond it re-renders (one raster per pan stop, not one
+    // per frame).
+    const key = `${this.dataVersion}|${this.paletteVersion}|${st.selected ?? ''}|${st.pathEdges.size}|${w}x${h}@${dpr}|${view.k.toFixed(4)}`;
+    if (hot || simLinks.length < 800) {
+      this.edgeLayerKey = '';
+      ctx.save();
+      ctx.translate(view.x, view.y);
+      ctx.scale(view.k, view.k);
+      this.drawEdges(ctx, simLinks, view, vx0, vy0, vx1, vy1);
+      ctx.restore();
+    } else {
+      const same = !!this.edgeLayer && this.edgeLayerKey === key;
+      const dx = same ? view.x - this.edgeLayerView.x : 0;
+      const dy = same ? view.y - this.edgeLayerView.y : 0;
+      if (!same || Math.abs(dx) > EDGE_MARGIN || Math.abs(dy) > EDGE_MARGIN) {
+        const layer = this.edgeLayer ?? (this.edgeLayer = document.createElement('canvas'));
+        const lw = Math.max(1, Math.round((w + 2 * EDGE_MARGIN) * dpr));
+        const lh = Math.max(1, Math.round((h + 2 * EDGE_MARGIN) * dpr));
+        if (layer.width !== lw || layer.height !== lh) { layer.width = lw; layer.height = lh; }
+        const g = layer.getContext('2d')!;
+        g.setTransform(dpr, 0, 0, dpr, 0, 0);
+        g.clearRect(0, 0, w + 2 * EDGE_MARGIN, h + 2 * EDGE_MARGIN);
+        g.save();
+        g.translate(view.x + EDGE_MARGIN, view.y + EDGE_MARGIN);
+        g.scale(view.k, view.k);
+        const mm = EDGE_MARGIN / view.k;
+        this.drawEdges(g, simLinks, view, vx0 - mm, vy0 - mm, vx1 + mm, vy1 + mm);
+        g.restore();
+        this.edgeLayerKey = key;
+        this.edgeLayerView = { ...view };
+      }
+      const ox = view.x - this.edgeLayerView.x - EDGE_MARGIN;
+      const oy = view.y - this.edgeLayerView.y - EDGE_MARGIN;
+      ctx.drawImage(this.edgeLayer!, ox, oy, w + 2 * EDGE_MARGIN, h + 2 * EDGE_MARGIN);
+    }
 
+    ctx.save();
+    ctx.translate(view.x, view.y);
+    ctx.scale(view.k, view.k);
+    this.drawNodes(ctx, simNodes, view, vx0, vy0, vx1, vy1);
+    ctx.restore();
+  }
+
+  private drawEdges(ctx: CanvasRenderingContext2D, simLinks: readonly PaintSimLink[], view: PaintView,
+                    vx0: number, vy0: number, vx1: number, vy1: number): void {
+    const p = this.palette;
+    const st = this.state;
+    const hasSel = !!st.selected;
     // ---------------------------------------------------------------- edges
     // Batched into Path2Ds by (style, quantised width, quantised opacity). Every canvas state change —
     // `strokeStyle` re-parses a CSS colour, `setLineDash` resets dash state, `lineWidth`/`globalAlpha`
@@ -271,6 +338,16 @@ export class GraphPainter {
     // `arrows` used to gate the per-edge chevrons at this zoom; they are gone (see below).
     ctx.lineCap = simLinks.length <= 3000 ? 'round' : 'butt';
     ctx.lineJoin = 'round';
+    // LEVEL OF DETAIL, measured: rasterising the curves IS the frame at scale. Past a few thousand
+    // edges, or zoomed out to where a 12 % bow is under a pixel, the curve is drawn as a straight
+    // segment (a line rasterises several times faster than a quadratic). Two relations between the
+    // same pair of nodes, in the same style, are ONE segment — the second is invisible under the first
+    // and costs the same to draw. Edges shorter than a screen pixel are skipped outright.
+    const straight = simLinks.length > 4000 || view.k < 0.5;
+    const collapse = simLinks.length > 1500;
+    const seen = this.pairSeen;
+    seen.clear();
+    const minLen2 = 1 / (view.k * view.k);
     for (let i = 0; i < simLinks.length; i++) {
       const l = simLinks[i]!;
       const a = l.source;
@@ -280,6 +357,8 @@ export class GraphPainter {
       if (Math.max(ax, bx) < vx0 || Math.min(ax, bx) > vx1 || Math.max(ay, by) < vy0 || Math.min(ay, by) > vy1) continue;
       const e = this.edges.get(l.id);
       if (!e) continue;
+      const ddx = bx - ax, ddy = by - ay;
+      if (ddx * ddx + ddy * ddy < minLen2) continue;
       const on = hasSel && (a.name === st.selected || b.name === st.selected);
       const onPath = st.pathEdges.has(l.id);
       const style = onPath ? S_PATH
@@ -301,12 +380,23 @@ export class GraphPainter {
       const wStep = Math.max(1, Math.min(16, Math.round(lw * 2)));            // 0.5 px buckets
       const aStep = style === S_DIM ? 1 : (on || onPath) ? 10 : Math.max(1, Math.min(10, Math.round(e.opacity * 10)));
       const key = style * 1000 + wStep * 16 + aStep;
+      if (collapse && !(on || onPath)) {
+        // node indices are stable within a frame; the pair key is order-independent
+        const ia = a.index ?? 0, ib = b.index ?? 0;
+        const pair = (ia < ib ? ia * 65536 + ib : ib * 65536 + ia) * 8192 + (key % 8192);
+        if (seen.has(pair)) continue;
+        seen.add(pair);
+      }
       let path = strokes.get(key);
       if (!path) { path = new Path2D(); strokes.set(key, path); }
-      const cx = (ax + bx) / 2 - (by - ay) * 0.12;
-      const cy = (ay + by) / 2 + (bx - ax) * 0.12;
       path.moveTo(ax, ay);
-      path.quadraticCurveTo(cx, cy, bx, by);
+      if (straight) {
+        path.lineTo(bx, by);
+      } else {
+        const cx = (ax + bx) / 2 - (by - ay) * 0.12;
+        const cy = (ay + by) / 2 + (bx - ax) * 0.12;
+        path.quadraticCurveTo(cx, cy, bx, by);
+      }
       // NO ARROWHEADS. Removed on request: at graph scale a chevron on every edge is a field of
       // little marks that reads as texture rather than direction, and the direction of a relation is
       // already stated in words — the side panel and the node detail both print `source -relation->
@@ -353,7 +443,13 @@ export class GraphPainter {
     }
     ctx.setLineDash([]);
     ctx.globalAlpha = 1;
+  }
 
+  private drawNodes(ctx: CanvasRenderingContext2D, simNodes: readonly PaintSimNode[], view: PaintView,
+                    vx0: number, vy0: number, vx1: number, vy1: number): void {
+    const p = this.palette;
+    const st = this.state;
+    const hasSel = !!st.selected;
     // ---------------------------------------------------------------- nodes
     const showGlyphs = view.k > 0.45;
     for (let i = 0; i < simNodes.length; i++) {
@@ -431,7 +527,6 @@ export class GraphPainter {
         ctx.fillText(gn.kind, nd.x, nd.y + nd.r + 32);
       }
     }
-    ctx.restore();
   }
 
   /** Overridden by the screen so the pin dot can be drawn without plumbing pin state through setState. */

@@ -26,6 +26,7 @@ const LABEL_TOP_N = 22;
 const LABEL_ALL_BELOW = 70;
 /** Default node cap. MUST match `graph.DEFAULT_LIMIT` in the backend (backend/app/graph.py). */
 const DEFAULT_LIMIT = 50;
+const DEFAULT_MAX_EDGES = 20_000;   // matches routers/graph.DEFAULT_MAX_EDGES
 
 /* ── Visual vocabulary for typed nodes ─────────────────────────────────────────
    One short glyph and one hue per entity type, so a glance tells an IP from a user
@@ -115,6 +116,9 @@ export function GraphScreen() {
   const [minCount, setMinCount] = useState(() => Math.max(1, Number(sp.get('min') ?? 1) || 1));
   const [minDegree, setMinDegree] = useState(() => Math.max(1, Number(sp.get('deg') ?? 1) || 1));
   const [limit, setLimit] = useState(() => Math.max(10, Number(sp.get('limit') ?? DEFAULT_LIMIT) || DEFAULT_LIMIT));
+  // The node cap alone let 113,457 edges through for 2,000 nodes: a 37 MB answer drawn at 1 fps. The
+  // strongest N edges are kept server-side and the cut is reported next to the count.
+  const [maxEdges, setMaxEdges] = useState(() => Math.max(100, Number(sp.get('links') ?? DEFAULT_MAX_EDGES) || DEFAULT_MAX_EDGES));
   const focus = sp.get('focus');
   const [hops, setHops] = useState(() => Math.min(4, Math.max(1, Number(sp.get('hops') ?? 1) || 1)));
   // Which log files the graph is drawn from. NOTHING is selected by default: a graph of every source at
@@ -159,12 +163,13 @@ export function GraphScreen() {
     if (minCount > 1) p.set('min', String(minCount)); else p.delete('min');
     if (minDegree > 1) p.set('deg', String(minDegree)); else p.delete('deg');
     if (limit !== DEFAULT_LIMIT) p.set('limit', String(limit)); else p.delete('limit');
+    if (maxEdges !== DEFAULT_MAX_EDGES) p.set('links', String(maxEdges)); else p.delete('links');
     if (hops !== 1) p.set('hops', String(hops)); else p.delete('hops');
     if (srcSel.length) p.set('sources', srcSel.join(',')); else p.delete('sources');
     if (showCoOccur) p.set('co', '1'); else p.delete('co');
     if (p.toString() !== sp.toString()) setSp(p, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [qDeb, types, rels, minCount, minDegree, limit, hops, srcSel, showCoOccur]);
+  }, [qDeb, types, rels, minCount, minDegree, limit, maxEdges, hops, srcSel, showCoOccur]);
 
   // With no explicit relation filter, ask for everything EXCEPT co-occurrence (unless it is toggled on).
   // The API takes an include-list, so "hide one" is expressed as "include the others".
@@ -174,7 +179,7 @@ export function GraphScreen() {
   }, [rels, showCoOccur]);
   const g = useGraph({ scope, q: qDeb || undefined, types: types.length ? types : undefined, relations: relParam,
                        minCount, minDegree, limit, focus: focus ?? undefined, hops: focus ? hops : undefined,
-                       sources: srcSel }, srcSel.length > 0);
+                       sources: srcSel, maxEdges, lean: true }, srcSel.length > 0);
 
   const nodesData = useMemo(() => g.data?.nodes ?? [], [g.data]);
   const edgesData = useMemo(() => g.data?.edges ?? [], [g.data]);
@@ -209,6 +214,12 @@ export function GraphScreen() {
   if (!simRef.current) simRef.current = new GraphSim();
   const sim = simRef.current;
   useEffect(() => () => sim.destroy(), [sim]);
+  // Diagnostics hook: `__iris.graphSim.stats` in the console gives the tick/draw split per frame.
+  useEffect(() => {
+    const w = window as unknown as { __iris?: Record<string, unknown> };
+    w.__iris = { ...(w.__iris ?? {}), graphSim: sim };
+    return () => { if (w.__iris) delete w.__iris.graphSim; };
+  }, [sim]);
 
   /* ── canvas painter ──
      One <canvas> replaces ~16 SVG elements per node plus one <path> per edge. Nothing about the graph is
@@ -234,7 +245,7 @@ export function GraphScreen() {
     if (frameRef.current) return;
     frameRef.current = requestAnimationFrame(() => {
       frameRef.current = 0;
-      painter.draw(sim.nodes, sim.links, viewRef.current);
+      painter.draw(sim.nodes, sim.links, viewRef.current, sim.running || !!nodeDragRef.current);
       placeTooltipRef.current();
     });
   }, [painter, sim]);
@@ -286,14 +297,14 @@ export function GraphScreen() {
     // reheated and settled between two `end` events.
     const settle = () => { if (autoFit.current) { autoFit.current = false; fitViewRef.current(false); } };
     const off = () => { setRunning(false); settle(); };
-    sim.sim.on('end.ui', off);
+    const offEnd = sim.onEnd(off);
     const id = window.setInterval(() => {
-      const hot = sim.sim.alpha() > sim.sim.alphaMin();
+      const hot = sim.running;
       setRunning(hot);
       if (!hot) settle();
     }, 500);
     setRunning(true);
-    return () => { sim.sim.on('end.ui', null); window.clearInterval(id); };
+    return () => { offEnd(); window.clearInterval(id); };
   }, [sim]);
   useEffect(() => { sim.setSize(W, H); }, [sim, W, H]);
   /* The simulation is fed DURING render, not from an effect.
@@ -457,8 +468,8 @@ export function GraphScreen() {
      data: `fittedKey` is only stamped once a fit has actually happened with nodes on screen, so a
      0-node answer never claims the key and the fit still runs when the build finally lands. */
   const graphKey = useMemo(() => JSON.stringify([scope, srcSel, qDeb, types, relParam, minCount, minDegree,
-                                                 limit, focus, focus ? hops : 0]),
-                           [scope, srcSel, qDeb, types, relParam, minCount, minDegree, limit, focus, hops]);
+                                                 limit, maxEdges, focus, focus ? hops : 0]),
+                           [scope, srcSel, qDeb, types, relParam, minCount, minDegree, limit, maxEdges, focus, hops]);
   const fittedKey = useRef<string | null>(null);
   useEffect(() => {
     if (!nodesData.length) return;          // nothing to frame yet: leave the key unclaimed
@@ -669,8 +680,8 @@ export function GraphScreen() {
   // force simulation was still ticking it at 60 fps, on the same tab that is polling a server busy
   // packing millions of events. Stop the layout for the duration; it reheats when the new graph lands.
   useEffect(() => {
-    if (buildingGraph) sim.sim.stop();
-    else if (sim.nodes.length) sim.sim.restart();
+    if (buildingGraph) sim.pause();
+    else sim.resume();
   }, [sim, buildingGraph]);
 
   /* ── render ──
@@ -754,7 +765,8 @@ export function GraphScreen() {
         )}
         <span className="graph__count">
           {g.isFetching && !g.data ? <span className="spinner" style={{ width: 10, height: 10, display: 'inline-block' }} /> : null}
-          {stats ? <>{fmtInt(stats.nodes)} of {fmtInt(stats.totalNodes ?? stats.nodes)} nodes · {fmtInt(stats.edges)} links{stats.truncated ? ' · capped' : ''}</> : ''}
+          {stats ? <>{fmtInt(stats.nodes)} of {fmtInt(stats.totalNodes ?? stats.nodes)} nodes · {fmtInt(stats.edges)} links{stats.truncated ? ' · capped' : ''}
+            {stats.hiddenEdges ? <span className="graph__hidden" title="Raise “max links” to draw more of them. The strongest links by event count are the ones kept."> · {fmtInt(stats.hiddenEdges)} weaker links not drawn</span> : null}</> : ''}
         </span>
         {activeFilters > 0 && <button className="btn btn--sm btn--ghost" onClick={clearFilters}>clear {activeFilters} filter{activeFilters === 1 ? '' : 's'}</button>}
         <button className={cx('btn btn--sm', reviewing && 'btn--accent')} onClick={runReview} disabled={reviewing || !g.data?.nodes.length}
@@ -794,6 +806,7 @@ export function GraphScreen() {
           nodes with ≥ N links{minDegree > 1 && stats?.hiddenByDegree ? ` · ${fmtInt(stats.hiddenByDegree)} hidden` : ''}
         </span>
         <label className="graph__num" title="Caps how many nodes are drawn, ranked by detections, then links, then events.">max nodes <input type="number" min={10} max={2000} step={50} value={limit} onChange={(e) => setLimit(Math.min(2000, Math.max(10, Number(e.target.value) || DEFAULT_LIMIT)))} /></label>
+        <label className="graph__num" title="Keeps the strongest N links by event count; analyst and AI links are never dropped. Fewer links draw faster.">max links <input type="number" min={100} max={200000} step={1000} value={maxEdges} onChange={(e) => setMaxEdges(Math.min(200000, Math.max(100, Number(e.target.value) || DEFAULT_MAX_EDGES)))} /></label>
         {focus && (
           <span className="graph__focus">
             focused on <b>{displayName(byId.get(focus) ?? ({ value: focus, type: 'other' } as GraphNode))}</b> ·

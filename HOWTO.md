@@ -345,7 +345,7 @@ into `.wslconfig` from the machine's real hardware; `setup.ps1` prints both side
 | Variable | Default | What it does |
 |---|---|---|
 | `IRIS_POOL_MAX_MB` | **unset — unlimited** | Megabytes of **source log** the pool may load at startup. There is no cap by default: a file that was uploaded as evidence and is not in search is worse than a slow Iris, because nothing about a search tells you it was answered over part of the corpus. Set it (a shared box, a small VM) and anything over the cap stays in the library, listed by name, loadable one file at a time. Not a RAM figure — parsed events cost several times the source bytes. |
-| `IRIS_AUTO_ENRICH` | `1` (on) | Seeds `settings.ingest.autoEnrich` on first run. `0` = a log lands as raw searchable lines and phase 2 (timestamps, fields, entities, detections) never starts on its own — see *Two-phase ingest* below. Like every `IRIS_*` variable it only seeds settings the first time; after that Settings wins. |
+| `IRIS_AUTO_ENRICH` | `0` (off) | Seeds `settings.ingest.autoEnrich` on first run. `0` = a log lands as raw searchable lines and phase 2 (timestamps, fields, entities, detections) never starts on its own — see *Two-phase ingest* below. Like every `IRIS_*` variable it only seeds settings the first time; after that Settings wins. |
 | `IRIS_PARSE_WORKERS` | **derived** (see *Automatic sizing*) | Parallel parse workers for files over `IRIS_PARSE_MIN_MB`. `1` disables parallel parsing. |
 | `IRIS_ENRICH_WORKERS` | **derived**, at most half the parse count | Lanes that interpret SMALL sources in parallel during phase 2. `1` = one at a time. |
 | `IRIS_PARSE_MIN_MB` | 32 | File size above which parallel parsing kicks in. |

@@ -55,22 +55,93 @@ export class GraphSim {
   private width = 900;
   private height = 560;
   private tickHandlers = new Set<() => void>();
+  private endHandlers = new Set<() => void>();
+  private raf = 0;
+  /** true while the layout is being advanced — the painter uses it to decide whether the edge layer
+   *  can be cached between frames. */
+  running = false;
+  /** Cumulative per-frame timing (diagnostics; see `frame`). */
+  readonly stats = { frames: 0, ticks: 0, tickMs: 0, drawMs: 0, worstTickMs: 0, worstDrawMs: 0 };
 
   constructor() {
+    // d3's own timer is NOT used: it advances the layout exactly one tick per animation frame, so on a
+    // graph whose frame takes a second to rasterise (2,000 nodes, 20,000 edges) the ~200 ticks a layout
+    // needs took minutes, and the analyst watched nodes drift the whole time. `frame()` below advances
+    // as many ticks as fit in a time budget and draws ONCE — convergence is bought with layout time,
+    // not with frames, and a small graph (one tick per frame, as before) still animates.
     this.sim = forceSimulation<SimNode>([])
       .alphaDecay(0.02)
       .alphaMin(0.002)
       .velocityDecay(0.22) // low friction → fluid, responsive motion
       .stop();
-    this.sim.on('tick', () => {
-      this.clamp();
-      for (const h of this.tickHandlers) h();
-    });
   }
 
   onTick(h: () => void): () => void {
     this.tickHandlers.add(h);
     return () => { this.tickHandlers.delete(h); };
+  }
+  onEnd(h: () => void): () => void {
+    this.endHandlers.add(h);
+    return () => { this.endHandlers.delete(h); };
+  }
+
+  /** Ticks per frame: one on a small graph (the motion is the point), a time budget on a big one. */
+  private lastTickMs = 0;
+  private lastFrameAt = 0;
+  private lastDrawCost = 0;
+  private frame = (): void => {
+    this.raf = 0;
+    const n = this.nodes.length;
+    const maxTicks = n < 300 ? 1 : n < 1000 ? 3 : 60;
+    const t0 = performance.now();
+    // ADAPTIVE budget. The draw's real cost is not in the tick handlers (the JS side of a frame is a
+    // few ms) but in the raster that follows them, which shows up as the gap until the NEXT frame.
+    // Measured at 2,000 nodes / 20,000 edges in software raster: a tick 28 ms, the raster 280 ms —
+    // so a fixed 7 ms budget bought ONE tick per 300 ms frame and the layout took a minute to settle.
+    // Spending as long on ticks as the last frame's draw cost halves the frame rate at worst and
+    // converges an order of magnitude sooner; on a small graph the draw is ~0 and this is 7 ms.
+    if (this.lastFrameAt) this.lastDrawCost = Math.max(0, t0 - this.lastFrameAt - this.lastTickMs);
+    const budgetMs = Math.min(250, Math.max(7, this.lastDrawCost));
+    let ticks = 0;
+    do {
+      this.sim.tick();
+      ticks++;
+    } while (ticks < maxTicks && this.sim.alpha() >= this.sim.alphaMin() && performance.now() - t0 < budgetMs);
+    const t1 = performance.now();
+    this.lastTickMs = t1 - t0;
+    this.lastFrameAt = t0;
+    this.clamp();
+    for (const h of this.tickHandlers) h();
+    const t2 = performance.now();
+    // per-frame cost split, readable from the console as `__iris.graphSim.stats` — the benchmark reads it
+    const st = this.stats;
+    st.frames++; st.ticks += ticks; st.tickMs += t1 - t0; st.drawMs += t2 - t1;
+    if (t1 - t0 > st.worstTickMs) st.worstTickMs = t1 - t0;
+    if (t2 - t1 > st.worstDrawMs) st.worstDrawMs = t2 - t1;
+    if (this.sim.alpha() < this.sim.alphaMin()) {
+      this.running = false;
+      for (const h of this.endHandlers) h();
+    } else {
+      this.raf = requestAnimationFrame(this.frame);
+    }
+  };
+
+  /** Stop advancing (the building overlay); `resume()` picks the layout up where it left off. */
+  pause(): void {
+    cancelAnimationFrame(this.raf);
+    this.raf = 0;
+    this.running = false;
+  }
+  resume(): void {
+    if (this.nodes.length && this.sim.alpha() >= this.sim.alphaMin()) this.start();
+  }
+
+  /** Start (or keep) the loop. Replaces every `sim.restart()` — d3's timer must never run. */
+  private start(): void {
+    if (this.running) return;
+    this.running = true;
+    this.lastFrameAt = 0;          // a stale gap (the pause, a tab switch) must not become a budget
+    if (!this.raf) this.raf = requestAnimationFrame(this.frame);
   }
 
   node(name: string): SimNode | undefined {
@@ -87,7 +158,8 @@ export class GraphSim {
     this.height = height;
     if (changed && this.nodes.length) {
       this.configureForces();
-      this.sim.alpha(Math.max(this.sim.alpha(), 0.25)).restart();
+      this.sim.alpha(Math.max(this.sim.alpha(), 0.25));
+      this.start();
     }
   }
 
@@ -148,7 +220,8 @@ export class GraphSim {
     this.sim.nodes(nodes);
     this.configureForces();
     const anyFresh = nodes.some((n) => n.fresh);
-    this.sim.alpha(prev.size === 0 ? 1 : anyFresh ? 0.6 : 0.3).restart();
+    this.sim.alpha(prev.size === 0 ? 1 : anyFresh ? 0.6 : 0.3);
+    this.start();
   }
 
   private configureForces(): void {
@@ -158,6 +231,9 @@ export class GraphSim {
     for (const l of this.links) if (l.w > maxW) maxW = l.w;
     const cx = this.width / 2;
     const cy = this.height / 2;
+    // A big layout converges in fewer ticks with a faster decay (0.035 ≈ 170 ticks against ≈ 300):
+    // past a thousand nodes the last hundred ticks move nothing anyone can see.
+    this.sim.alphaDecay(n > 1500 ? 0.05 : n > 1000 ? 0.035 : 0.02);
     this.sim
       .force('charge', forceManyBody<SimNode>().strength((d) => -Math.max(220, spread * 3.2 + d.r * 10)).distanceMax(spread * 5).theta(0.9))
       .force('link', forceLink<SimNode, SimLink>(this.links)
@@ -200,7 +276,8 @@ export class GraphSim {
   }
 
   reheat(target = 0.3): void {
-    this.sim.alphaTarget(target).restart();
+    this.sim.alphaTarget(target);
+    this.start();
   }
   cool(): void {
     this.sim.alphaTarget(0);
@@ -227,7 +304,8 @@ export class GraphSim {
   }
   unpinAll(): void {
     for (const nd of this.nodes) { nd.fx = null; nd.fy = null; }
-    this.sim.alpha(0.3).restart();
+    this.sim.alpha(0.3);
+    this.start();
   }
   isPinned(name: string): boolean {
     const nd = this.byName.get(name);
@@ -247,11 +325,16 @@ export class GraphSim {
       nd.vx = 0;
       nd.vy = 0;
     }
-    this.sim.alpha(1).restart();
+    this.sim.alpha(1);
+    this.start();
   }
 
   destroy(): void {
+    cancelAnimationFrame(this.raf);
+    this.raf = 0;
+    this.running = false;
     this.sim.stop();
     this.tickHandlers.clear();
+    this.endHandlers.clear();
   }
 }

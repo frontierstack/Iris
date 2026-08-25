@@ -993,13 +993,17 @@ class GraphBuilder:
                          sev=n.sev, detections=n.detections, facts=self._facts(n),  # type: ignore[arg-type]
                          inCase=any(self.events[j].id in in_case for j in n.events[:200]) if in_case else False)
 
-    def _edge_out(self, ed: _EdgeAgg) -> GraphEdge:
+    def _edge_out(self, ed: _EdgeAgg, lean: bool = False) -> GraphEdge:
         oc = None
         if ed.outcomes:
             kinds = set(ed.outcomes)
             oc = "mixed" if len(kinds) > 1 else next(iter(kinds))
         why = max(ed.why, key=ed.why.__getitem__) if ed.why else ed.relation.replace("_", " ")
         eid = f"{ed.source}|{ed.relation}|{ed.target}"
+        if lean:
+            # what the canvas reads; the event ids and stamps come with the node detail request
+            return GraphEdge(id=eid, source=ed.source, target=ed.target, relation=ed.relation, count=ed.count,  # type: ignore[arg-type]
+                             sev=ed.sev, outcome=oc, why=why)  # type: ignore[arg-type]
         return GraphEdge(id=eid, source=ed.source, target=ed.target, relation=ed.relation, count=ed.count,  # type: ignore[arg-type]
                          first=ed.first, last=ed.last, sev=ed.sev, outcome=oc, eventIds=list(ed.events), why=why)  # type: ignore[arg-type]
 
@@ -1008,6 +1012,7 @@ class GraphBuilder:
                in_case: Optional[set[str]] = None,
                files: Optional[set[str]] = None,
                query: str = "",
+               max_edges: int = 0, lean: bool = False,
                min_degree: int = 1) -> tuple[list[GraphNode], list[GraphEdge], dict[str, Any]]:
         """`files` restricts the view to entities and relations SEEN IN those log files.
 
@@ -1071,8 +1076,8 @@ class GraphBuilder:
         # a focus view keeps every node in the neighbourhood even if it has no edge after the relation filter
         nodes = [self._node_out(self.nodes[i], in_case) for i in ranked[:limit]]
         chosen = {n.id for n in nodes}
-        edges: list[GraphEdge] = []
         seen_keys: set[tuple[str, str, str]] = set()
+        picked: list[_EdgeAgg] = []
         # only edges touching a returned node can survive step 3. Walked in NODE RANK ORDER, not set order:
         # a payload whose edge order changes between two identical polls makes every diff and every
         # screenshot comparison meaningless.
@@ -1083,8 +1088,17 @@ class GraphBuilder:
                         and self.edges[key].count >= min_count \
                         and (files is None or not self.edges[key].files.isdisjoint(files)):
                     seen_keys.add(key)
-                    edges.append(self._edge_out(self.edges[key]))
-        edges.sort(key=lambda e: (-SEV_ORDER.get(e.sev, 0), -e.count, e.id))
+                    picked.append(self.edges[key])
+        # Rank and CAP on the aggregates, then build the models. 2,000 well-connected nodes carried
+        # 113,457 edges: building a pydantic GraphEdge for each was 1.4 s of a 3.5 s request, and the
+        # route then discarded 93,000 of them. The order is the one the payload always had — severity,
+        # then count, then id — so the cap keeps the strongest and the payload stays deterministic.
+        picked.sort(key=lambda ed: (-SEV_ORDER.get(ed.sev, 0), -ed.count, ed.source, ed.relation, ed.target))
+        hidden_edges = 0
+        if max_edges and len(picked) > max_edges:
+            hidden_edges = len(picked) - max_edges
+            picked = picked[:max_edges]
+        edges: list[GraphEdge] = [self._edge_out(ed, lean) for ed in picked]
         if min_count > 1:
             # the cap can strand a node whose only strong-enough partner was ranked out — with an edge
             # filter active an edgeless node is not a result, so it goes too (the payload stays closed).
@@ -1121,7 +1135,7 @@ class GraphBuilder:
         stats = {"nodes": len(nodes), "edges": len(edges), "truncated": truncated,
                  "totalNodes": len(self.nodes), "totalEdges": len(self.edges),
                  "byType": dict(by_type), "byRelation": dict(by_rel),
-                 "hiddenByDegree": hidden_by_degree}
+                 "hiddenByDegree": hidden_by_degree, "hiddenEdges": hidden_edges}
         return nodes, edges, stats
 
     def neighbourhood(self, start: str, hops: int) -> set[str]:
