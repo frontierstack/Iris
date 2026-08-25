@@ -389,3 +389,14 @@ def test_the_cap_never_prunes_a_live_transfer(c, monkeypatch) -> None:
         assert r.status_code == 200, f"queued job {jid} was forgotten by the cap"
     kept = {j["id"] for j in c.get("/api/jobs?limit=500").json()["jobs"]}
     assert set(ids) <= kept
+
+
+def test_a_heartbeat_covers_every_id_it_names(c, monkeypatch) -> None:
+    """The handler used to touch the first 500 ids and drop the rest on the floor: on a drop of more
+    than 500 files the watchdog buried #501 onward as abandoned while the tab was still uploading."""
+    monkeypatch.setattr(jobs_mod, "STALE_UPLOAD_SEC", 1)
+    ids = [REGISTRY.create(f"many-{i}.log", 10, "library", "").id for i in range(650)]
+    time.sleep(1.2)
+    assert c.post("/api/jobs/heartbeat", json={"ids": ids}).json()["alive"] == ids
+    states = {j["id"]: j["state"] for j in c.get("/api/jobs?limit=500").json()["jobs"]}
+    assert all(states.get(jid, "queued") == "queued" for jid in ids), "a heartbeaten job was buried"

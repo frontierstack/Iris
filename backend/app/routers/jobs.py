@@ -77,7 +77,13 @@ def heartbeat(body: JobHeartbeat) -> dict:
     """
     if not body.ids:
         return {"alive": [], "revived": []}
-    alive, revived = REGISTRY.heartbeat(body.ids[:500])
+    # EVERY id, never a prefix. This used to take `body.ids[:500]`, silently: on a drop of more than
+    # 500 files the tab reported all of them and the server touched the first 500, so ten minutes
+    # in the watchdog buried file #501 onward as "the tab that queued it is gone" while that tab was
+    # still working down the queue. The client chunks its request; the bound here is only sanity.
+    if len(body.ids) > 20_000:
+        raise HTTPException(413, "too many job ids in one heartbeat (send them in batches)")
+    alive, revived = REGISTRY.heartbeat(body.ids)
     return {"alive": alive, "revived": revived}
 
 

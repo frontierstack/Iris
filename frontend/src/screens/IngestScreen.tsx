@@ -46,6 +46,7 @@ const PROGRESS_PUSH_MS = 900;       // throttle for the bytes-received PATCH
    upload stopped before the server received the whole file" without one of them having had a turn.
    Well under the watchdog's window, so a single dropped tick is not a bury. */
 const HEARTBEAT_MS = 20_000;
+const HEARTBEAT_BATCH = 500;        // ids per heartbeat request
 
 /* ───────────── Parser groups ───────────── */
 type GroupId = 'logs' | 'documents' | 'images' | 'network' | 'binary' | 'archives';
@@ -759,7 +760,13 @@ export function IngestScreen() {
       const mine = new Set(ids.filter(Boolean));
       const beat = window.setInterval(() => {
         if (!mine.size) return;
-        void api.jobHeartbeat([...mine]).catch(() => undefined);
+        // In batches: one request naming thousands of ids is the kind of body a proxy or the server
+        // caps, and a capped heartbeat is worse than none — the ids past the cap are the queued
+        // files the watchdog will call abandoned.
+        const ids = [...mine];
+        for (let i = 0; i < ids.length; i += HEARTBEAT_BATCH) {
+          void api.jobHeartbeat(ids.slice(i, i + HEARTBEAT_BATCH)).catch(() => undefined);
+        }
       }, HEARTBEAT_MS);
       const worker = async () => {
         for (;;) {
