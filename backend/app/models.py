@@ -829,6 +829,11 @@ class AiTranscriptEntry(BaseModel):
     ok: Optional[bool] = None
     summary: str = ""
     tookMs: int = 0
+    # When this entry was last CHANGED, on the same counter as `seq`. A tool entry is patched in place
+    # when its result lands, which keeps its `seq` — so `?since=<lastSeq>` never resent it and a polling
+    # client (any tab that is not the one streaming) kept the card's spinner turning for the rest of the
+    # run. `as_model` selects on this as well as on `seq`; 0 means "never patched".
+    updSeq: int = 0
 
 
 class AiRun(BaseModel):

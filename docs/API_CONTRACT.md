@@ -1100,7 +1100,11 @@ interface AiAction { id:string; runId:string; tool:string; at:string; summary:st
 /** One persisted line of a conversation — exactly what the panel renders, live or from history. */
 interface AiTranscriptEntry { seq:number; kind:'status'|'step'|'text'|'tool'|'warning'; text:string;
   step:number; id:string; name:string; args:Record<string,unknown>; writes:boolean;
-  ok:boolean|null; summary:string; tookMs:number }
+  ok:boolean|null; summary:string; tookMs:number;
+  /* when this entry was last patched, on the same counter as `seq`. A `tool` entry is updated in place
+     when its result lands and keeps its `seq`, so `?since=` selects on BOTH — without it a polling
+     client never received the result and the call rendered as still running. 0 = never patched. */
+  updSeq?:number }
 interface AiRun { id:string; prompt:string; focus:string; model:string;
   /** a CONVERSATION is a chain of runs: threadId = the first turn's id (its own on a first turn),
       parentId = the turn this one continues ('' on a first turn). The RUN stays the unit of budget,

@@ -67,7 +67,9 @@ def as_model(rec: dict[str, Any], *, since: int = 0, transcript: bool = True) ->
     if not transcript:
         rows = []
     elif since:
-        rows = [e for e in rows if int(e.get("seq") or 0) > since]
+        # `updSeq` as well as `seq`: a tool entry is PATCHED in place when its result lands, so filtering
+        # on `seq` alone withheld the one update the card is waiting for and left its spinner running.
+        rows = [e for e in rows if int(e.get("seq") or 0) > since or int(e.get("updSeq") or 0) > since]
     return AiRun(id=rec["id"], prompt=rec.get("prompt", ""), focus=rec.get("focus", ""),
                  parentId=rec.get("parentId", ""), threadId=rec.get("threadId", "") or rec["id"],
                  model=rec.get("model", ""), caseId=rec.get("caseId", ""), caseName=rec.get("caseName", ""),

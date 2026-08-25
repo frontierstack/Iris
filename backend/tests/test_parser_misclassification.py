@@ -69,6 +69,8 @@ DPKG = "\n".join(
     * 6
 ).encode()
 
+NL = b"\n"
+
 SYSLOG = "Aug 11 03:22:41 bastion-1 sshd[20418]: Accepted publickey for root from 10.22.4.19 port 44120 ssh2"
 
 # Starts as markup and carries every EVTX marker, so the sniff is genuinely confident — but each record's
@@ -211,6 +213,8 @@ REAL_XLSX = {"[Content_Types].xml": "<Types/>", "xl/workbook.xml": "<workbook/>"
 REAL_DOCX = {"[Content_Types].xml": "<Types/>", "word/document.xml": "<document/>"}
 PLAIN_ZIP = {"notes.txt": "hello", "logs/a.csv": "a,b\n1,2\n"}
 ODS_FILE = {"mimetype": "application/vnd.oasis.opendocument.spreadsheet", "content.xml": "<x/>"}
+# An OOXML package that is NOT a document: a .vsix/.nupkg/.apk carries [Content_Types].xml as well.
+OOXML_PACKAGE = {"[Content_Types].xml": "<Types/>", "extension/xl/readme.txt": "hi", "logs/app.log": "boot"}
 
 
 def test_only_real_ooxml_is_routed_to_the_office_parsers() -> None:
@@ -227,9 +231,46 @@ def test_only_real_ooxml_is_routed_to_the_office_parsers() -> None:
     assert isinstance(binary_hint("real.docx", _zip_bytes(REAL_DOCX)), DocxParser)
     assert binary_hint("logs.xlsx", _zip_bytes(PLAIN_ZIP)) is None, "a plain zip must fall through to the archive handler"
     assert binary_hint("sheet.xlsx", _zip_bytes(ODS_FILE)) is None, "an .ods must fall through, not go to openpyxl"
-    # Named like Office but not a zip at all: claimed on purpose, so the parser can explain the
-    # mismatch by name rather than leaving a mislabelled binary parsed as "plain text".
-    assert isinstance(binary_hint("fake.xlsx", b"just some text"), XlsxParser)
+    # An OOXML PACKAGE that is not a document ([Content_Types].xml is in a .vsix, a .nupkg and an .apk
+    # too) must fall through as well - routing on that marker is what produced the report this exists
+    # for: "this file is a plain ZIP archive, not an Excel workbook".
+    assert binary_hint("bundle.xlsx", _zip_bytes(OOXML_PACKAGE)) is None
+    # Named like Office and not a zip at all: if it reads as TEXT, parse it as what it IS - a CSV given
+    # the wrong extension is common and useful, and failing it with a sentence about Excel is not.
+    assert binary_hint("fake.xlsx", b"user,action" + NL + b"root,login" + NL) is None
+    # A BINARY mislabel is still claimed, so the parser explains it by name instead of leaving a
+    # mystery blob parsed as "plain text".
+    assert isinstance(binary_hint("fake.xlsx", bytes(range(256)) * 40), XlsxParser)
+
+
+def test_a_zip_named_like_a_workbook_is_expanded_not_failed() -> None:
+    """The whole point: what the analyst has is a zip full of logs, so ingest the logs.
+
+    Reported against a bundle: one member named `.xlsx` that was really a plain zip failed with
+    "rename it to .zip", and it used to take the rest of the upload with it.
+    """
+    from app.parsers import archives
+
+    expanded = archives.expand("logs.xlsx", _zip_bytes(PLAIN_ZIP))
+    assert not expanded.errors
+    assert [name for name, _ in expanded.members] == ["logs.xlsx!notes.txt", "logs.xlsx!logs/a.csv"]
+    # a real workbook is still handed to its parser whole
+    assert [name for name, _ in archives.expand("real.xlsx", _zip_bytes(REAL_XLSX)).members] == ["real.xlsx"]
+    # ...and so is an ODF document and a package whose entries are code, not evidence
+    assert [name for name, _ in archives.expand("sheet.ods", _zip_bytes(ODS_FILE)).members] == ["sheet.ods"]
+    assert [name for name, _ in archives.expand("plugin.vsix", _zip_bytes(OOXML_PACKAGE)).members] == ["plugin.vsix"]
+
+
+def test_zip_kind_reads_the_directory_not_the_name() -> None:
+    from app.parsers.archives import zip_kind
+
+    assert zip_kind(_zip_bytes(REAL_XLSX)) == "xlsx"
+    assert zip_kind(_zip_bytes(REAL_DOCX)) == "docx"
+    assert zip_kind(_zip_bytes(ODS_FILE)) == "odf"
+    assert zip_kind(_zip_bytes(OOXML_PACKAGE)) == "zip"
+    # "unknown" is not "not a document": a 64 KB sniff head has no central directory to read.
+    assert zip_kind(_zip_bytes(REAL_XLSX)[:40]) == "unknown"
+    assert zip_kind(b"not a zip at all") == "unknown"
 
 
 @pytest.mark.parametrize(

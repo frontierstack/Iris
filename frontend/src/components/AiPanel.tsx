@@ -27,7 +27,7 @@
  * rejoins by POLLING `GET /api/ai/runs/{id}?since=<seq>`. Both write into the same
  * `AiTranscriptEntry[]`, so there is one renderer, not two.
  */
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { api } from '../api/client';
@@ -68,6 +68,10 @@ export function AiPanelProvider({ children }: { children: ReactNode }) {
 }
 
 const POLL_MS = 900;
+// How often streamed prose is committed to state. Tokens arrive faster than anything can be read and
+// each commit costs a re-render, a markdown parse and a scroll — batching them is what makes the
+// report appear smoothly instead of stuttering. Low enough to still read as typing.
+const STREAM_FLUSH_MS = 90;
 
 /**
  * DOCKED OR DETACHED, and the choice is remembered.
@@ -265,6 +269,20 @@ function trailNodes(blocks: Block[]): TrailNode[] {
   return out;
 }
 
+/**
+ * Markdown, parsed only when ITS OWN text changes.
+ *
+ * The transcript re-renders on every streamed token, and `renderMarkdown` re-parses whatever it is
+ * handed — so a run holding thirty tool cards and several paragraphs re-parsed all of them for each
+ * token of the closing report. That is what "the response generation is very jumpy when the assistant
+ * is building the summary" was: the paragraph being written is one small string, and the work being
+ * redone around it was the whole conversation. Memoised on (text, className), the only block that
+ * re-parses is the one actually growing.
+ */
+const Markdown = memo(function Markdown({ text, className }: { text: string; className: string }) {
+  return <div className={className}>{renderMarkdown(text)}</div>;
+});
+
 /** A restrained line icon per tool FAMILY — the same glyph the screen that owns that data uses. */
 function toolIcon(name: string): typeof Icon.Doc {
   if (name.includes('note')) return Icon.Note;
@@ -295,7 +313,7 @@ function ToolCall({ e, live, lead = '' }: { e: AiTranscriptEntry; live: boolean;
   const bad = e.ok === false;
   return (
     <div className={cx('tcall', e.writes && 'tcall--write', bad && 'tcall--bad')}>
-      {!!lead.trim() && <div className="md chat-md tcall__lead">{renderMarkdown(lead)}</div>}
+      {!!lead.trim() && <Markdown className="md chat-md tcall__lead" text={lead} />}
       <div className="tcall__head">
         <Glyph className="tcall__glyph" />
         <span className="tcall__name mono">{e.name}</span>
@@ -354,12 +372,12 @@ function ActivityTrail({ blocks, live, title, startOpen }: {
     return (
       <div className="trail__bare">
         {nodes.map((n) => (n.k === 'prose'
-          ? <div key={n.key} className="md chat-md trail__prose">{renderMarkdown(n.text)}</div>
+          ? <Markdown key={n.key} className="md chat-md trail__prose" text={n.text} />
           // A note is a NOTE BODY: markdown, written by the agent, and often a table. Rendering it
           // raw made HTML collapse the newlines, so `| a | b |` rows ran together into one line of
           // pipes — the same class of bug CLAUDE.md records for NoteRow. Every surface that shows a
           // note body goes through renderMarkdown.
-          : <div key={n.key} className="trail__note md">{n.k === 'note' ? renderMarkdown(n.text) : ''}</div>))}
+          : <Markdown key={n.key} className="trail__note md" text={n.k === 'note' ? n.text : ''} />))}
       </div>
     );
   }
@@ -388,8 +406,8 @@ function ActivityTrail({ blocks, live, title, startOpen }: {
           {nodes.map((n) => (
             <div key={n.key} className={cx('trail__node', n.turn && 'trail__node--turn')}>
               {n.k === 'tool' && <ToolCall e={n.e} live={live} lead={n.lead} />}
-              {n.k === 'note' && <div className="trail__note md">{renderMarkdown(n.text)}</div>}
-              {n.k === 'prose' && <div className="md chat-md trail__prose">{renderMarkdown(n.text)}</div>}
+              {n.k === 'note' && <Markdown className="trail__note md" text={n.text} />}
+              {n.k === 'prose' && <Markdown className="md chat-md trail__prose" text={n.text} />}
             </div>
           ))}
         </div>
@@ -406,7 +424,7 @@ function Answer({ text, state }: { text: string; state: AiRun['state'] }) {
         <Icon.Findings />
         <span>{state === 'done' ? 'Answer' : 'Answer so far'}</span>
       </header>
-      <div className="md chat-md chat-answer__body">{renderMarkdown(text)}</div>
+      <Markdown className="md chat-md chat-answer__body" text={text} />
     </section>
   );
 }
@@ -605,7 +623,7 @@ function Turn({ run, entries, live, undoing, onUndo }: {
                 return <ActivityTrail key={b.key} blocks={[b]} live title="Activity" startOpen />;
               }
               if (b.kind === 'warning') return <Warning key={b.key} text={b.text} />;
-              return <div key={b.key} className="md chat-md">{renderMarkdown(b.text)}</div>;
+              return <Markdown key={b.key} className="md chat-md" text={b.text} />;
             })}
             {!blocks.length && (
               <div className="state state--inline"><div className="spinner" /><div className="state__body">Starting the investigation…</div></div>
@@ -818,11 +836,33 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
     if (focus) body.focus = focus;
     if (continueFrom) body.continueFrom = continueFrom;
 
-    const push = (e: Partial<AiTranscriptEntry> & { kind: AiTranscriptEntry['kind'] }) =>
+    // Prose arrives one TOKEN at a time. A `setEntries` per token is a re-render, a markdown re-parse
+    // and a scroll-to-bottom per token — the report visibly stuttered as it was written. Tokens are
+    // buffered and flushed on a fixed cadence instead, which is far above what anyone reads at and
+    // costs nothing in latency. Every other event flushes FIRST, so ordering is exactly the stream's.
+    let buffered = '';
+    let flushTimer = 0;
+    const flushText = () => {
+      if (flushTimer) { window.clearTimeout(flushTimer); flushTimer = 0; }
+      const t = buffered;
+      buffered = '';
+      // A pending flush must never land on the NEXT conversation: `startRun` aborts the old stream, and
+      // a timer that fires after that would append the previous run's tail to a fresh transcript.
+      if (!t || ac.signal.aborted) return;
+      setEntries((prev) => {
+        const last = prev[prev.length - 1];
+        if (last?.kind === 'text') return [...prev.slice(0, -1), { ...last, text: last.text + t }];
+        return [...prev, { ...blank(++sseSeqRef.current, 'text'), text: t }];
+      });
+    };
+    const push = (e: Partial<AiTranscriptEntry> & { kind: AiTranscriptEntry['kind'] }) => {
+      flushText();
       setEntries((prev) => [...prev, { ...blank(++sseSeqRef.current, e.kind), ...e }]);
+    };
 
     api
       .aiInvestigate(body, (ev: AiRunEvent) => {
+        if (ev.type !== 'delta') flushText();
         switch (ev.type) {
           case 'run':
             setRun((r) => (r ? {
@@ -838,11 +878,8 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
             push({ kind: 'step', step: ev.step });
             break;
           case 'delta':
-            setEntries((prev) => {
-              const last = prev[prev.length - 1];
-              if (last?.kind === 'text') return [...prev.slice(0, -1), { ...last, text: last.text + ev.text }];
-              return [...prev, { ...blank(++sseSeqRef.current, 'text'), text: ev.text }];
-            });
+            buffered += ev.text;
+            if (!flushTimer) flushTimer = window.setTimeout(flushText, STREAM_FLUSH_MS);
             break;
           case 'tool_call':
             push({ kind: 'tool', id: ev.id, name: ev.name, args: ev.arguments, writes: writeToolsRef.current.has(ev.name) });
@@ -894,7 +931,9 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
             break;
         }
       }, ac.signal)
+      .then(() => flushText())
       .catch((e: unknown) => {
+        flushText();
         if (ac.signal.aborted) return;
         setError(errMsg(e));
       })

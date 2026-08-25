@@ -188,3 +188,40 @@ def test_deleting_a_member_forgets_its_provenance(c) -> None:
     assert sid in STORE.source_member
     assert c.delete(f"/api/sources/{sid}").status_code in (200, 204)
     assert sid not in STORE.source_member
+
+
+# --------------------------------------------------------- one bad member is one bad member
+# Reported: a bundle whose members included a file named `.xlsx` that was really a plain zip. It failed
+# with "this file is a plain ZIP archive, not an Excel workbook. Rename it to .zip" — and the failure
+# was not confined to that file, because the members were registered with a list comprehension over
+# `add_file`: the first raise abandoned every member after it and failed the upload.
+XLSX_ZIP = _zip(("readme.txt", b"not a workbook"), ("inner/app.log", b"boot ok"))
+
+
+def test_a_zip_named_xlsx_inside_a_bundle_is_expanded(c) -> None:
+    """Handle the file as what it IS: a zip full of logs, expanded, with its members in the pool."""
+    sources = _stage(c, "bundle.zip", _zip(("var/log/auth.log", LOG), ("docs/report.xlsx", XLSX_ZIP)))
+    files = [s["file"] for s in sources]
+    assert "bundle.zip!var/log/auth.log" in files
+    inner = _member_source(sources, "!inner/app.log")
+    assert inner["state"] != "ERROR", inner
+    assert not [s for s in sources if s["state"] == "ERROR"], files
+
+
+def test_one_unreadable_member_never_costs_the_others(c, monkeypatch) -> None:
+    """A member the ingest cannot register becomes an ERROR source. The rest of the bundle still lands."""
+    from app.store import STORE as S
+
+    real = S.add_file
+
+    def boom(filename, *a, **kw):
+        if filename.endswith("bad.log"):
+            raise RuntimeError("this file is a plain ZIP archive, not an Excel workbook")
+        return real(filename, *a, **kw)
+
+    monkeypatch.setattr(S, "add_file", boom)
+    sources = _stage(c, "mixed.zip", _zip(("bad.log", b"x"), ("var/log/auth.log", LOG)))
+    good = _member_source(sources, "!var/log/auth.log")
+    assert good["events"] == len(LINES), "a later member was dropped by an earlier failure"
+    bad = _member_source(sources, "!bad.log")
+    assert bad["state"] == "ERROR" and "plain ZIP archive" in (bad["error"] or "")

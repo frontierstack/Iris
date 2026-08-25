@@ -274,7 +274,13 @@ class HistoryStore:
                 return
             for e in reversed(rec["transcript"]):
                 if e.get("kind") == "tool" and e.get("id") == call_id:
-                    e.update({"ok": bool(ok), "summary": _clip(summary, MAX_SUMMARY), "tookMs": int(took_ms)})
+                    # `updSeq` on the SHARED counter, so a reconnecting client sees the patch: the entry
+                    # keeps its `seq` (its place in the conversation), and `?since=` picks it up because
+                    # it was touched after that cursor. Without it the call stayed "waiting for the
+                    # result…" in every polling tab until the whole run ended.
+                    rec["seq"] += 1
+                    e.update({"ok": bool(ok), "summary": _clip(summary, MAX_SUMMARY), "tookMs": int(took_ms),
+                              "updSeq": rec["seq"]})
                     break
             self._touch_locked(rec)
             self._save_locked()

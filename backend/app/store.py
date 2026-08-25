@@ -22,6 +22,7 @@ import sys
 import operator
 import threading
 import time
+import traceback
 import uuid
 from calendar import timegm
 from collections import Counter, OrderedDict, defaultdict
@@ -1046,9 +1047,9 @@ class Store:
             # saying "not a container"); anything else is a real member and records where it came from
             # so `source_bytes` can read it back out of the container instead of re-reading the archive.
             is_self = len(members) == 1 and member_name == (display or name)
-            out.append(self.add_file(member_name, blob, background_ok=background_ok, sid=sid, path=path,
-                                     origin="library", library_name=name, id_prefix=f"l{sid}",
-                                     member="" if is_self else member_name))
+            out.append(self._add_member(member_name, blob, background_ok=background_ok, sid=sid, path=path,
+                                        origin="library", library_name=name, id_prefix=f"l{sid}",
+                                        member="" if is_self else member_name))
         if out:
             # Which members this file expands into. Written here because this is the only place that
             # knows: an archive's member list needs the archive expanded, which is what a cache HIT
@@ -1562,6 +1563,62 @@ class Store:
         """
         return archives.expand(filename, data)
 
+    def _add_member(self, name: str, blob: "Optional[bytes]", **kw) -> Source:
+        """`add_file` for ONE member of a container, where a failure is that member's and nobody else's.
+
+        A bundle is one upload but many files, and they are independent evidence: an .xlsx that is
+        really a plain zip, a member the parser blows up on, a name the filesystem refuses. Registering
+        the member sources with a list comprehension meant the first raise abandoned every member after
+        it AND failed the request, so one unreadable file inside a 200-file archive took the other 199
+        out of the pool with it — reported as an upload that fails on "this file is a plain ZIP archive".
+        The failure becomes an ERROR source instead: named, explained, and next to the members that did
+        parse. `_parse_source` already does this for a parser that raises; this covers everything
+        around it (the sniff, the staging write, the queueing).
+        """
+        sid = kw.pop("sid", None) or uuid.uuid4().hex[:8]
+        try:
+            return self.add_file(name, blob, sid=sid, **kw)
+        except Exception as exc:
+            traceback.print_exc()
+            print(f"[iris] ingest: {name}: {type(exc).__name__}: {exc}")
+            return self._failed_source(sid, name, f"{type(exc).__name__}: {exc}",
+                                       size=len(blob) if blob is not None else 0,
+                                       path=kw.get("path"), origin=kw.get("origin", "case"),
+                                       library_name=kw.get("library_name", ""), member=kw.get("member", ""))
+
+    def _failed_source(self, sid: str, filename: str, message: str, size: int = 0,
+                       path: "Optional[Path]" = None, origin: str = "case",
+                       library_name: str = "", member: str = "") -> Source:
+        """Mark one source ERROR — updating the row `add_file` already registered, if it got that far.
+
+        Creating a second source instead would leave the first stuck at PARSING forever, which is the
+        one state the UI reads as "still working".
+        """
+        origin = "library" if origin == "library" else "case"
+        with self.lock:
+            src = self.sources.get(sid)
+            if src is None:
+                src = Source(id=sid, file=filename, parser="", events=0, range=None, confidence=0.0,
+                             state="ERROR", size=size, sample="", error=message,
+                             origin=origin)  # type: ignore[arg-type]
+                self.sources[sid] = src
+                if path is not None:
+                    self.source_paths[sid] = path
+                self.source_origin[sid] = origin
+                if library_name:
+                    self.source_library[sid] = library_name
+                if member:
+                    self.source_member[sid] = member
+                self.source_order.append(sid)
+            else:
+                src.state = "ERROR"  # type: ignore[assignment]
+                src.error = message
+                if src.enrich in ("raw", "queued", "enriching"):
+                    src.enrich = "error"  # type: ignore[assignment]
+                    src.enrichError = message
+        self.bump()
+        return src
+
     def ingest_upload(self, filename: str, data: bytes) -> list[Source]:
         """Expand a container, ingest what came out, and surface what did NOT as an ERROR source.
 
@@ -1576,7 +1633,7 @@ class Store:
             # A container we could not open comes back as itself; ingesting that as binary strings on top
             # of the ERROR notice would just be noise.
             members = [(n, b) for n, b in members if not (n == filename and b is data)]
-        out = [self.add_file(name, blob) for name, blob in members]
+        out = [self._add_member(name, blob) for name, blob in members]
         if expanded.errors:
             out.append(self.add_error_source(filename, data, " ".join(expanded.errors)[:2000]))
         return out
@@ -1597,7 +1654,7 @@ class Store:
             # A container we could not open comes back as itself; ingesting that as binary strings on
             # top of the ERROR notice would just be noise.
             members = [(n, b) for n, b in members if n != filename]
-        out = [self.add_file(name, blob) for name, blob in members]
+        out = [self._add_member(name, blob) for name, blob in members]
         if expanded.errors:
             # the refusal names the file the analyst uploaded, and its bytes stay where they were staged
             out.append(self.add_error_source(filename, None, " ".join(expanded.errors)[:2000], path=staged))

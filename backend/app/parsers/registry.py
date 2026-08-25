@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field as dc_field
 from typing import Optional
 
+from . import archives
 from .base import BaseParser
 from .cloudtrail import CloudTrailParser
 from .csv import CsvParser
@@ -90,16 +91,11 @@ def parser_by_name(name: str) -> Optional[BaseParser]:
     return None
 
 
-OOXML_MARKER = b"[Content_Types].xml"
-
-
-def is_ooxml(data: bytes) -> bool:
-    """True for Office Open XML containers (xlsx/docx/pptx): a zip whose directory lists [Content_Types].xml."""
-    if not data.startswith(b"PK\x03\x04"):
-        return False
-    if OOXML_MARKER in data[:4096]:
-        return True
-    return OOXML_MARKER in data[-65536:]  # central directory sits at the end
+OOXML_MARKER = archives.OOXML_MARKER
+ZIP_MAGIC = archives.ZIP_MAGIC
+# One definition of "is this an OOXML container", shared with the archive expander — the two must agree
+# about which zips are documents, or a file is kept whole by one and expanded by the other.
+is_ooxml = archives.is_ooxml
 
 
 def binary_hint(filename: str, data: bytes) -> Optional[BaseParser]:
@@ -114,16 +110,32 @@ def binary_hint(filename: str, data: bytes) -> Optional[BaseParser]:
     # Require the CONTENT to be OOXML. A zip that is not gets nothing here and falls through to the
     # archive handler, which expands it and parses what is inside -- the useful outcome, not an error.
     if is_ooxml(data):
+        # And it must be the RIGHT OOXML: `[Content_Types].xml` says "some OOXML package", which a
+        # .vsix, a .nupkg and an .apk all are. Ask the zip's own directory what document it holds, so a
+        # package that is not a workbook falls through to the archive handler instead of reaching
+        # openpyxl, which can only fail on it — the "this file is a plain ZIP archive" report.
+        kind = archives.zip_kind(data)
+        if kind == "docx":
+            return DocxParser()
+        if kind == "xlsx":
+            return XlsxParser()
+        if kind != "unknown":
+            return None  # pptx / ODF / a plain package: strings, or expansion by the archive handler
+        # 'unknown' = the directory is not in these bytes (a streamed upload sniffs a 64 KB head) or the
+        # container is damaged. Fall back to the name, which is the only evidence left.
         if lower.endswith((".docx", ".docm")) or b"word/" in data[:4096]:
             return DocxParser()
         if lower.endswith((".xlsx", ".xlsm")) or b"xl/" in data[:4096]:
             return XlsxParser()
-        return None  # other OOXML (pptx): fall through to strings
-    if lower.endswith((".xlsx", ".xlsm", ".docx", ".docm")) and not data[:4].startswith(b"PK"):
-        # Named like an Office file, not a zip at all. Claim it so the parser can explain the
-        # mismatch by name; falling through would parse a mislabelled binary as "plain text" and
-        # leave a source sitting in MAP with no hint of what went wrong.
-        return DocxParser() if lower.endswith((".docx", ".docm")) else XlsxParser()
+        return None
+    if lower.endswith((".xlsx", ".xlsm", ".docx", ".docm")) and not data[:4].startswith(ZIP_MAGIC):
+        # Named like an Office file, not a zip at all. If it reads as TEXT it is almost always a CSV or
+        # a log that was given the wrong extension, and parsing it as what it IS beats failing the file
+        # with a sentence about Excel. Only a BINARY mislabel is claimed here, so the parser can explain
+        # the mismatch by name rather than leaving a mystery blob parsed as "plain text".
+        if is_binary(data[:8192]):
+            return DocxParser() if lower.endswith((".docx", ".docm")) else XlsxParser()
+        return None
     if lower.endswith(".xls") and head.startswith(XLS_MAGIC):
         return XlsxParser()
     # SQLite is identified by its magic ONLY: a ".db" that is not a SQLite file (Thumbs.db, Berkeley DB…)

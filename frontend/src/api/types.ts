@@ -426,6 +426,12 @@ export interface AiTranscriptEntry {
   text: string; step: number;
   id: string; name: string; args: Record<string, unknown>; writes: boolean;
   ok: boolean | null; summary: string; tookMs: number;
+  /**
+   * When this entry was last CHANGED, on the same counter as `seq`. A tool entry is patched in place
+   * when its result lands, so `?since=<lastSeq>` alone never resent it and the card kept spinning in
+   * every polling tab. Merge by `seq` (the entry keeps its place); this only decides what is SENT.
+   */
+  updSeq?: number;
 }
 export interface AiRun {
   id: string; prompt: string; focus: string; model: string;

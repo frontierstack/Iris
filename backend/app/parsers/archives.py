@@ -57,8 +57,16 @@ ZSTD_MISSING = ("Zstandard archives need the optional 'zstandard' package (pip i
                 "Re-compress the evidence as .gz or .xz to ingest it now.")
 
 OOXML_MARKER = b"[Content_Types].xml"
-OFFICE_EXTENSIONS = (".xlsx", ".xlsm", ".docx", ".docm", ".pptx", ".pptm", ".odt", ".ods", ".odp", ".epub", ".jar",
-                     ".apk", ".vsix", ".nupkg", ".whl")
+# Documents: a zip whose parser wants the WHOLE file, never its entries.
+DOCUMENT_EXTENSIONS = (".xlsx", ".xlsm", ".docx", ".docm", ".pptx", ".pptm", ".odt", ".ods", ".odp")
+# Packages: also zips, also kept whole - but because their entries are code and metadata, not evidence.
+# Expanding a .jar into the pool puts hundreds of .class files in front of the analyst.
+PACKAGE_EXTENSIONS = (".epub", ".jar", ".apk", ".vsix", ".nupkg", ".whl")
+OFFICE_EXTENSIONS = DOCUMENT_EXTENSIONS + PACKAGE_EXTENSIONS
+
+# What `zip_kind` can answer. 'zip' = a plain archive; 'unknown' = the directory could not be read
+# (a truncated sniff head, a damaged container), which is NOT the same as "not a document".
+DOCUMENT_KINDS = ("xlsx", "docx", "pptx", "odf")
 
 _TEXT_EXTENSIONS = (".log", ".txt", ".csv", ".tsv", ".json", ".jsonl", ".xml", ".evtx.xml")
 
@@ -70,6 +78,65 @@ def is_ooxml(data: bytes) -> bool:
     if OOXML_MARKER in data[:4096]:
         return True
     return OOXML_MARKER in data[-65536:]  # central directory sits at the end
+
+
+def zip_kind(data: bytes) -> str:
+    """What a zip REALLY is, from its own directory: xlsx|docx|pptx|odf|zip|unknown.
+
+    `[Content_Types].xml` says "some OOXML package", not "an Excel workbook" - a .vsix, a .nupkg and an
+    .apk all carry it. Routing on that marker plus the extension is what handed openpyxl a container it
+    could only fail on, with a message about the ZIP's internals. Ask the namelist instead.
+
+    'unknown' means the question could not be answered here (the caller holds a 64 KB sniff head, or the
+    container is damaged); it must never be read as "not a document".
+    """
+    return zip_kind_fh(io.BytesIO(data))
+
+
+def zip_kind_fh(fh) -> str:
+    """`zip_kind` for an open seekable file - the central directory is at the END, so this needs the file."""
+    try:
+        fh.seek(0)
+        if fh.read(4) != ZIP_MAGIC:
+            return "unknown"
+        fh.seek(0)
+        with zipfile.ZipFile(fh) as z:
+            names = set(z.namelist())
+            if "xl/workbook.xml" in names or "xl/workbook.bin" in names:
+                return "xlsx"
+            if "word/document.xml" in names:
+                return "docx"
+            if "ppt/presentation.xml" in names:
+                return "pptx"
+            if "mimetype" in names:
+                try:
+                    if z.read("mimetype").startswith(b"application/vnd.oasis.opendocument"):
+                        return "odf"
+                except Exception:
+                    return "unknown"
+            return "zip"
+    except Exception:
+        return "unknown"
+
+
+def is_document(name: str, data: bytes) -> bool:
+    """True when this file is an Office/ODF DOCUMENT and must be handed to its parser whole.
+
+    Detected from the container, never from the extension alone: a plain .zip full of logs that someone
+    named `report.xlsx` is a zip, and the useful outcome is to EXPAND it and parse what is inside -
+    not to fail the file (and, before this, the whole upload it arrived in) with "rename it to .zip".
+    """
+    lower = name.lower()
+    if not data[:4].startswith(ZIP_MAGIC):
+        # Not a zip at all. Claimed by name so the Office parser can explain the mismatch by name;
+        # nothing here can expand it either way.
+        return lower.endswith(DOCUMENT_EXTENSIONS)
+    kind = zip_kind(data)
+    if kind in DOCUMENT_KINDS:
+        return True
+    if kind == "unknown":  # unreadable directory: trust the name rather than shredding a real document
+        return lower.endswith(DOCUMENT_EXTENSIONS) or is_ooxml(data)
+    return False
 
 
 @dataclass
@@ -140,7 +207,7 @@ def _join(outer: str, inner: str) -> str:
 
 def _looks_like_archive(name: str, data: bytes) -> bool:
     lower = name.lower()
-    if lower.endswith(OFFICE_EXTENSIONS) or is_ooxml(data):
+    if lower.endswith(PACKAGE_EXTENSIONS) or is_document(name, data):
         return False
     if lower.endswith(ARCHIVE_EXTENSIONS):
         return True
@@ -199,15 +266,17 @@ def expand_path(filename: str, path) -> Expanded:
 
     lower = filename.lower()
     # An Office/OOXML package is a zip that is a DOCUMENT — its parser wants the whole file, not its
-    # entries. `is_ooxml` reads the central directory, which a 64 KB head does not contain, so this
-    # asks the extension first and only then pays for the full read.
+    # entries. Which it is lives in the central directory at the END of the file, which a 64 KB head
+    # does not contain, so the question is asked of the open file rather than of the sniff head.
     is_zip = head.startswith(ZIP_MAGIC) or lower.endswith(".zip")
-    if is_zip and not lower.endswith(OFFICE_EXTENSIONS):
+    if is_zip and not lower.endswith(PACKAGE_EXTENSIONS):
         out, budget = Expanded(), _Budget()
         try:
             with open(path, "rb") as fh:
-                if is_ooxml_head(fh):
-                    return expand(filename, _read_all(path))
+                kind = zip_kind_fh(fh)
+                if kind in DOCUMENT_KINDS or (kind == "unknown" and lower.endswith(DOCUMENT_EXTENSIONS)):
+                    # A real document: its parser reads it from this same path, so never load it here.
+                    return Expanded(passthrough=True)
                 fh.seek(0)
                 _expand_zip(out, budget, filename, None, 0, fileobj=fh)
         except OSError as exc:
@@ -264,20 +333,6 @@ def _bytes_of(data: Optional[bytes], fileobj) -> bytes:
         return fileobj.read()
     except Exception:
         return b""
-
-
-def is_ooxml_head(fh) -> bool:
-    """`is_ooxml` for an open file: the marker lives in the central directory at the END of the zip."""
-    try:
-        fh.seek(0)
-        if fh.read(4) != ZIP_MAGIC:
-            return False
-        if OOXML_MARKER in fh.read(4096):
-            return True
-        with zipfile.ZipFile(fh) as zf:
-            return OOXML_MARKER.decode() in zf.namelist()
-    except Exception:
-        return False
 
 
 def read_member(path, member: str) -> bytes:
@@ -354,8 +409,10 @@ def _emit(out: Expanded, budget: _Budget, name: str, blob: bytes, depth: int) ->
 def _expand_into(out: Expanded, budget: _Budget, filename: str, data: bytes, depth: int) -> None:
     lower = filename.lower()
 
-    # Office documents / other OOXML packages are zips, but they are DOCUMENTS - hand them to their parser.
-    if lower.endswith(OFFICE_EXTENSIONS) or is_ooxml(data):
+    # Office documents and packages are zips, but they are not evidence CONTAINERS - keep them whole and
+    # hand them to their parser. Anything else that merely looks like one (a plain zip named .xlsx, an
+    # OOXML package that is not a document) falls through and is expanded like the archive it is.
+    if lower.endswith(PACKAGE_EXTENSIONS) or is_document(filename, data):
         out.members.append((filename, data))
         return
 

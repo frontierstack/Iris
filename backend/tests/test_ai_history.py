@@ -102,6 +102,34 @@ def test_since_returns_only_the_tail(client):
     assert client.get(f"/api/ai/runs/run-tailtest?since={seq}").json()["transcript"] == []
 
 
+def test_a_tool_result_reaches_a_client_that_has_already_seen_the_call(client):
+    """The card's spinner is what says "still running", so the PATCH has to be sent, not just stored.
+
+    A tool entry is appended when the call starts and updated in place when the result lands, which
+    keeps its `seq`. Filtering `?since=` on `seq` alone therefore withheld exactly the update the
+    panel was waiting for, and every polling tab kept the call spinning for the rest of the run —
+    reported as "the spinner on the tools continues to spin even when that tool is done being used".
+    """
+    from app.ai.history import HISTORY
+
+    rid = "run-patchtail"
+    HISTORY.start(rid, "watch me", "fake-model")
+    HISTORY.append(rid, {"kind": "tool", "id": "c1", "name": "list_sources", "args": {}, "writes": False})
+    call_seq = client.get(f"/api/ai/runs/{rid}").json()["transcriptSeq"]
+    # the client has now seen everything up to and including the call
+    assert client.get(f"/api/ai/runs/{rid}?since={call_seq}").json()["transcript"] == []
+
+    HISTORY.tool_result(rid, "c1", True, "3 sources", 12)
+    tail = client.get(f"/api/ai/runs/{rid}?since={call_seq}").json()["transcript"]
+    assert [e["seq"] for e in tail] == [call_seq], tail
+    assert tail[0]["ok"] is True and tail[0]["summary"] == "3 sources" and tail[0]["tookMs"] == 12
+    # the entry keeps its PLACE in the conversation - only what is SENT changes
+    full = client.get(f"/api/ai/runs/{rid}").json()
+    assert [e["seq"] for e in full["transcript"]] == [call_seq]
+    assert full["transcriptSeq"] > call_seq
+    HISTORY.delete(rid)
+
+
 # --------------------------------------------------------------- mid-run visibility
 def test_an_in_flight_run_is_visible_to_a_second_reader_and_grows(client):
     """A second tab (here: a HistoryStore that shares no memory) must see the run WHILE it is running."""
