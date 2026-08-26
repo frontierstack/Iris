@@ -63,7 +63,8 @@ def list_events(q: str = "", sources: str = "", sev: str = "", from_: Optional[s
     events, ts, version, lo, hi, src_set, sev_set = _search_filters(sources, sev, from_, to, scope)
     # Search runs OUTSIDE the store lock: the event list is only ever replaced (never mutated in place) and the
     # index is keyed by version, so concurrent searches don't serialize behind ingest / each other.
-    res = search_engine.search(events, ts, version, q, lo, hi, src_set, sev_set, offset, limit, desc=sort == "ts_desc")
+    res = search_engine.search(events, ts, version, q, lo, hi, src_set, sev_set, offset, limit,
+                               desc=sort == "ts_desc", whole_pool=scope != "case")
     rows: list[Event] = res["rows"]
     total: int = res["total"]
     # NOTE: no per-row baseline here — that is an O(N) analyzer call per row (it made a 200-row page take ~10 s on
@@ -171,7 +172,8 @@ def list_fields(q: str = "", sources: str = "", sev: str = "", from_: Optional[s
     """
     values = max(1, min(500, int(values or 8)))
     events, ts, version, lo, hi, src_set, sev_set = _search_filters(sources, sev, from_, to, scope)
-    res = search_engine.search(events, ts, version, q, lo, hi, src_set, sev_set, 0, _FIELDS_SCAN_CAP, desc=True)
+    res = search_engine.search(events, ts, version, q, lo, hi, src_set, sev_set, 0, _FIELDS_SCAN_CAP,
+                               desc=True, whole_pool=scope != "case")
     rows: list[Event] = res["rows"]
     total_events: int = res["total"]
 

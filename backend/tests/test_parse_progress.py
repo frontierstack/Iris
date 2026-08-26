@@ -793,3 +793,25 @@ def test_a_head_cut_mid_cell_loses_records_and_the_fix_stops_it(monkeypatch) -> 
 
     assert fixed == whole, "the quote-aware head must reproduce the single-worker records exactly"
     assert broken != whole, "the fixture did not actually exercise the old failure"
+
+
+def test_a_subset_search_never_warms_the_whole_pool_index(monkeypatch) -> None:
+    """A `scope=case` search is handed the case SET, not the pool.
+
+    The index is a whole-pool structure and its on-disk copy is keyed by the pool's signature, so
+    warming from a subset built an index over the case set and saved it OVER the whole-pool file.
+    Both count guards reject it afterwards (`index_ready` compares `idx.n`, the cache load compares
+    the header's `n`), so nothing is served wrongly — but the good index is gone and the next real
+    search pays a full re-pack, 165 s / 4.1 GB at 11 M events, because someone filtered to a case.
+    """
+    events, ts = _events_for_index(2500)
+    _idle_index()
+    calls = {"n": 0}
+    monkeypatch.setattr(search_mod, "warm_async", lambda *a, **k: calls.__setitem__("n", calls["n"] + 1))
+
+    search_mod.search(events, ts, 4711, "needle-3", 0, len(events), set(), set(), 0, 10, whole_pool=False)
+    assert calls["n"] == 0, "a case-scoped search kicked a warm that would overwrite the pool's index"
+
+    search_mod.search(events, ts, 4711, "needle-3", 0, len(events), set(), set(), 0, 10)
+    assert calls["n"] == 1, "a whole-pool search must still warm"
+    search_mod.invalidate()

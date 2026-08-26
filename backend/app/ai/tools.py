@@ -728,7 +728,8 @@ def _matching(args: dict[str, Any], *, cap: int = 0) -> dict[str, Any]:
     q = validate_query(_s(args.get("query"), 2000))
     events, ts, version, lo, hi, src_set, sev_set = _filters(args)
     limit = cap if cap else max(1, len(events))
-    res = search_engine.search(events, ts, version, q, lo, hi, src_set, sev_set, 0, limit, desc=False)
+    res = search_engine.search(events, ts, version, q, lo, hi, src_set, sev_set, 0, limit, desc=False,
+                               whole_pool=_s(args.get("scope"), 8) != "case")
     return res
 
 

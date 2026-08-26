@@ -675,10 +675,19 @@ def invalidate() -> None:
 
 
 def search(events: list[Event], ts: np.ndarray, version: int, q: str, lo: int, hi: int,
-           src_set: set[str], sev_set: set[str], offset: int, limit: int, desc: bool = False) -> dict[str, Any]:
+           src_set: set[str], sev_set: set[str], offset: int, limit: int, desc: bool = False,
+           whole_pool: bool = True) -> dict[str, Any]:
     """Return {'rows', 'total', 'engine', 'tookMs', 'candidates'} for the given filters.
 
     `events` is always ascending by timestamp, so newest-first is just a reversed walk — no re-sort.
+
+    `whole_pool=False` says this call was handed a SUBSET (a `scope=case` search is the case set, not
+    the pool). The index is a whole-pool structure and its on-disk copy is keyed by the pool's
+    signature, so warming from a subset built an index over the case set and SAVED IT OVER the
+    whole-pool file. Both count guards then reject it — `index_ready` compares `idx.n` and the cache
+    load compares the header's `n` — so nothing is served wrongly, but the good index is gone and the
+    next real search pays a full re-pack (165 s / 4.1 GB at 11 M events). A subset search answers on
+    the scan path instead, which is what it did before it destroyed anything.
     """
     t0 = time.perf_counter()
     n = len(events)
@@ -692,7 +701,7 @@ def search(events: list[Event], ts: np.ndarray, version: int, q: str, lo: int, h
     # whichever request arrived first, under the index lock — the query simply never came back. If the
     # index is not ready this request scans (slower, but it answers) and a background warm is kicked off.
     idx = index_ready(events, ts, version) if n >= _MIN_VECTOR else None
-    if n >= _MIN_VECTOR and idx is None:
+    if n >= _MIN_VECTOR and idx is None and whole_pool:
         warm_async(lambda: (events, ts, version), delay=0.0)
     if idx is not None:
         eng = _Engine(idx)

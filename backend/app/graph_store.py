@@ -179,9 +179,16 @@ def _write_frames(path, header: dict, frames) -> None:
         fh.write(mac.digest())
 
 
-def _read_frames(path):
+def _read_frames(path, want: Optional[tuple[str, str]] = None):
     """(header, [frames]) or (None, None). The tag is verified over the whole file BEFORE anything is
-    unpickled — a pickle in a bind-mounted directory is code execution to whoever can write there."""
+    unpickled — a pickle in a bind-mounted directory is code execution to whoever can write there.
+
+    `want` is (format, signature): when it is given and the header does not match, the BODY is not
+    unpickled at all and `(header, None)` comes back. It used to read every frame and only then let
+    the caller compare the signature, so a miss paid for rebuilding the entire cached graph in memory
+    purely to throw it away — and a miss is the common case now that the key covers the detection
+    catalogue, i.e. every rule edit.
+    """
     import hmac as _hmac
     import hashlib
     import io
@@ -206,6 +213,8 @@ def _read_frames(path):
         if fh.read(len(_FRAME_MAGIC)) != _FRAME_MAGIC:
             return None, None
         header = pickle.Unpickler(fh).load()
+        if want is not None and (header.get("format") != want[0] or header.get("sig") != want[1]):
+            return header, None       # a miss: the body is never touched
         frames = []
         while fh.tell() < body_len:
             frames.append(pickle.Unpickler(fh).load())
@@ -339,12 +348,12 @@ def load(store: Any, scope: str, sig: str) -> Optional[tuple[dict, dict]]:
     t0 = time.perf_counter()
     try:
         with _LOCK:
-            header, frames = _read_frames(p)
+            header, frames = _read_frames(p, want=(GRAPH_FORMAT, sig))
         if header is None:
             _log("cache file is unsigned, corrupt or not written by this install; ignoring it and rebuilding")
             return None
-        if header.get("format") != GRAPH_FORMAT or header.get("sig") != sig:
-            return None
+        if frames is None:
+            return None               # a different pool or a different catalogue; nothing was unpickled
         payload = {"nodes": [], "edges": []}
         for kind, rows in frames:
             payload[kind].extend(rows)
