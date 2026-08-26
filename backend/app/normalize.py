@@ -344,10 +344,17 @@ def extract_entities(ev: ParsedEvent) -> list[str]:
         v = ev.fields.get(f)
         if v and len(v) < 64 and " " not in v:
             add(v)
-    for k in AKIA_RE.findall(text):
-        add(k)
-    for k in KEYFP_RE.findall(text):
-        add(k)
+    # Both of these scan the WHOLE raw line, on every event, at ingest. Neither is case-insensitive
+    # and each has a mandatory literal prefix, so a line without it cannot match - and `in` is a C
+    # memmem while `findall` is Python re retrying at every position. Measured on an ordinary
+    # 195-char proxy line that matches neither: 3.8 us + 4.1 us, i.e. ~80 s per 10 M events of pure
+    # normalization, against ~0.15 us for the two substring tests.
+    if "AKIA" in text or "ASIA" in text:
+        for k in AKIA_RE.findall(text):
+            add(k)
+    if "SHA256:" in text:
+        for k in KEYFP_RE.findall(text):
+            add(k)
     pod = ev.fields.get("pod") or ev.fields.get("objectRef.name") or ev.fields.get("kubernetes.pod_name")
     if pod:
         add(pod)
