@@ -128,3 +128,6 @@ scratch/
 core
 *.core
 wsl-crashes/
+
+# scratch scripts from an interactive session — never part of the app
+_*.py
