@@ -2154,7 +2154,7 @@ class Store:
                                    one_to_one=one_to_one, remap=remap, lost_citations=lost,
                                    took_ms=int((time.perf_counter() - t0) * 1000))
 
-    def _cache_library_source(self, sid: str, events: list[Event], report: bool = True) -> None:
+    def _cache_library_source(self, sid: str, events: list[Event], report: bool = True) -> bool:
         """Persist one finished LIBRARY source's parsed events (see app/pool_store.py). Never raises.
 
         Case-origin sources are deliberately not cached: their bytes live under `cases/<id>/uploads/`,
@@ -2170,10 +2170,11 @@ class Store:
                 errors = self.source_parse_errors.get(sid, 0)
             tick = (lambda done, n: self._tail(sid, "caching", 100.0 * done / max(1, n))) if report else None
             if not name or src is None or origin != "library":
-                return
-            pool_store.save_member(name, src, events, errors, progress=tick)
+                return False
+            return bool(pool_store.save_member(name, src, events, errors, progress=tick))
         except Exception as exc:  # noqa: BLE001 — a cache write may never fail an ingest
             print(f"[iris] pool cache: could not cache {sid} ({type(exc).__name__}: {exc})")
+            return False
 
     def _resave_pool_cache(self) -> int:
         """Rewrite the cached copy of every library source, after the catalogue changed what is on them.
@@ -2219,14 +2220,27 @@ class Store:
                     bucket.append(e)
             t0 = time.time()
             done = 0
+            skipped = 0
             for sid in targets:
                 if sid not in want:
                     continue
-                self._cache_library_source(sid, grouped[sid], report=False)
-                done += 1
+                # `save_member` refuses a source that is not FINISHED, which is the normal case on a
+                # boot that RE-PARSED (phase 2 is still on the queue when this pass runs). Count the
+                # writes that actually happened: a line claiming N rewrites when N of them were
+                # refused is exactly the kind of report that makes a cache look healthy while it is
+                # serving a stale stamp. Refusals are harmless - the enrichment path caches the
+                # source when it finishes, and the NEXT boot converges.
+                if self._cache_library_source(sid, grouped[sid], report=False):
+                    done += 1
+                else:
+                    skipped += 1
             if done:
                 print(f"[iris] pool cache: rewrote {done} source(s) with the corrected detections "
-                      f"in {time.time() - t0:.1f}s - the next restart has nothing to correct")
+                      f"in {time.time() - t0:.1f}s - the next restart has nothing to correct"
+                      + (f" ({skipped} not yet finished, they cache themselves)" if skipped else ""))
+            elif skipped:
+                print(f"[iris] pool cache: {skipped} source(s) were still being interpreted, so the "
+                      f"corrected stamp was not written back yet - the next restart does it")
             return done
         except Exception as exc:  # noqa: BLE001 - a cache write may never fail a detection pass
             print(f"[iris] pool cache: could not rewrite the corrected stamp "
