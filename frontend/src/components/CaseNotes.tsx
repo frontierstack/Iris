@@ -1,7 +1,7 @@
 /** Case notes as a chat-style feed: post timestamped markdown entries, edit them, attach screenshots, link evidence. */
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { ClipboardEvent, DragEvent, KeyboardEvent, ReactNode, SVGProps } from 'react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import type { CaseNote, NoteRef } from '../api/types';
@@ -392,19 +392,44 @@ function NoteRow({ caseId, note }: { caseId: string; note: CaseNote }) {
   );
 }
 
+/**
+ * NEWEST FIRST. The investigation log is read to find out what happened LAST — during an incident,
+ * and again weeks later — and an append-ordered feed puts that at the bottom of an arbitrarily long
+ * scroll. Sorting is on the note's OWN `createdAt`, not on the position the API returned it in, so a
+ * note posted while the analyst is looking lands at the top the moment the query refetches, whatever
+ * order the server serialises. `createdAt` is the CREATION time (an edit sets `updatedAt` instead),
+ * so editing a note in place never moves it — the log stays a chronology, not a recently-touched list.
+ *
+ * The order is a display decision and lives here alone: `cases.add_note` still appends, the report,
+ * the export and `restore_note` all keep reading the file in the order it was written.
+ */
+function newestFirst(notes: CaseNote[]): CaseNote[] {
+  return [...notes].sort((a, b) => {
+    const ta = Date.parse(a.createdAt);
+    const tb = Date.parse(b.createdAt);
+    // Two notes can share a timestamp (the assistant writes several in one run, and it is ISO to the
+    // second): fall back to the stored order, reversed, so the tie is stable and still newest-first.
+    if (ta === tb || Number.isNaN(ta) || Number.isNaN(tb)) return notes.indexOf(b) - notes.indexOf(a);
+    return tb - ta;
+  });
+}
+
 export function CaseNotesFeed({ caseId, pendingRefs = [], onPosted }: { caseId: string; pendingRefs?: NoteRef[]; onPosted?: () => void }) {
   const notes = useNotes(caseId);
-  const list = notes.data ?? [];
+  const list = useMemo(() => newestFirst(notes.data ?? []), [notes.data]);
   return (
     <div className="notes">
+      {/* The composer leads the feed because the feed is newest-first: what you post appears in the
+          row directly below the box you typed it in. Leaving it at the bottom would put a new entry
+          a whole scroll away from the control that created it. */}
+      <Composer caseId={caseId} pending={pendingRefs} onPosted={onPosted} />
       {list.length === 0 && !notes.isLoading && (
         <EmptyState inline title="No notes yet"
-          body="Post what you find as you go — each entry is timestamped, editable, takes markdown and screenshots, and can link back to the events behind it." />
+          body="Post what you find as you go — each entry is timestamped, editable, takes markdown and screenshots, and can link back to the events behind it. The newest entry stays at the top." />
       )}
       <div className="notes__feed">
         {list.map((n) => <NoteRow key={n.id} caseId={caseId} note={n} />)}
       </div>
-      <Composer caseId={caseId} pending={pendingRefs} onPosted={onPosted} />
     </div>
   );
 }

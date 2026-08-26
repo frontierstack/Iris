@@ -1611,21 +1611,95 @@
   font-size: var(--fs-xxs); color: var(--muted); border-top: 1px solid var(--border-2); padding-top: 8px;
 }
 
-/* ── the answer: markdown at a readable measure ── */
-/* 68ch is the measure; at --fs-xl that is ~455px inside a 524px content column, so a long report
-   reads as prose instead of spanning the whole panel. */
-.chat-md { max-width: 68ch; font-size: var(--fs-xl); line-height: 1.65; color: var(--text-2, var(--text)); }
-.chat-md .md-p { margin: 0 0 10px; }
+/* ── the answer: markdown at a readable measure ──
+   "the assistant response notes in the chat is a little squeezed, needs a better and more
+   professional look". Three things were doing the squeezing and all three are fixed here: the type
+   was one step below what a report deserves, the leading and the paragraph gap were set for a UI
+   label rather than for prose, and the answer block had 12px of padding, so the text ran almost to
+   the panel's own edge. 70ch stays the measure — at --fs-2xl that is ~500px, still inside the 524px
+   the docked panel gives it, so nothing gets NARROWER on the shell that has the least room. */
+.chat-md {
+  max-width: 70ch;
+  font-size: var(--fs-2xl);
+  line-height: 1.72;
+  color: var(--text-2, var(--text));
+  letter-spacing: .002em;
+  text-wrap: pretty;
+}
+.chat-md .md-p { margin: 0 0 13px; }
 .chat-md > *:last-child { margin-bottom: 0; }
-.chat-md .md-h1, .chat-md .md-h2, .chat-md .md-h3 { margin: 18px 0 6px; }
+/* Space ABOVE a heading is what separates one section of a report from the last one; without it a
+   long answer reads as a single block whatever the type size is. */
+.chat-md .md-h1, .chat-md .md-h2, .chat-md .md-h3 { margin: 22px 0 8px; }
 .chat-md > .md-h1:first-child, .chat-md > .md-h2:first-child, .chat-md > .md-h3:first-child { margin-top: 0; }
-.chat-md ul, .chat-md ol { margin: 0 0 10px; padding-left: 20px; }
-.chat-md li { margin: 3px 0; }
-.chat-md .md-quote { margin: 0 0 10px; }
+.chat-md ul, .chat-md ol { margin: 0 0 13px; padding-left: 22px; }
+.chat-md li { margin: 5px 0; }
+.chat-md li > ul, .chat-md li > ol { margin: 5px 0 2px; }
+.chat-md .md-quote { margin: 0 0 13px; }
+.chat-md .md-hr { margin: 18px 0; }
 /* the repo's CSS gotcha: the SCROLLER is the block, never the panel and never each line */
-.chat-md .md-pre { max-width: 100%; overflow-x: auto; margin: 0 0 10px; }
-.chat-md .md-tablewrap { max-width: 100%; overflow-x: auto; margin: 0 0 10px; }
+.chat-md .md-pre { max-width: 100%; overflow-x: auto; margin: 0 0 13px; }
+.chat-md .md-tablewrap { max-width: 100%; overflow-x: auto; margin: 0 0 13px; }
 .chat-md .md-table { min-width: 0; }
+
+/* ── two columns, but only past RAIL_MIN_CONTENT (AiPanel.tsx) ──
+   Left: what the assistant SAID and what it changed. Right: what it DID. The rail is sticky inside
+   the panel's own scroller and scrolls itself, so it stays beside a long answer; `min-width: 0` on
+   the main column is load-bearing, or a wide table inside it would push the grid instead of
+   scrolling in its own block. */
+.chat-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 264px;
+  gap: 22px;
+  align-items: start;
+  min-width: 0;
+}
+.chat-split__main { min-width: 0; }
+/* with a whole column to itself the report can take a wider measure than the docked panel allows */
+.chat-split__main .chat-md { max-width: 78ch; }
+
+.trail-rail {
+  position: sticky;
+  top: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--panel-inset);
+  /* set from the measured scroll body (AiPanel useContentBox); the fallback keeps it sane
+     if the observer never fires, e.g. a browser with no ResizeObserver */
+  max-height: var(--rail-max-h, 60vh);
+  overflow: hidden;
+}
+.trail-rail__head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-2);
+}
+.trail-rail__title {
+  font-size: var(--fs-xxs); letter-spacing: .09em; text-transform: uppercase; font-weight: 600;
+  color: var(--text-3);
+}
+.trail-rail__counts { font-size: var(--fs-xxs); color: var(--muted); }
+.trail-rail__body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 10px 10px 10px 18px;
+  position: relative;
+}
+/* the same hairline rail the one-column trail hangs its cards off */
+.trail-rail__body::before {
+  content: ''; position: absolute; left: 9px; top: 14px; bottom: 14px;
+  width: 1px; background: var(--border);
+}
+.trail-rail__empty { font-size: var(--fs-xs); color: var(--muted); padding: 2px 0; }
+/* status notes during a live two-column run — see the comment in Turn's live branch */
+.chat-notes { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.chat-notes:empty { display: none; }
 
 /* No typing caret. A blinking `|` was the one animated ornament left in the panel and the analyst
    asked for it gone; liveness is carried by the existing spinner and the "running" state chip, which
@@ -1677,6 +1751,24 @@
 }
 .tcall--write { border-left-color: var(--accent); background: var(--accent-bg); }
 .tcall--bad { border-left-color: var(--bad); }
+/* in the rail the card is a NAV ROW first: the head is the control, the arguments open under it */
+.tcall--rail { padding: 5px 8px; gap: 4px; }
+.tcall__head--btn {
+  display: flex; align-items: center; gap: 7px; width: 100%; min-width: 0;
+  background: none; border: 0; padding: 0; margin: 0; cursor: pointer; text-align: left;
+  color: inherit; font: inherit;
+}
+.tcall__head--btn:hover .tcall__name { color: var(--accent-hover); }
+.tcall__head--btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-xs); }
+.tcall__chev {
+  flex: 0 0 auto; width: 11px; height: 11px; color: var(--muted-3, var(--muted));
+  transform: rotate(-90deg); transition: transform var(--t-fast);
+}
+.tcall__chev--open { transform: rotate(0deg); }
+.tcall--rail .tcall__ms { margin-left: 0; }
+.tcall--rail .tcall__head--btn .tcall__ms { margin-left: auto; }
+.tcall--rail .tcall__result { font-size: var(--fs-xxs); }
+.tcall--rail .tcall__arg dd { font-size: var(--fs-xxs); }
 /* the model's own sentence about WHY it is making this call, folded into the card it explains */
 .tcall__lead {
   font-size: var(--fs-base); line-height: 1.5; color: var(--text-2); min-width: 0;
@@ -1728,17 +1820,21 @@
 .chat-note { font-size: var(--fs-xs); color: var(--muted); }
 
 /* ── the answer: what they actually asked for, and it looks like it ── */
+/* Real padding, and a rule under the label rather than a gap: the report is the longest thing on this
+   screen and it was sitting 12px from the panel edge on both sides, which is what "squeezed" meant. */
 .chat-answer {
-  display: flex; flex-direction: column; gap: 8px; min-width: 0;
+  display: flex; flex-direction: column; gap: 0; min-width: 0;
   border: 1px solid var(--border-strong); border-radius: var(--radius-md);
-  background: var(--surface-1); padding: 12px 14px;
+  background: var(--surface-1); padding: 0;
 }
 .chat-answer__head {
   display: flex; align-items: center; gap: 7px;
+  padding: 9px 18px;
+  border-bottom: 1px solid var(--border-2);
   font-size: var(--fs-xxs); letter-spacing: .09em; text-transform: uppercase; color: var(--accent); font-weight: 600;
 }
+.chat-answer__body { padding: 16px 18px 18px; color: var(--text); }
 .chat-answer__head svg { flex: 0 0 auto; width: 12px; height: 12px; }
-.chat-answer__body { color: var(--text); }
 
 /* ── what the run changed: second only to the answer ── */
 .chat-changes { border: 1px solid var(--accent-border); border-radius: var(--radius-md); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }

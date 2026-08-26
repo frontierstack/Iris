@@ -1,20 +1,38 @@
 /* ═══════ Rich case notes — markdown rendering, composer toolbar, image attachments ═══════ */
 
 /* ── rendered markdown ── */
-.md { font-size: var(--fs-base); color: var(--text-2); line-height: 1.6; overflow-wrap: anywhere; }
+.md { font-size: var(--fs-base); color: var(--text-2); line-height: 1.65; overflow-wrap: anywhere; }
 .note__text.md { white-space: normal; }
 .md > *:first-child { margin-top: 0; }
 .md > *:last-child { margin-bottom: 0; }
-.md-p { margin: 0 0 9px; white-space: pre-wrap; }
+.md .md-lists > :last-child { margin-bottom: 0; }
+.md-p { margin: 0 0 10px; white-space: pre-wrap; }
 /* A note is a POST, not a document: headings mark sections, they do not open chapters. The step
-   between them is deliberately small — a report pasted into a note should not shout its own outline. */
-.md-h1, .md-h2, .md-h3 { color: var(--text-bright); font-weight: 600; margin: 14px 0 5px; line-height: 1.35; }
+   between them is deliberately small — a report pasted into a note should not shout its own outline.
+   What DOES carry the structure is the space above a heading: a section that starts flush against the
+   paragraph before it reads as one wall of text, which is the "squeezed" report the analyst reported.
+   #### and deeper collapse onto .md-h3 — the renderer clamps them. */
+.md-h1, .md-h2, .md-h3 { color: var(--text-bright); font-weight: 600; margin: 18px 0 6px; line-height: 1.35; }
 .md-h1 { font-size: var(--fs-xl); }
 .md-h2 { font-size: var(--fs-lg); }
-.md-h3 { font-size: var(--fs-base); letter-spacing: 0.02em; }
-.md ul, .md ol { margin: 0 0 9px; padding-left: 18px; }
-.md li { margin: 2px 0; }
-.md li > ul, .md li > ol { margin: 1px 0 2px; }
+.md-h3 { font-size: var(--fs-base); letter-spacing: 0.02em; color: var(--text-3); }
+.md ul, .md ol { margin: 0 0 10px; padding-left: 20px; }
+.md li { margin: 3px 0; padding-left: 2px; }
+/* the marker is punctuation, not content — it must not compete with the words next to it */
+.md li::marker { color: var(--muted-2, var(--muted)); }
+.md ol > li::marker { font-variant-numeric: tabular-nums; }
+.md li > ul, .md li > ol { margin: 3px 0 2px; }
+/* a checklist is a list of STATES: the box carries the level, so the bullet would be noise */
+.md-checklist { list-style: none; padding-left: 2px; }
+.md li.md-task { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.md-task__text { flex: 1 1 0; min-width: 0; }
+/* a sub-list under a checked item takes the whole row back, indented past the box */
+.md li.md-task > ul, .md li.md-task > ol { flex: 1 1 100%; margin-left: 19px; }
+.md-check {
+  flex: 0 0 auto; width: 11px; height: 11px; margin: 0; translate: 0 1px;
+  accent-color: var(--accent); cursor: default;
+}
+.md-del { text-decoration: line-through; color: var(--muted-2, var(--muted)); }
 .md a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-border); }
 .md a:hover { color: var(--accent-hover); }
 .md-code {
@@ -26,8 +44,8 @@
   color: var(--text-bright);
 }
 .md-pre {
-  margin: 0 0 6px;
-  padding: 8px 10px;
+  margin: 0 0 10px;
+  padding: 9px 11px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--panel-inset);
@@ -35,8 +53,8 @@
 }
 .md-pre code { font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--text); white-space: pre; }
 .md-quote {
-  margin: 0 0 6px;
-  padding: 2px 0 2px 10px;
+  margin: 0 0 10px;
+  padding: 3px 0 3px 12px;
   border-left: 2px solid var(--accent-border);
   color: var(--text-3);
 }
@@ -54,15 +72,47 @@
   border-radius: var(--radius-sm);
   background: var(--panel-inset);
 }
-.md-tablewrap { overflow-x: auto; margin: 0 0 6px; }
-.md-table { border-collapse: collapse; font-size: var(--fs-sm); min-width: 240px; }
-.md-table th, .md-table td {
+/* A table is the one block here that can be wider than the column it sits in, so the SCROLLER is
+   this wrapper — never the page, never each row (the repo's CSS gotcha, twice learned). The border
+   and the radius live on the wrapper too, because a radius on a table with collapsed borders is
+   ignored, and clipping the corners here also clips the header's fill. */
+.md-tablewrap {
+  overflow-x: auto;
+  margin: 0 0 10px;
+  max-width: 100%;
   border: 1px solid var(--border);
-  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--panel-inset);
+}
+.md-tablewrap:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.md-table {
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  min-width: 240px;
+  width: 100%;
+}
+/* Horizontal rules only. A full grid of 1px boxes is the "spreadsheet" look the analyst rejected
+   elsewhere in this app; rows are what the eye follows across a table of evidence. */
+.md-table th, .md-table td {
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 5px 10px;
   text-align: left;
   vertical-align: top;
 }
-.md-table th { color: var(--text-bright); font-weight: 600; background: var(--panel-2); }
+.md-table tbody tr:last-child th, .md-table tbody tr:last-child td { border-bottom: 0; }
+.md-table th {
+  color: var(--text-bright);
+  font-weight: 600;
+  background: var(--panel-2);
+  border-bottom-color: var(--border-strong);
+  white-space: nowrap;
+}
+.md-table tbody tr:nth-child(even) { background: color-mix(in srgb, var(--panel-2) 45%, transparent); }
+/* a cell holding an event id or a URL wraps rather than forcing the whole table wider than the panel */
+.md-table td { overflow-wrap: anywhere; }
+.md-table td .md-code { white-space: nowrap; }
 
 /* ── editor ── */
 .md-editor { position: relative; display: flex; flex-direction: column; gap: 4px; }

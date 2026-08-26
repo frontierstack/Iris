@@ -1718,7 +1718,12 @@ def _add_ioc(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
       "findings together. Cite the event ids behind it — they are attached to the note as clickable "
       "references and are verified before the note is saved. It is stored under your name, not the "
       "analyst's.",
-      {"text": {"type": "string", "description": "the note, Markdown allowed"},
+      {"text": {"type": "string", "description":
+                "the note body, rendered as Markdown in the case file — headings, short paragraphs, "
+                "`- ` bullets (nested with two spaces), **bold**, backticks around every id / IP / "
+                "host / path, `> ` quoted log lines, ``` fenced queries, `- [ ]` action checklists, "
+                "and | pipe | tables with a |---|--:|---| separator row whenever several things are "
+                "being compared across the same columns. Real newlines, never backslash-n"},
        "citedEventIds": {"type": "array", "items": {"type": "string"}, "description": "events this note is based on"},
        "kind": {"type": "string", "enum": ["finding", "summary"],
                 "description": "'finding' (default): one finding, recorded as soon as it is established; "

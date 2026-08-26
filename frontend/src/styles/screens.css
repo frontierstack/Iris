@@ -2753,7 +2753,9 @@ mark.hl {
   /* a full UTC timestamp is the point — it must not wrap onto a second line next to the author */
   white-space: nowrap;
 }
-.note__tools { margin-left: auto; display: flex; gap: 8px; opacity: 0; transition: opacity var(--t-fast); }
+/* DIMMED, never hover-hidden: a control that only exists on hover is unreachable by touch and
+   undiscoverable by everyone else. Same rule as the case cards and the search row actions. */
+.note__tools { margin-left: auto; display: flex; gap: 8px; opacity: .45; transition: opacity var(--t-fast); }
 .note:hover .note__tools, .note__tools:focus-within { opacity: 1; }
 .note__tools button {
   background: transparent; cursor: pointer;
@@ -2766,8 +2768,13 @@ mark.hl {
   line-height: 1.7;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  margin-top: 6px;
+  margin-top: 7px;
+  /* A note is prose and is read as prose. On a wide case screen an unbounded column runs to 150+
+     characters and the eye loses the line; a table or a code block inside it is exempt below. */
+  max-width: 86ch;
 }
+/* the blocks that legitimately want the whole width back */
+.note__text > .md-tablewrap, .note__text > .md-pre, .note__text > .md-img { max-width: 100%; }
 .note__edit { margin-top: 4px; display: flex; flex-direction: column; gap: 6px; }
 .note__edit textarea { font-size: var(--fs-base); resize: vertical; }
 .note__edit-actions { display: flex; justify-content: flex-end; gap: 6px; }
