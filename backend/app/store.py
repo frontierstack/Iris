@@ -346,7 +346,16 @@ class Store:
         # >0 while a BULK load (restore / library restore) is running: per-source detection re-runs and
         # index warms are suppressed, because both are O(whole pool) and doing them once per file made
         # restoring 40 library files quadratic (100% CPU for minutes with the API still unreachable).
-        self._bulk = 0
+        # Bulk mode belongs to the THREAD that opened it, not to the store. It was a shared
+        # counter, so an upload arriving while the background library load held it was buffered into
+        # `_pending` with the load's own events and stayed invisible until the load ended — minutes
+        # to hours on a 1.76 GB library. The Sources row said READY with N events the whole time,
+        # while search, the timeline, the entity graph and every citation returned nothing for that
+        # file: the silent-omission failure this project refuses everywhere else. The three callers
+        # (`restore`, `restore_library`, `load_pool_file`) all do their work inline on the thread that
+        # opens the context, so scoping it to that thread changes nothing for them and makes an
+        # upload behave exactly like an upload.
+        self._bulk_local = threading.local()
         # Events parsed during a bulk load that have not been merged into the pool yet, and the sources
         # they came from. See _append_events: 34 files used to mean 34 sorts + reindexes of the whole,
         # growing pool. They are merged in batches of BULK_FLUSH_EVENTS or at the end of the load.
@@ -624,15 +633,13 @@ class Store:
         Every one of those is O(the whole pool); paying them once per restored file is what turned a
         589 MB library into minutes of 100% CPU. The caller runs _run_detections() + bump() once at the end.
         """
-        with self.lock:
-            self._bulk += 1
+        local = self._bulk_local
+        local.depth = getattr(local, "depth", 0) + 1
         try:
             yield
         finally:
-            with self.lock:
-                self._bulk = max(0, self._bulk - 1)
-                last = self._bulk == 0
-            if last:
+            local.depth = max(0, getattr(local, "depth", 0) - 1)
+            if local.depth == 0:
                 self._flush_pending()      # whatever the last batch left behind lands now
 
     def _drop_derived(self) -> None:
@@ -649,6 +656,11 @@ class Store:
             ANOMALY_CACHE.invalidate()
         except Exception:
             pass
+
+    @property
+    def _bulk(self) -> int:
+        """Bulk-load depth for THIS thread (see `bulk_load`). Read-only: `bulk_load` owns it."""
+        return getattr(self._bulk_local, "depth", 0)
 
     def bump(self) -> None:
         self.version += 1
@@ -2697,7 +2709,9 @@ class Store:
         """Publish a source's events into the pool.
 
         In BULK mode the events are only buffered; `_flush_pending` merges them once the buffer passes
-        BULK_FLUSH_EVENTS or the load ends. Outside bulk mode (a normal upload) they merge at once.
+        BULK_FLUSH_EVENTS or the load ends. Outside bulk mode (a normal upload) they merge at once —
+        and "bulk mode" is a property of the CALLING THREAD, so an upload that lands while a library
+        load is running is merged immediately rather than waiting behind it.
 
         Called WITHOUT the store lock: merging + sorting + reindexing 2 M events takes seconds, and doing
         it under the lock is half of why `GET /api/case` stalled during ingest. The new list, index and

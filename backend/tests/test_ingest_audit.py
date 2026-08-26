@@ -277,3 +277,40 @@ def test_phase_two_keeps_every_cited_id_on_its_own_line(c, raw_only) -> None:
     assert set(after) == set(before), "phase 2 changed which ids exist, not just what they point at"
     moved = {i: (before[i], after[i]) for i in before if before[i] != after[i]}
     assert not moved, f"phase 2 moved {len(moved)} cited id(s) onto a different log line: {moved}"
+
+
+# ------------------------------------------- #13 an upload swallowed by a background library load
+def test_an_upload_during_a_library_load_reaches_the_pool_at_once() -> None:
+    """Bulk mode belongs to the thread that opened it, not to the whole store.
+
+    `_append_events` buffers into `_pending` whenever bulk mode is on, and the background library
+    load holds it for its entire duration — minutes to hours on a 1.76 GB library. A shared flag
+    therefore swallowed any upload that arrived meanwhile: the Sources row said READY with N events
+    while search, the timeline, the entity graph and every citation returned nothing for that file.
+    Not lost (the last `bulk_load` exit flushes), but invisible for the length of the load, which is
+    the silent-omission failure this project refuses everywhere else.
+    """
+    st = store_mod.Store()
+    st.pending = False
+    holding = threading.Event()
+    release = threading.Event()
+
+    def loader() -> None:
+        with st.bulk_load():          # stand in for restore_library holding bulk for the whole load
+            holding.set()
+            release.wait(10)
+
+    t = threading.Thread(target=loader, daemon=True)
+    t.start()
+    try:
+        assert holding.wait(5), "the loader never entered bulk mode"
+        st.add_file("dropped-mid-load.log", LOG, background_ok=False, sid="mid1", origin="library")
+        # the assertion that matters: searchable NOW, not when the load finishes
+        assert any(e.sourceId == "mid1" for e in st.events), \
+            "the upload is buffered behind the library load and absent from the pool"
+        assert st.event_index, "the pool index does not know about it either"
+    finally:
+        release.set()
+        t.join(10)
+
+    assert any(e.sourceId == "mid1" for e in st.events)
