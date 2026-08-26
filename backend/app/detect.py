@@ -1718,6 +1718,57 @@ def find_distinct_bursts(idx: Iterable[int], ts: np.ndarray, key_of: Callable[[i
 _SCREEN_CACHE: dict[tuple[str, ...], Optional["re.Pattern[str]"]] = {}
 
 
+# A NECESSARY substring for every string the three any-source patterns can match, per pattern.
+# Necessary, not sufficient: the gate lets a line through, the real regex decides. Getting one WRONG
+# in the other direction - a match with no listed literal - would silently drop detections, so
+# `tests/test_any_source_gate.py` asserts every alternative of every shipped pattern against it.
+#
+# Why this exists. The any-source section is the only pass not restricted to a log family, so it
+# reads every line in the workspace. It already screened with one joined alternation, but that
+# alternation is `re.I` over ~1,060 characters of pattern with no common prefix, so Python retries it
+# at every position of every line: measured 66.3 us on an ordinary 195-char proxy line that matches
+# NOTHING - 663 s of one core per whole-pool pass at 10 M events, for a section producing zero hits.
+# Three variants were measured on the same corpus: a Python `in` loop over the literals 10.7 us, the
+# same literals as an `re.I` alternation 50.7 us (the case-insensitivity is most of the cost, not the
+# alternation), and a plain alternation against an already-lowered line 6.7 us. That last one is a
+# 10x cut of the whole section: 663 s -> 67 s.
+_SECRET_LITERALS = ("akia", "asia", "-----begin", "eyj", "password", "passwd", "pwd", "apikey",
+                    "api_key", "api-key", "secret", "token", "xox", "gho_", "ghp_", "ghr_", "ghs_",
+                    "ghu_", "github_pat_", "sk_live_", "hooks.slack.com")
+_ENCODED_LITERALS = ("powershell", "certutil", "base64")
+_RANSOM_LITERALS = ("read_me", "readme", "decrypt", "recover", "restore", "encrypted", ".locky",
+                    ".crypt", ".enc", ".lockbit", ".conti", ".ryuk", ".revil", ".sodinokibi",
+                    ".djvu", ".wannacry", ".wncry", ".onion", ".makop", ".phobos", ".cerber")
+_GATE_LITERALS = {_SECRET.pattern: _SECRET_LITERALS,
+                  _ENCODED_CMD.pattern: _ENCODED_LITERALS,
+                  _RANSOM.pattern: _RANSOM_LITERALS}
+_GATE_CACHE: dict[tuple, "Optional[re.Pattern[str]]"] = {}
+
+
+def _literal_gate(patterns: list["re.Pattern[str]"]) -> Optional["re.Pattern[str]"]:
+    """A cheap necessary-substring filter for `patterns`, or None when one is not the shipped text.
+
+    An analyst may override any of these regexes, and a gate derived from the SHIPPED literals is
+    not necessary for a pattern nobody has seen. Overridden means no gate and today's cost - the
+    same "degrade, never disable" rule the sandbox and the param fallbacks follow. Match it against
+    a LOWERED line: `re.I` on an alternation is where the time goes.
+    """
+    key = tuple(p.pattern for p in patterns)
+    if key in _GATE_CACHE:
+        return _GATE_CACHE[key]
+    words: set[str] = set()
+    gate: Optional["re.Pattern[str]"] = None
+    if all(k in _GATE_LITERALS for k in key):
+        for k in key:
+            words.update(_GATE_LITERALS[k])
+        try:
+            gate = re.compile("|".join(re.escape(w) for w in sorted(words)))
+        except re.error:
+            gate = None
+    _GATE_CACHE[key] = gate
+    return gate
+
+
 def _screen(patterns: list["re.Pattern[str]"]) -> Optional["re.Pattern[str]"]:
     """One alternation over several rule patterns, used as a cheap pre-filter.
 
@@ -2349,10 +2400,15 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     universal = [u for u in universal if u[1].id not in _DISABLED]
     if universal:
         screen = _screen([u[0] for u in universal])
+        gate = _literal_gate([u[0] for u in universal])
         if screen is not None:
             for e in events:
                 raw = e.raw
-                if not raw or not screen.search(raw):
+                if not raw:
+                    continue
+                if gate is not None and not gate.search(raw.lower()):
+                    continue
+                if not screen.search(raw):
                     continue
                 for rx, rule, tactic in universal:
                     if not rx.search(raw):
