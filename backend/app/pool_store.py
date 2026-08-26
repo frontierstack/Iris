@@ -10,7 +10,7 @@ enrichment" for as long as it took.
 
 The unit is the staged file's MEMBER SOURCE, and the layout is a manifest plus one file per member:
 
-    cache/pool/<hash(name)>.manifest      {format, sig, sids}
+    cache/pool/<hash(name)>.manifest      {format, sig, sids, unparsed}
     cache/pool/<hash(name)>.<sid>.pkl     {format, sig, source, errors, events}
 
 Two reasons for that shape, both about not paying for the cache twice:
@@ -19,6 +19,12 @@ Two reasons for that shape, both about not paying for the cache twice:
   file, which on this workspace is the very cost being removed;
 * a staged archive with many members rewrites one small file per member instead of a large one per
   member. A hit needs the manifest AND every member it names: a partially cached archive parses.
+
+The manifest also carries `unparsed` — the sources that have no events to store and never will, i.e.
+the ERROR source reporting what could not be expanded. They belong there because they can never be
+written as members (`save_member` only takes a FINISHED source), and a manifest naming a source that
+can never be written is a manifest that can never be satisfied: one refused member made the whole
+container re-parse on every restart, forever. See `save_manifest`.
 
 What makes it safe rather than merely fast:
 
@@ -288,13 +294,34 @@ def _read_frames(path: Path, sig: str, with_events: bool) -> Optional[dict]:
 
 
 # --------------------------------------------------------------------------- save
-def save_manifest(name: str, sids: list[str]) -> bool:
-    """Which member sources a staged file expands into. Written when it is first parsed."""
+def save_manifest(name: str, sids: list[str], unparsed: Optional[list[dict]] = None) -> bool:
+    """Which member sources a staged file expands into. Written when it is first parsed.
+
+    `unparsed` carries the sources that have NO cacheable payload and never will: the ERROR source
+    that reports what could not be expanded (a password-protected member, a zip-slip entry, a member
+    the parser blew up on). Each is `{"sid", "source": <model_dump>, "member"}`, and it lives in the
+    manifest rather than in a member file because there is nothing to put in a member file — the
+    source has no events and can never reach `enriched`/`skipped`, so `save_member` refuses it
+    forever.
+
+    That refusal used to make the WHOLE container permanently uncacheable: `load()` needs the
+    manifest and every member it names, so a manifest naming a source that can never be written is a
+    manifest that can never be satisfied, and every good member inside the archive was re-expanded
+    and re-parsed on every single restart. On the analyst's library (1.76 GB across 680 staged files,
+    single archives over 3 GB) that is the entire cost this module exists to remove, paid in full,
+    forever, with no way to recover it.
+
+    Leaving the ERROR source OUT of the manifest instead would be worse: on a cache hit the container
+    is never opened, so nothing re-derives the refusal and a password-protected archive stops being
+    reported one restart after it was uploaded. A source that is absent from the Sources table is
+    indistinguishable from one that ingested cleanly.
+    """
     if not enabled() or not sids:
         return False
     sig = signature(name)
     return bool(sig) and _write(_dir() / f"{_stem(name)}.manifest",
-                                {"format": POOL_FORMAT, "sig": sig, "sids": list(sids), "at": time.time()})
+                                {"format": POOL_FORMAT, "sig": sig, "sids": list(sids),
+                                 "unparsed": list(unparsed or []), "at": time.time()})
 
 
 def save_member(name: str, src: Source, events: list[Event], errors: int, member: str = "",
@@ -354,9 +381,32 @@ def load(name: str) -> Optional[list[tuple[Source, list[Event], int, str]]]:
     man = _read(_dir() / f"{stem}.manifest", sig)
     if not man:
         return None
-    out: list[tuple[Source, list[Event], int]] = []
+    # Sources with nothing to store — see `save_manifest`. Keyed by sid so the manifest's own order
+    # still decides the order the members come back in.
+    unparsed = {str(r.get("sid") or ""): r for r in (man.get("unparsed") or []) if isinstance(r, dict)}
+    out: list[tuple[Source, list[Event], int, str]] = []
     for sid in man.get("sids") or []:
-        payload = _read_frames(_dir() / f"{stem}.{sid}.pkl", sig, with_events=True)
+        path = _dir() / f"{stem}.{sid}.pkl"
+        payload = _read_frames(path, sig, with_events=True)
+        if not payload and sid in unparsed and not path.exists():
+            # An ERROR source, restored from the manifest. The `not path.exists()` half is the part
+            # that matters: a member that was ERROR when the manifest was written can be REMAPPED
+            # later (`remap_source` keeps the sid), and that writes a real entry. The member file is
+            # therefore the authority whenever there is one, and a member file that exists but will
+            # not read is still a MISS — degrading to "this source failed" would report a parse
+            # failure on evidence that parsed.
+            try:
+                src = Source.model_validate(unparsed[sid]["source"])
+            except Exception as exc:   # noqa: BLE001
+                _log(f"{name}: member {sid} did not rebuild ({type(exc).__name__}: {exc}); re-parsing")
+                return None
+            # It must still be the thing it claimed to be. An entry that says ERROR but carries an
+            # event count would restore a row promising N events and hand over none — the same
+            # disagreement `save_member`'s length check refuses, and it costs the evidence silently.
+            if src.state != "ERROR" or int(getattr(src, "events", 0) or 0):
+                return None
+            out.append((src, [], 0, str(unparsed[sid].get("member") or "")))
+            continue
         if not payload:
             return None            # a partially cached archive is a miss, never a partial pool
         try:

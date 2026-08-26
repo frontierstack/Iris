@@ -60,6 +60,15 @@ STALE_UPLOAD_SEC = 600
 # all rather than a percentage nobody is producing — "parsing, no detail" is honest, "0 %" is not.
 PROGRESS_PLACEHOLDER_SEC = 30
 
+# How often the bytes-in-flight PATCH may rewrite jobs.json. That write serialises the WHOLE registry,
+# and the tab pushes a tick per file per ~900 ms: measured here, one tick costs 27.65 ms with 680 rows in
+# the registry (0.4 ms with 10), all of it under the registry lock, on the hot path of the upload it is
+# reporting. `received` is still persisted — an interrupted transfer's row says how far it got, and
+# tests/test_upload_jobs.py pins that — just not once per tick per file. The floor is registry-WIDE,
+# because one save covers every job's latest byte count however many lanes are pushing, which is what
+# makes it flat in the number of files being dropped rather than linear in it.
+PROGRESS_SAVE_SEC = 2.0
+
 # Detection at library-stage time reads a BOUNDED prefix: fingerprinting a 263 MB file must not cost a
 # full pass. registry.fingerprint() only ever looks at the first 256 KB of text anyway.
 PROBE_BYTES = 2 * 1024 * 1024
@@ -306,6 +315,9 @@ class JobRegistry:
         self.lock = threading.RLock()
         self._jobs: dict[str, Job] = {}
         self._loaded_from: Optional[Path] = None
+        # when the bytes-in-flight path last persisted; 0 means "nothing of it is on disk yet", so the
+        # first tick after a load or a wipe always writes
+        self._progress_saved_ts = 0.0
 
     # ------------------------------------------------------------- persistence
     @staticmethod
@@ -341,6 +353,7 @@ class JobRegistry:
                 except (TypeError, ValueError):
                     continue
             self._loaded_from = path
+            self._progress_saved_ts = 0.0
 
     def _save_locked(self) -> None:
         path = self._path()
@@ -364,9 +377,13 @@ class JobRegistry:
             self.load()
 
     # ------------------------------------------------------------------ writes
+    @staticmethod
+    def _new_job(file: str, size: int, target: str, case_id: str) -> Job:
+        return Job(id=uuid.uuid4().hex[:12], file=file or "upload", size=max(0, int(size or 0)),
+                   target="library" if target == "library" else "case", caseId=case_id or "")
+
     def create(self, file: str, size: int, target: str = "case", case_id: str = "") -> Job:
-        job = Job(id=uuid.uuid4().hex[:12], file=file or "upload", size=max(0, int(size or 0)),
-                  target="library" if target == "library" else "case", caseId=case_id or "")
+        job = self._new_job(file, size, target, case_id)
         with self.lock:
             self._ensure_loaded()
             self._jobs[job.id] = job
@@ -374,12 +391,53 @@ class JobRegistry:
             self._save_locked()
         return job
 
+    def create_many(self, decls: Iterable[tuple[str, int]], target: str = "case",
+                    case_id: str = "") -> list[Job]:
+        """Declare a whole drop in one pass: append every row, then prune ONCE and save ONCE.
+
+        `_save_locked()` serialises and rewrites the entire registry, so declaring N files through
+        `create()` in a loop is N rewrites of a file that is N rows long — quadratic, under the
+        registry lock, before a single byte has moved. Measured on this host (local NTFS, throwaway
+        data dir) for one `POST /api/jobs`: 100 files 0.30 s, 200 files 1.03 s, 300 files 1.97 s,
+        **680 files 9.04 s** — the per-file cost climbing from 3.0 to 13.3 ms is the shape of it. The
+        analyst really does drop a few hundred files at once (the failed drop of 2026-08-25), and this
+        is the ONE request whose whole job is to make that drop visible immediately.
+
+        The end state is identical to the loop: the prune only ever removes FINISHED rows, and which
+        rows those are cannot change during the batch (every job appended here is `queued`, i.e.
+        active). Running it once instead of N times therefore keeps the cap enforced and keeps the
+        rule that made it safe — enforcing MAX_JOBS against ACTIVE rows once deleted the queued jobs
+        of the very batch being uploaded, and every `PATCH /api/jobs/{id}` from that tab then 404'd.
+        """
+        jobs = [self._new_job(f, s, target, case_id) for f, s in decls]
+        if not jobs:
+            return []
+        with self.lock:
+            self._ensure_loaded()
+            for job in jobs:
+                self._jobs[job.id] = job
+            self._prune_locked()
+            self._save_locked()
+        return jobs
+
     def _touch(self, job: Job) -> None:
         job.updated_ts = time.time()
 
     def progress(self, job_id: str, received: int) -> Optional[Job]:
         """Bytes-in-flight, reported by the uploading tab. Purely client-side knowledge — the server only
-        sees the body once it is complete — so it is stored, not trusted for correctness."""
+        sees the body once it is complete — so it is stored, not trusted for correctness.
+
+        The write back is COALESCED (`PROGRESS_SAVE_SEC`), not dropped. It still has to reach disk —
+        a restart buries this row as interrupted and `received` is what says how far the transfer got
+        — but a rewrite of the whole registry per tick per file is how a 680-file drop turned the
+        cheapest endpoint in the app into 27.65 ms of held lock, several times a second, for the
+        duration of the drop. One save covers every job, so the floor is registry-wide and the cost
+        stops scaling with the size of the drop.
+
+        A REVIVE is exempt and always writes at once. It turns a terminal row back into an active one,
+        and left in memory only a restart would report "this transfer never started" about a transfer
+        that was demonstrably sending bytes — a wrong diagnosis, not a stale number.
+        """
         with self.lock:
             self._ensure_loaded()
             job = self._jobs.get(job_id)
@@ -391,11 +449,14 @@ class JobRegistry:
             # matters because the bury and the transfer race: the tab reaches file #9 seconds after the
             # watchdog gave up on it, and without this the row reads "failed" for the whole upload and
             # only corrects itself when the ingest request finally lands.
+            was_buried = job.stale
             self._revive_locked(job)
             job.received = max(job.received, min(int(received or 0), job.size or int(received or 0)))
             job.state = "uploading"
             self._touch(job)
-            self._save_locked()
+            if was_buried or job.updated_ts - self._progress_saved_ts >= PROGRESS_SAVE_SEC:
+                self._progress_saved_ts = job.updated_ts
+                self._save_locked()
             return job
 
     def _revive_locked(self, job: Job) -> None:
@@ -529,6 +590,7 @@ class JobRegistry:
             except OSError:
                 pass
             self._loaded_from = self._path()
+            self._progress_saved_ts = 0.0   # nothing is on disk now, so the next tick must write
             return n
 
     def clear_finished(self) -> int:

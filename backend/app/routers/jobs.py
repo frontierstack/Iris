@@ -47,12 +47,17 @@ def create_jobs(body: JobCreate) -> dict:
     """Register uploads BEFORE the bytes move, so another tab sees them from the first byte.
 
     Creating a job never touches the store and never materialises a case — it is bookkeeping only.
+
+    ONE call for the whole drop, never `create()` per file: each of those rewrites the entire registry,
+    so declaring the analyst's real 680-file drop cost 680 rewrites of a 680-row file under the registry
+    lock — 9.0 s measured, before a byte had moved, in front of the request that exists to make the drop
+    visible immediately. See `JobRegistry.create_many`.
     """
     if not body.files:
         raise HTTPException(400, "no files declared")
     target = "library" if body.target == "library" else "case"
     case_id = "" if (target == "library" or STORE.pending) else STORE.case_id
-    jobs = [REGISTRY.create(f.file, f.size, target, case_id) for f in body.files]
+    jobs = REGISTRY.create_many(((f.file, f.size) for f in body.files), target, case_id)
     return {"jobs": [j.live() for j in jobs]}
 
 

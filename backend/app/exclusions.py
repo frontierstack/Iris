@@ -235,8 +235,29 @@ class Matcher:
         return ""
 
     def counts(self) -> dict[str, int]:
+        """What each exclusion actually suppressed on this pass, counted ONCE per exclusion.
+
+        A rule-scoped exclusion is registered under EVERY rule id it names — one `_Compiled` object
+        referenced from several `_by_rule` buckets, deliberately, so `excluded()` can look up a rule
+        and get only the exclusions that scope to it. A flat walk of those buckets therefore visits
+        the SAME counter once per named rule, and the old `+ c.hits` per visit reported `hits x
+        len(ruleIds)`. Measured: one suppressed event on an exclusion scoped to three rules read as 3.
+
+        That is not a cosmetic count. It lands on `Exclusion.suppressed` and on the `suppressed`
+        total of GET /api/exclusions — the one screen whose whole job is to make suppression
+        visible — and it tells the analyst a suppression is hiding several times more evidence than
+        it is. Rule 2 of this module's docstring ("a suppression that cannot be seen is a lie") is
+        just as broken by a number that is wrong as by no number at all.
+
+        Dedupe on the OBJECT, not on the id: the id is the reporting key, and two buckets holding
+        the same compiled exclusion must be counted once between them.
+        """
         out: dict[str, int] = {}
-        for c in list(self._all) + [x for v in self._by_rule.values() for x in v]:
+        seen: set[int] = set()
+        for c in (*self._all, *(x for v in self._by_rule.values() for x in v)):
+            if id(c) in seen:
+                continue
+            seen.add(id(c))
             out[c.id] = out.get(c.id, 0) + c.hits
         return out
 

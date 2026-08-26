@@ -328,6 +328,17 @@ async def ai_review(body: AiReviewBody) -> StreamingResponse:
 # ------------------------------------------------------------------ v1 compatibility
 @router.get("/{name:path}", response_model=Entity)
 def entity(name: str, scope: str = Query("all", pattern="^(all|case)$")) -> Entity:
+    # An EMPTY name is not an entity lookup, and it must be refused before `STORE.analysis` is touched.
+    # `{name:path}` matches the empty segment, so `GET /api/graph/` — a trailing slash, which is what a
+    # hand-written URL, a joined base path or a proxy rewrite produces — landed here rather than on the
+    # typed graph one route up, and `analysis()` is the BLOCKING accessor: it builds the whole-pool
+    # correlation analysis on the request thread (minutes at 1.2 M events, with every other request
+    # queued behind it) to answer a question nobody asked. Same class as the reason /graph/anomalies is
+    # registered above this route: a path segment that cannot mean anything reaching a route that
+    # derives something expensive. The guard is FIRST in the body, before any store call, on purpose.
+    if not name.strip():
+        raise HTTPException(404, "no entity name — the typed entity graph is GET /api/graph "
+                                 "(no trailing slash); one entity is GET /api/graph/{name}")
     a = STORE.analysis(scope)
     ent = a["entity_map"].get(name)
     if ent is None:

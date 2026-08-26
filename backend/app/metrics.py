@@ -40,9 +40,43 @@ _last_parsed_events = 0
 _last_parsed_bytes = 0
 _last_ts = time.monotonic()
 
+# GPU source selection. Two failures live here and they are NOT the same failure, which is the whole
+# point of keeping them apart:
+#
+#   * pynvml is not installed. A module cannot appear under a running process, so that is permanent
+#     and it is right to stop trying (`_nvml_absent`).
+#   * an NVML CALL failed — a driver reset, an XID, the device briefly off the bus, a container that
+#     started before the driver did. That is TRANSIENT, and the old code latched it permanently:
+#     one exception anywhere in the sample set `_nvml_ok = False` for the life of the process, after
+#     which every 2 s tick fell through to `nvidia-smi`. Measured on this host, 38 ms per spawn
+#     (Windows; WSL and the container are slower) — a process create every 2 s, forever, ~2 % of a
+#     core, for a GPU that had recovered seconds after the blip. So a call failure backs off and is
+#     RETRIED instead: 30 s, doubling to a 300 s ceiling, reset the moment a sample succeeds.
+#
+# The handle is dropped on failure so the retry re-runs nvmlInit() — that is what lets a driver
+# that comes back be picked up rather than being queried through a dead handle.
+#
+# Nothing is ever cached across a failure. A failed sample reports NO gpus, never the last good
+# numbers: a stale utilisation figure presented as live is a lie about the machine, and the analyst
+# reads these charts to answer "is it using the GPU?".
+NVML_RETRY_MIN = 30.0
+NVML_RETRY_MAX = 300.0
+SMI_RETRY_MIN = 30.0
+SMI_RETRY_MAX = 300.0
+
 _nvml: Any = None
-_nvml_ok: Optional[bool] = None
+_nvml_absent = False
+_nvml_retry_at = 0.0
+_nvml_backoff = 0.0
+# The same backoff for the fallback, for the same reason at a higher cost: `nvidia-smi` missing or
+# failing was re-probed (a shutil.which walk of PATH plus a spawn) on every 2 s tick.
+_smi_retry_at = 0.0
+_smi_backoff = 0.0
 _proc: Any = None
+
+
+def _backoff_next(current: float, lo: float, hi: float) -> float:
+    return min(hi, max(lo, current * 2.0))
 
 
 def record_parsed(events: int, nbytes: int) -> None:
@@ -87,13 +121,19 @@ def finish_progress(key: str, events: int, nbytes: int) -> None:
 
 
 def _nvml_gpus() -> Optional[list[dict[str, Any]]]:
-    global _nvml, _nvml_ok
-    if _nvml_ok is False:
+    global _nvml, _nvml_absent, _nvml_retry_at, _nvml_backoff
+    if _nvml_absent:
+        return None
+    if _nvml_retry_at and time.monotonic() < _nvml_retry_at:
         return None
     try:
         if _nvml is None:
-            import pynvml  # type: ignore
-            pynvml.nvmlInit()
+            try:
+                import pynvml  # type: ignore
+            except Exception:
+                _nvml_absent = True      # not installed; that cannot change under a running process
+                return None
+            pynvml.nvmlInit()            # CAN change: a driver that comes up later, a GPU attached
             _nvml = pynvml
         pynvml = _nvml
         out = []
@@ -119,25 +159,46 @@ def _nvml_gpus() -> Optional[list[dict[str, Any]]]:
             out.append({"index": i, "name": name, "util": int(util.gpu), "memUtil": int(util.memory),
                         "memUsedMB": int(mem.used // (1024 * 1024)), "memTotalMB": int(mem.total // (1024 * 1024)),
                         "tempC": temp, "powerW": power, "smClockMHz": clock})
-        _nvml_ok = True
+        _nvml_retry_at, _nvml_backoff = 0.0, 0.0     # a good sample clears the whole backoff
         return out
     except Exception:
-        _nvml_ok = False
+        # Transient by assumption, and the assumption is the cheap one to be wrong about: retrying a
+        # genuinely dead NVML costs one call every 300 s, while latching a live one off costs a
+        # subprocess every 2 s for the life of the container.
+        _nvml = None                                  # re-init on the retry, do not reuse the handle
+        _nvml_backoff = _backoff_next(_nvml_backoff, NVML_RETRY_MIN, NVML_RETRY_MAX)
+        _nvml_retry_at = time.monotonic() + _nvml_backoff
         return None
 
 
+def _smi_fail() -> None:
+    global _smi_retry_at, _smi_backoff
+    _smi_backoff = _backoff_next(_smi_backoff, SMI_RETRY_MIN, SMI_RETRY_MAX)
+    _smi_retry_at = time.monotonic() + _smi_backoff
+
+
 def _smi_gpus() -> Optional[list[dict[str, Any]]]:
+    global _smi_retry_at, _smi_backoff
+    if _smi_retry_at and time.monotonic() < _smi_retry_at:
+        return None
     exe = shutil.which("nvidia-smi")
     if not exe:
+        _smi_fail()
         return None
     try:
         proc = subprocess.run(
             [exe, "--query-gpu=index,name,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw,clocks.sm",
              "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=4)
     except Exception:
+        _smi_fail()
         return None
     if proc.returncode != 0:
+        _smi_fail()
         return None
+    # A working nvidia-smi is sampled at the full 2 s cadence deliberately: the spawn is the cost of
+    # the only GPU reading available on this host, and coarsening it would put a stale number on a
+    # live chart. Only FAILURE backs off.
+    _smi_retry_at, _smi_backoff = 0.0, 0.0
     out = []
     for line in proc.stdout.splitlines():
         p = [x.strip() for x in line.split(",")]

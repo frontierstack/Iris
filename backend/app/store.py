@@ -1166,7 +1166,28 @@ class Store:
             # Which members this file expands into. Written here because this is the only place that
             # knows: an archive's member list needs the archive expanded, which is what a cache HIT
             # exists to avoid doing again.
-            pool_store.save_manifest(name, [s.id for s in out])
+            #
+            # The ERROR source above rides IN the manifest, because there is nothing else to put it
+            # in. It has no events, so it can never be `enriched`/`skipped`, so `save_member` refuses
+            # it forever — and `pool_store.load` needs every sid the manifest names. One refused
+            # member therefore made the whole container permanently uncacheable: the archive was
+            # re-expanded and every GOOD member inside it re-parsed on every restart, which on this
+            # library (1.76 GB / 680 staged files, single archives over 3 GB) is the entire cost the
+            # cache exists to remove. Dropping the ERROR source from the manifest instead is the
+            # obvious fix and it is wrong: a cache hit never opens the container (`restore_library`
+            # goes straight past this method), so nothing re-derives the refusal and a
+            # password-protected archive stops being reported one restart later — silent omission,
+            # which is the one thing this project will not trade for speed.
+            #
+            # Only `events == 0`: a source that is ERROR but holds lines (a phase-2 failure keeps its
+            # raw events, deliberately) has a payload, so it stays an ordinary member and the
+            # container misses until that payload is cached. A manifest row promising events it does
+            # not hold is the disagreement `save_member`'s length check already refuses.
+            with self.lock:
+                unparsed = [{"sid": s.id, "source": s.model_dump(),
+                             "member": self.source_member.get(s.id, "")}
+                            for s in out if s.state == "ERROR" and not s.events]
+            pool_store.save_manifest(name, [s.id for s in out], unparsed)
         return out
 
     def source_bytes(self, sid: str) -> bytes:
@@ -1268,6 +1289,24 @@ class Store:
         out: list[Source] = []
         events: list[Event] = []
         for src, evs, errors, member in members:
+            if src.state == "ERROR" and not evs and not src.events:
+                # The refusal the container came with (see `_add_library_members`). It never had a
+                # parser — `_failed_source` registers no `source_parsers` entry either — so it is
+                # registered exactly as that method does it and nothing else. Restoring it is what
+                # keeps "a password-protected archive is reported, never silently skipped" true
+                # across a restart, now that the container is no longer re-opened to re-derive it.
+                with self.lock:
+                    if src.id in self.sources:
+                        continue
+                    self.sources[src.id] = src
+                    self.source_paths[src.id] = path
+                    self.source_origin[src.id] = "library"
+                    self.source_library[src.id] = name
+                    if member:
+                        self.source_member[src.id] = member
+                    self.source_order.append(src.id)
+                out.append(src)
+                continue
             parser = parser_by_name(src.parser)
             if parser is None:
                 # The parser that produced these events is not in this build. Re-parse rather than

@@ -5,7 +5,7 @@ import faulthandler
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import APIRouter, FastAPI, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from typing import Any
@@ -111,6 +111,17 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="Iris", version=VERSION, lifespan=lifespan)
 
 
+# Formats that are ALREADY compressed, so gzip is pure loss. Measured on this bundle's own
+# frontend/dist/assets: 263 font files, 3,235 KB of .woff/.woff2, come out of gzip level 6 at
+# 3,230 KB — i.e. the .woff2 half gets BIGGER (1,481 KB -> 1,484 KB) — for ~100 ms of event-loop
+# time in which no other request in the process is served. That is the same arithmetic that took
+# compresslevel from 9 to 6; here it says do not compress these at all. The two files under
+# /assets that are worth it are the bundle and the stylesheet (below).
+INCOMPRESSIBLE_SUFFIXES = (".woff", ".woff2", ".ttf", ".otf", ".eot", ".png", ".jpg", ".jpeg",
+                           ".gif", ".webp", ".avif", ".ico", ".mp4", ".webm", ".mp3", ".ogg",
+                           ".zip", ".gz", ".br", ".zst", ".pdf")
+
+
 class SelectiveGZip:
     """GZipMiddleware for a fixed set of GET paths (prefix match), plain pass-through for the rest."""
 
@@ -127,10 +138,24 @@ class SelectiveGZip:
     async def __call__(self, scope, receive, send):
         if scope.get("type") == "http" and scope.get("method") == "GET":
             path = scope.get("path", "")
-            if any(path == p or path.startswith(p + "/") or path.startswith(p + "?") for p in self.paths):
+            if any(path == p or path.startswith(p + "/") or path.startswith(p + "?") for p in self.paths) \
+                    and not path.lower().endswith(INCOMPRESSIBLE_SUFFIXES) and not self._ranged(scope):
                 await self.gz(scope, receive, send)
                 return
         await self.app(scope, receive, send)
+
+    @staticmethod
+    def _ranged(scope) -> bool:
+        """A Range request must never be gzipped.
+
+        StaticFiles honours Range and answers 206 with a Content-Range describing offsets into the
+        IDENTITY bytes. Starlette's GZipMiddleware (0.41.3) does not look at the status or at
+        Content-Range: it would compress that slice and stamp `Content-Encoding: gzip` beside a
+        Content-Range that no longer describes it — a corrupt response, not a slow one. No /api path
+        serves ranges, so this costs nothing there; it exists because /assets does.
+        """
+        return any(k == b"range" for k, _ in scope.get("headers") or ())
+
 
 # NEVER `allow_origins=["*"]`. Iris is unauthenticated, so the wildcard is not a convenience — it is a
 # standing grant to every page the analyst has open to read the whole evidence pool, and (through the
@@ -145,8 +170,17 @@ app.add_middleware(CORSMiddleware, allow_origins=security.cors_origins(), allow_
 # 5-8x, which matters through Docker Desktop's port proxy and over any link that is not loopback.
 # Starlette's GZipMiddleware would also wrap the SSE streams (the AI investigator, the graph review),
 # buffering tokens inside zlib — so it is applied only to GET requests on an explicit list of paths.
+#
+# `/assets` is on the list too, and it is the app's OWN first paint: every JSON endpoint was gzipped
+# while the bundle that renders them was not. Measured on this build, ASGI bytes actually sent —
+# index-*.js 634,279 -> 190,868 B and index-*.css 271,244 -> 66,853 B, so first paint goes from
+# 905,523 B to 257,721 B, a 3.5x cut on the one request every session starts with. It is safe
+# to compress precisely because those files are CONTENT-HASHED and served `immutable`: the name changes
+# when the bytes do, so a cached compressed copy can never be the wrong copy. The fonts that share the
+# directory are excluded by INCOMPRESSIBLE_SUFFIXES and Range requests by `_ranged` — see both above.
 app.add_middleware(SelectiveGZip, paths=("/api/graph", "/api/events", "/api/timeline", "/api/anomalies",
-                                         "/api/library", "/api/case", "/api/jobs", "/api/ai/runs"),
+                                         "/api/library", "/api/case", "/api/jobs", "/api/ai/runs",
+                                         "/assets"),
                    minimum_size=2048)
 
 # Added last, so it is the OUTERMOST layer: it must refuse a cross-site write before CORSMiddleware can
@@ -183,6 +217,19 @@ if FRONTEND_DIST.exists() and (FRONTEND_DIST / "index.html").exists():
 
     @app.get("/{full_path:path}", include_in_schema=False)
     def spa(full_path: str, request: Request) -> FileResponse:
+        # An /api path that NO router claimed is a mistyped or removed endpoint, and it must say so.
+        # This catch-all is registered after the API router, so it used to answer `GET /api/nope` with
+        # 200 text/html and the whole 754-byte index.html — measured. Every caller that checks
+        # `response.ok` then hands a page of HTML to a JSON parser, and the one fact that would have
+        # explained it ("that endpoint does not exist") never reaches anybody: the SPA reports a parse
+        # error, the MCP bridge reports a protocol error, an AI tool reports a tool failure, and curl
+        # prints a web page. Nothing here can affect a REAL client-side route (/cases, /search, /graph)
+        # — those do not begin with `api/`. Non-GET methods on an unknown /api path already answer 405
+        # (this route is GET-only, so Starlette partial-matches it); that is at least a JSON error the
+        # caller cannot mistake for a page, and widening this route to every method to turn it into a
+        # 404 would ALSO turn the legitimate 405 on `POST /api/health` into one.
+        if full_path == "api" or full_path.startswith("api/"):
+            raise HTTPException(404, f"no such endpoint: /{full_path[:200]}")
         candidate = FRONTEND_DIST / full_path
         try:
             inside = candidate.resolve().is_relative_to(FRONTEND_DIST.resolve())

@@ -64,10 +64,18 @@ _ANCHORS = 3
 _FIND_BYTES_PER_HIT = 160
 _FIND_PROBE = 50_000
 _FIND_MIN_CAP = 200_000
-# How far past the requested page the SCAN path keeps counting before it reports a floor instead of a
-# total. Enough that the hit count is useful ("10,000+") and small enough that a cold query answers in
-# about a second rather than three minutes.
+# How far past the requested page the SCAN path — and the vector path's CONFIRM pass — keeps counting
+# before it reports a floor instead of a total. Enough that the hit count is useful ("10,000+") and
+# small enough that a cold query answers in about a second rather than three minutes.
 _SCAN_COUNT_AHEAD = 10_000
+# How many candidate positions the CONFIRM pass converts to Python ints at a time.
+# `order.tolist()` over the WHOLE candidate array materialised one Python int per candidate before the
+# first row was even looked at — 835,328 of them on the pool measured below, millions on the analyst's.
+# A chunked `.tolist()` keeps numpy's fast bulk conversion (per-element iteration of an ndarray yields
+# numpy scalars and is several times slower) while bounding the transient to a few thousand ints, and
+# it is what lets the budget below actually STOP early instead of stopping after the materialisation
+# it was meant to avoid. 8192 is large enough that the per-chunk overhead is noise.
+_CONFIRM_CHUNK = 8192
 # How many events the index may be SHORT by before it is thrown away instead of kept. Every merge
 # bumps the store version, so a single small file landing mid-ingest used to invalidate the whole
 # packed buffer and drop every query onto the scan path - measured on a 400,000-event pool, three
@@ -143,6 +151,31 @@ class SearchIndex:
 _SEP_S = _SEP.decode("latin-1")
 _FSEP_S = _FSEP.decode("latin-1")
 _END_S = _END.decode("latin-1")
+
+# The characters that JOIN two distinct strings inside one packed document — and which `query.py`'s
+# free-text predicate therefore never matches across.
+#
+# `_doc` renders an event as one buffer, but the predicate (`query._atom_pred.free`) tests the needle
+# against each PART on its own: `needle in e.raw`, `needle in k`, `needle in v`, `needle in x` per
+# entity, `needle in d.id` / `d.name`. So a needle that spans a join matches the RENDERING and matches
+# no event. Three joins exist and all three are reachable from the search box:
+#   `=`   between a field key and its value (`"status=403"` is packed, `status` and `403` are what the
+#         predicate sees). Measured on a 3,000-event enriched JSONL pool: `status=403` answered 1,000
+#         on the vector path and 0 on the scan path, stamped `totalExact: true`.
+#   ` `   between entities (`" ".join(e.entities)`) and between a detection's id and its name.
+#         `"10.0.0.1 alice"` answered 429 against 0; `"SIGMA-AUTH-0111 failed login"` 600 against 0.
+#   \x1e / \x1f / \x00  between parts, between field entries, and between one event's document and the
+#         next — so a needle carrying one can match across two EVENTS.
+# The needle is not the FIX for any of this, only the trigger: the mask stays a legitimate upper bound,
+# it just has to be DECLARED one (`self.exact = False`) so the confirm pass filters it, which is the
+# invariant this module is built on. Under NOT it is not even an upper bound — complementing a superset
+# gives a SUBSET, i.e. real matches silently missing (`NOT status=403` answered 2,000 where the pool
+# holds 3,000) — so a negated cross-join atom widens to all-true and lets the predicate do the work.
+_DOC_JOINS = ("=", " ", _SEP_S, _FSEP_S, _END_S)
+
+
+def _crosses_doc_join(value: str) -> bool:
+    return any(c in value for c in _DOC_JOINS)
 
 
 def _doc(e: Event) -> bytes:
@@ -557,12 +590,30 @@ class _Engine:
         assert node.tok is not None
         f, v = atom_parts(node.tok)
         if f is None:
+            # Free text is EXACT — `contains` over the packed document reproduces the predicate's
+            # part-by-part test — for every needle that lies inside ONE part. A needle carrying a join
+            # character does not: see `_DOC_JOINS`.
+            if _crosses_doc_join(v):
+                self.exact = False
+                return self.all_true() if negate else self.contains(v.encode("utf-8", "replace"))
             mask = self.contains(v.encode("utf-8", "replace"))
             return ~mask if negate else mask
         if f == "sev":
             mask = self.sev_mask({x for x in v.split(",")})
             return ~mask if negate else mask
         if f == "source" and "*" not in v:
+            # `source_mask` is SUBSTRING over "<source><SEP><file><SEP><sourceId>", which is what the
+            # DSL means by `source:foo` — but only once the value is long enough that `query.py` means
+            # it too. `_field_pred.match` is `s == v or (len(v) >= 3 and v in s)`, so under three
+            # characters the predicate is EQUALITY and the mask is a plain upper bound that nothing was
+            # confirming: on a pool of one source named "jsonl"/"access.jsonl", `source:js` answered the
+            # whole pool (3,000) as an exact result where the scan path answers 0, and `NOT source:js`
+            # answered 0 where the scan path answers 3,000 — the complement of a superset is a subset,
+            # so that one was real evidence going missing, not just a wrong count.
+            # A value carrying the label separator could match across it; same treatment, same reason.
+            if len(v) < 3 or _SRC_SEP in v:
+                self.exact = False
+                return self.all_true() if negate else self.source_mask(v)
             mask = self.source_mask(v)
             return ~mask if negate else mask
         if f == "ts":
@@ -801,21 +852,59 @@ def search(events: list[Event], ts: np.ndarray, version: int, q: str, lo: int, h
         # triple), so they no longer force the confirm pass. Only an approximate ATOM in the query
         # does — that is what `eng.exact` means.
         if exact:
+            # NO budget here, deliberately. This branch does no Python walk at all: the total is a
+            # popcount of the mask and the page is a slice, so it is already O(page) — that is the
+            # whole point of `source_mask_exact` and of `eng.exact`. Adding a count-ahead ceiling here
+            # would degrade an EXACT total for no saving whatsoever.
             total = int(cand_idx.shape[0])
             for i in order[offset:offset + limit].tolist():
                 rows.append(events[i])
         else:
-            for i in order.tolist():
-                e = events[i]
-                if src_set and e.source not in src_set and e.sourceId not in src_set and e.file not in src_set:
-                    continue
-                if sev_set and e.sev not in sev_set:
-                    continue
-                if not pred(e):
-                    continue
-                if offset <= total < offset + limit:
-                    rows.append(e)
-                total += 1
+            # The CONFIRM pass: an approximate ATOM in the query (a `field:value` upper bound, a `ts:`
+            # atom, a negated field) means the mask is a superset, so every candidate has to go
+            # through the exact Python predicate. That walk had NO page-ahead budget, so a 25-row page
+            # confirmed the entire candidate set — the same "count matches nobody asked for" bug the
+            # scan path below was already fixed for, in the branch that is supposed to be the fast one.
+            # Measured on synthetic pools, numpy, one page of 25 rows, whole request end to end:
+            #     1,000,000 events  q=status:200   835,328 candidates   663 ms -> 395 ms
+            #     1,000,000 events  q=user:alice   500,000 candidates   443 ms -> 308 ms
+            #       300,000 events  q=status:200   257,601 candidates   228 ms -> 139 ms
+            # The MASK BUILD is the unchanged remainder of each of those (351 ms at 1 M events, 115 ms
+            # at 300 k — that is what the EXACT branch costs on the same pool), so what this removes is
+            # the walk itself: ~0.4 us per candidate, linear in the candidate count and constant after.
+            # At the analyst's 11.4 M-event scale a broad `field:value` is ~9.5 M candidates, i.e.
+            # SECONDS of Python per page of 25 rows.
+            # Same stop condition as the scan path, and the same honesty about it: the ROWS are
+            # unchanged (the budget can only be reached after the page is filled, because
+            # `budget >= offset + limit`), only the TOTAL degrades to a floor with `totalExact: false`,
+            # which the UI already renders as "10,000+". A number an analyst might quote has to be
+            # exact or VISIBLY not, never silently approximate.
+            #
+            # The rolling-tail positions appended above are unaffected: they are pre-confirmed, they
+            # are simply re-confirmed here like any other candidate, and stopping the count early can
+            # never drop one from a page it belongs on.
+            want = offset + limit
+            budget = max(want + _SCAN_COUNT_AHEAD, _SCAN_COUNT_AHEAD)
+            stop = False
+            n_cand = int(order.shape[0])
+            for s in range(0, n_cand, _CONFIRM_CHUNK):
+                for i in order[s:s + _CONFIRM_CHUNK].tolist():
+                    e = events[i]
+                    if src_set and e.source not in src_set and e.sourceId not in src_set and e.file not in src_set:
+                        continue
+                    if sev_set and e.sev not in sev_set:
+                        continue
+                    if not pred(e):
+                        continue
+                    if offset <= total < want:
+                        rows.append(e)
+                    total += 1
+                    if total >= budget:
+                        exact_total = False
+                        stop = True
+                        break
+                if stop:
+                    break
     else:
         # The SCAN path: no index, so every event goes through the Python predicate. On an 11 M-event
         # pool one query measured 172 s, and it spent nearly all of it counting matches the caller

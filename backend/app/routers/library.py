@@ -84,6 +84,115 @@ class LibraryFile(BaseModel):
 _INDEX_LOCK = threading.RLock()
 
 
+# ---------------------------------------------------------------------------
+# Iris's own bookkeeping vs the analyst's EVIDENCE
+#
+# LIBRARY_DIR is walked as evidence: every file directly in it is taken to be a staged log — listed on
+# the Sources page, and PARSED INTO THE WORKSPACE POOL by store.restore_library() through
+# library_entries() below. So anything Iris itself leaves lying in that directory becomes a source with
+# events, entities and possibly detections: evidence that came from no log the analyst ever supplied.
+# In a forensics tool that is a FABRICATED-EVIDENCE bug, not a tidiness one, and it survives every
+# restart because the file is still there on the next boot.
+#
+# It was reachable. `_write_library_index` wrote `.index-<8 hex>.tmp` BESIDE index.json and only then
+# replaced it; kill the process between those two steps — a crash, a container stop, the segfaults this
+# VM is documented as producing, or the 8-attempt replace giving up — and the tmp stays. Measured in a
+# throwaway data dir: the orphan was listed as a staged file (parser "JSON lines (inferred)", state
+# REVIEW), parsed into the pool as its own source with one event whose raw text was a snapshot of the
+# analyst's own file names, AND written back into index.json by the listing's sniff — so it became a
+# permanent library entry that outlived the file itself.
+#
+# The fix is POSITIONAL, not a growing list of names: everything Iris writes under the library from now
+# on goes into `_bookkeeping_dir()`, a SUBDIRECTORY. Both evidence walks take FILES only (`e.is_file()`
+# in _dir_files, `p.is_file()` in library_entries), so a directory is invisible to them with no name
+# knowledge whatsoever — the next bookkeeping file added is excluded by WHERE it is written rather than
+# by someone remembering to extend a list. That is the failure pool_store.prune() already had once: a
+# name check protected one decision file and the next one added was silently deleted by it.
+#
+# _is_bookkeeping() then covers exactly the two names that CANNOT move: index.json (it is the published
+# layout of $IRIS_DATA_DIR and every existing install has one) and the LEGACY tmp shape that builds
+# before this one minted straight into LIBRARY_DIR — those orphans are on disk right now and have to be
+# both ignored and swept.
+_LEGACY_INDEX_TMP = re.compile(r"^\.index-[0-9a-f]{8}\.tmp$")
+
+
+def _bookkeeping_dir() -> Path:
+    """Where Iris's own files under the library live. A directory, so no walk can mistake one for a log.
+
+    Resolved per call rather than frozen at import: config.LIBRARY_DIR is derived from IRIS_DATA_DIR and
+    the tests re-point it.
+    """
+    return config.LIBRARY_DIR / ".iris"
+
+
+def _is_bookkeeping(name: str) -> bool:
+    """Is this name in LIBRARY_DIR Iris's own, rather than a log the analyst supplied?
+
+    Deliberately NARROW, because refusing real evidence is the worse of the two failures. The legacy tmp
+    pattern is anchored to exactly 8 lowercase hex digits — the shape `_write_library_index` actually
+    minted — so `.index-of-the-server.tmp`, a perfectly plausible upload, is still evidence. A staged
+    upload can never collide either way: stage_files only ever mints `<8 hex>_<sanitized>`.
+    """
+    return name == config.LIBRARY_INDEX.name or bool(_LEGACY_INDEX_TMP.match(name))
+
+
+def _evidence_names(names) -> set[str]:
+    """The subset of a LIBRARY_DIR walk that is the analyst's evidence — and sweep the rest.
+
+    THE one definition. Both walks (library_entries, which feeds the POOL, and the listing, which feeds
+    the Sources page) route through it; before this each hard-coded `!= config.LIBRARY_INDEX.name`
+    separately, so the pool-facing copy was the dangerous one and nothing tied the two together.
+    """
+    keep: set[str] = set()
+    orphans: list[str] = []
+    for name in names:
+        if name == config.LIBRARY_INDEX.name:
+            continue
+        if _LEGACY_INDEX_TMP.match(name):
+            orphans.append(name)
+            continue
+        keep.add(name)
+    if orphans:
+        _sweep_legacy_index_tmps(orphans)
+    return keep
+
+
+def _sweep_legacy_index_tmps(names: list[str]) -> None:
+    """Delete orphaned index-write tmp files, and drop any index entry that named one.
+
+    Safe from a read path, and ONLY under `_INDEX_LOCK`: `_write_library_index` writes the tmp and
+    replaces it while holding that lock, so a tmp that is still IN FLIGHT can never be observed from
+    here — every match visible under the lock is dead. Deleting one cannot lose evidence: the name was
+    minted by Iris and `_is_bookkeeping` will not match anything an upload can produce.
+
+    Ignoring them would keep them out of the pool, but not out of the app: the listing's sniff had
+    already written one INTO index.json as a staged file with a parser and a line count, so the record
+    outlived the bytes and would come straight back the moment any walk stopped filtering.
+    """
+    with _INDEX_LOCK:
+        gone: list[str] = []
+        for name in names:
+            p = config.LIBRARY_DIR / name
+            try:
+                p.unlink(missing_ok=True)
+                gone.append(name)
+            except OSError as exc:
+                print(f"[iris] library: could not remove orphaned index tmp {name}: "
+                      f"{config.safe_os_error(exc)}", flush=True)
+        try:
+            # A list, not `any(...)`: `any` SHORT-CIRCUITS, so the first entry that popped would leave
+            # every later orphan's entry in index.json — the record the sweep exists to remove.
+            _update_library_index(lambda idx: any([idx.pop(n, None) is not None for n in names]))
+        except OSError as exc:
+            print(f"[iris] library index not updated: {config.safe_os_error(exc)}", flush=True)
+    if gone:
+        # Say it: these were being listed as sources and parsed into the pool, so an analyst may have
+        # searched against them. Silence would make that indistinguishable from never having happened.
+        print(f"[iris] library: removed {len(gone)} orphaned index-write tmp file(s) "
+              f"({', '.join(gone[:5])}) - Iris bookkeeping, never evidence", flush=True)
+        invalidate_library_cache()
+
+
 def _library_index() -> dict[str, dict]:
     """on-disk name -> {file, size, uploadedAt}. Without it the original filename is only recoverable
     by stripping the sid prefix, which loses anything the sanitizer replaced."""
@@ -99,8 +208,13 @@ def _write_library_index(idx: dict[str, dict]) -> None:
     invalidate_library_cache()
     with _INDEX_LOCK:
         config.LIBRARY_DIR.mkdir(parents=True, exist_ok=True)
-        # a PRIVATE tmp name: a shared one is a second file two writers could hold open at once
-        tmp = config.LIBRARY_INDEX.with_name(f".index-{uuid.uuid4().hex[:8]}.tmp")
+        # a PRIVATE tmp name: a shared one is a second file two writers could hold open at once.
+        # It goes in the bookkeeping SUBDIRECTORY, not beside index.json: a tmp orphaned by a crash
+        # between this write and the replace below used to be walked as a staged log and parsed into
+        # the evidence pool. Same filesystem, so `replace` is still atomic. See _bookkeeping_dir.
+        book = _bookkeeping_dir()
+        book.mkdir(parents=True, exist_ok=True)
+        tmp = book / f"index-{uuid.uuid4().hex[:8]}.tmp"
         tmp.write_text(json.dumps(idx, indent=2), encoding="utf-8")
         # Windows refuses to replace a file another handle has open. Readers of index.json are
         # under the same lock, but an indexer / antivirus / backup agent can hold it for a moment,
@@ -140,8 +254,10 @@ def library_entries() -> list[tuple[str, str]]:
     """
     idx = _library_index()
     try:
-        on_disk = {p.name for p in config.LIBRARY_DIR.iterdir()
-                   if p.is_file() and p.name != config.LIBRARY_INDEX.name}
+        # `_evidence_names` is the one gate: it keeps Iris's own bookkeeping out of the POOL, which is
+        # what this list feeds. Filtering `on_disk` also covers a poisoned index entry — the listing's
+        # sniff had already written an orphaned tmp into index.json, and this loop reads `idx` first.
+        on_disk = _evidence_names(p.name for p in config.LIBRARY_DIR.iterdir() if p.is_file())
     except OSError:
         return []
     out = [(name, str((idx.get(name) or {}).get("file") or _display_name(name, {})))
@@ -170,6 +286,12 @@ def _library_path(file_name: str) -> Path:
     """
     if ":" in str(file_name):
         raise HTTPException(400, "invalid file name")
+    # The walks are not the only way in: /unattached/{name}/load parses a named file into the pool and
+    # /unattached/{name} unlinks it, so `index.json` reached by name is the same fabricated-evidence
+    # outcome (and the same wiped index) through the API instead of through a crash. One choke point
+    # for every by-name access, so a new route cannot forget it.
+    if _is_bookkeeping(Path(file_name).name):
+        raise HTTPException(400, f"{Path(file_name).name} is Iris's own bookkeeping, not a library file")
     p = config.LIBRARY_DIR / Path(file_name).name
     root = config.LIBRARY_DIR.resolve()
     try:
@@ -234,7 +356,7 @@ def invalidate_library_cache() -> None:
         _LIB_GEN += 1
 
 
-def _dir_files(d: Path, skip: str = "") -> list[tuple[str, int]]:
+def _dir_files(d: Path) -> list[tuple[str, int]]:
     """`[(name, size)]` for every FILE directly in `d`, sorted — memoised on the directory's mtime.
 
     This is the single most expensive thing the Sources page asks for, and it is expensive for a
@@ -288,8 +410,6 @@ def _dir_files(d: Path, skip: str = "") -> list[tuple[str, int]]:
     try:
         with os.scandir(d) as it:
             for e in it:
-                if skip and e.name == skip:
-                    continue
                 try:
                     if not e.is_file():
                         continue
@@ -418,7 +538,12 @@ def _build_library_listing() -> list[LibraryFile]:
                                    enrichedAt=(getattr(src, "enrichedAt", "") or "") if src else ""))
     # unattached files staged in the library — these belong to no case and survive every case delete
     idx = _library_index()
-    staged = _dir_files(config.LIBRARY_DIR, skip=config.LIBRARY_INDEX.name)
+    # Same gate as library_entries(): ONE definition of what in this directory is evidence. The `skip=`
+    # the walk used to take could only ever name index.json, which left the tmp orphans it wrote to be
+    # sniffed, listed and — via the `dirty` merge below — recorded in index.json as staged files.
+    staged_all = _dir_files(config.LIBRARY_DIR)
+    evidence = _evidence_names(name for name, _ in staged_all)
+    staged = [(name, size) for name, size in staged_all if name in evidence]
     dirty = False
     for name, size in staged:
         meta = idx.get(name) or {}
