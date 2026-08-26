@@ -297,19 +297,30 @@ def save_manifest(name: str, sids: list[str]) -> bool:
                                 {"format": POOL_FORMAT, "sig": sig, "sids": list(sids), "at": time.time()})
 
 
-def save_member(name: str, src: Source, events: list[Event], errors: int,
+def save_member(name: str, src: Source, events: list[Event], errors: int, member: str = "",
                 progress: Optional[Callable[[int, int], None]] = None) -> bool:
     """Cache ONE finished member source, with the event list the caller already holds."""
     if not enabled() or not name or src is None:
         return False
     if getattr(src, "enrich", "") not in FINISHED:
         return False
+    # The entry must not disagree with its own row. `_parse_source` caches an event list only for an
+    # ENRICHED source - a `skipped` one holds raw lines that are not worth megabytes of disk, which
+    # is deliberate - but `skipped` is FINISHED, so a skipped source that was then field-mapped
+    # arrived here with `src.events = N` and an EMPTY list. That entry is a HIT on the next boot:
+    # the Sources table reports N events and search, the timeline, the graph and every citation have
+    # none. A miss costs one re-parse; this costs the evidence, silently, one restart later.
+    if len(events) != int(getattr(src, "events", 0) or 0):
+        return False
     sig = signature(name)
     if not sig:
         return False
     return _write_frames(_dir() / f"{_stem(name)}.{src.id}.pkl",
                          {"format": POOL_FORMAT, "sig": sig, "source": src.model_dump(),
-                          "errors": int(errors)}, events, progress=progress)
+                          # Which member of the container these events came from. Without it a
+                          # restored source cannot find its own bytes and every read falls back to
+                          # the whole archive - see Store.load_pool_file.
+                          "member": member, "errors": int(errors)}, events, progress=progress)
 
 
 # --------------------------------------------------------------------------- load
@@ -328,8 +339,12 @@ def has_member(name: str, sid: str) -> bool:
         return False
 
 
-def load(name: str) -> Optional[list[tuple[Source, list[Event], int]]]:
-    """Every member of a staged file as it was parsed last time, or None on ANY doubt."""
+def load(name: str) -> Optional[list[tuple[Source, list[Event], int, str]]]:
+    """Every member of a staged file as it was parsed last time, or None on ANY doubt.
+
+    The fourth element is the archive member this source came from (empty for a plain file). An
+    entry written before that was recorded reads back as "" — which is what it was doing before,
+    so an older cache degrades to the previous behaviour instead of failing to load."""
     if not enabled():
         return None
     sig = signature(name)
@@ -348,7 +363,8 @@ def load(name: str) -> Optional[list[tuple[Source, list[Event], int]]]:
             src = Source.model_validate(payload["source"])
             if src.enrich not in FINISHED:
                 return None
-            out.append((src, payload.get("events") or [], int(payload.get("errors") or 0)))
+            out.append((src, payload.get("events") or [], int(payload.get("errors") or 0),
+                        str(payload.get("member") or "")))
         except Exception as exc:   # noqa: BLE001
             _log(f"{name}: member {sid} did not rebuild ({type(exc).__name__}: {exc}); re-parsing")
             return None

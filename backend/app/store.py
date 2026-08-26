@@ -1248,7 +1248,7 @@ class Store:
 
         out: list[Source] = []
         events: list[Event] = []
-        for src, evs, errors in members:
+        for src, evs, errors, member in members:
             parser = parser_by_name(src.parser)
             if parser is None:
                 # The parser that produced these events is not in this build. Re-parse rather than
@@ -1266,6 +1266,12 @@ class Store:
                 self.source_library[src.id] = name
                 self.source_prefix[src.id] = f"l{src.id}"
                 self.source_parse_errors[src.id] = errors
+                # Which member of the container this is. `add_file` sets it and this did not, so a
+                # restored member could not find its own bytes: `source_bytes` fell through to the
+                # whole archive and every read - the raw viewer, a re-parse - answered for the
+                # wrong file. Only after a restart, on evidence that parsed correctly the first time.
+                if member:
+                    self.source_member[src.id] = member
                 self.source_order.append(src.id)
             out.append(src)
             events.extend(evs)
@@ -2252,10 +2258,11 @@ class Store:
                 src = self.sources.get(sid)
                 origin = self.source_origin.get(sid, "case")
                 errors = self.source_parse_errors.get(sid, 0)
+                member = self.source_member.get(sid, "")
             tick = (lambda done, n: self._tail(sid, "caching", 100.0 * done / max(1, n))) if report else None
             if not name or src is None or origin != "library":
                 return False
-            return bool(pool_store.save_member(name, src, events, errors, progress=tick))
+            return bool(pool_store.save_member(name, src, events, errors, member, progress=tick))
         except Exception as exc:  # noqa: BLE001 — a cache write may never fail an ingest
             print(f"[iris] pool cache: could not cache {sid} ({type(exc).__name__}: {exc})")
             return False
