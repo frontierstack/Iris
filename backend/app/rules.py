@@ -51,7 +51,20 @@ from .models import (EMPTY_LIST, Detection, Event, Rule, RuleCondition, RuleFlag
                      RuleParam, RulePattern, RuleTestInput, RuleThreshold, max_sev)
 
 MAX_PATTERN_LEN = 2000
-RULE_TIMEOUT_S = 5.0
+RULE_TIMEOUT_S = 5.0        # how long ONE match may take: the catastrophic-backtracking guard
+# ...and the allowance per event for the scan AROUND those matches. The whole pass used to get a flat
+# RULE_TIMEOUT_S, which is not a bound on a runaway pattern at all — it is a bound on the POOL.
+# `[i for i, e in enumerate(events) if pred(e)]` over 11.4 M events cannot finish in 5 s however
+# trivial the predicate, so on a large workspace EVERY custom rule failed, returned 0 hits, and told
+# the analyst "evaluation exceeded 5s (catastrophic pattern?)" — sending them to debug a regex that
+# was fine. A simple predicate is 1-3 us an event; 30 us is generous enough that only a genuinely
+# unbounded loop trips it.
+SCAN_SECONDS_PER_EVENT = 30e-6
+
+
+def pass_timeout(n_events: int) -> float:
+    """The deadline for evaluating ONE rule over `n_events`. Scales, because the work does."""
+    return max(RULE_TIMEOUT_S, n_events * SCAN_SECONDS_PER_EVENT)
 FIXED_FIELDS = ("msg", "raw", "host", "user", "source", "file")
 MAX_WINDOW_S = 86400 * 7
 
@@ -299,18 +312,20 @@ class SafePattern:
         self.timed = timed
 
     def search(self, text: str) -> Any:
-        left = _remaining()
-        if left is None or not self.timed:
+        # A CONSTANT per-match budget, not "whatever is left of the pass". Sharing one 5 s budget
+        # across every event meant the deadline was exhausted partway through a large pool and every
+        # remaining match failed — the pool size masquerading as a bad pattern. One match against one
+        # log line has no legitimate reason to take seconds; that is exactly what backtracking does.
+        if not self.timed:
             return self._rx.search(text)
-        if left <= 0:
-            raise RuleTimeout(f"evaluation exceeded {RULE_TIMEOUT_S:g}s (catastrophic pattern?)")
         try:
-            return self._rx.search(text, timeout=left)
+            return self._rx.search(text, timeout=RULE_TIMEOUT_S)
         except TimeoutError as exc:
-            raise RuleTimeout(f"evaluation exceeded {RULE_TIMEOUT_S:g}s (catastrophic pattern?)") from exc
+            raise RuleTimeout(f"one match took longer than {RULE_TIMEOUT_S:g}s — the pattern "
+                              f"backtracks catastrophically on this line") from exc
 
 
-def _remaining() -> Optional[float]:
+def _remaining() -> Optional[float]:   # noqa: F401 — kept for callers that want the pass deadline
     """Seconds left in the current evaluation pass, or None when we are not inside one."""
     at = getattr(_DEADLINE, "at", None)
     return None if at is None else at - time.monotonic()
@@ -501,11 +516,11 @@ def decorate(r: Rule) -> Rule:
 def _run_with_timeout(fn: Callable[[], Any], timeout: float = RULE_TIMEOUT_S) -> Any:
     """Run fn in a daemon thread under a `timeout`-second deadline.
 
-    The deadline is published to the worker thread (`_DEADLINE.at`), so every SafePattern.search inside `fn`
-    matches with the time that is actually left and aborts the match itself — that is what stops a
-    catastrophic pattern, because `re` never yields the GIL and the join() below alone could only *report*
-    the timeout while the runaway thread kept the whole process pinned. The join is still the outer guard for
-    slowness that is not inside a regex.
+    A catastrophic pattern is stopped by SafePattern.search's own per-match `timeout=`, because `re`
+    never yields the GIL and the join() below alone could only *report* a timeout while the runaway
+    thread kept the whole process pinned. This join is the outer guard for slowness that is not inside
+    a regex — an unbounded loop — so its deadline has to be big enough for the legitimate work, which
+    is why callers pass `pass_timeout(len(events))` rather than a flat constant.
     """
     box: dict[str, Any] = {}
 
@@ -529,11 +544,12 @@ def _run_with_timeout(fn: Callable[[], Any], timeout: float = RULE_TIMEOUT_S) ->
 
 
 def find_matches(events: list[Event], pattern: str, field: str, flags: Optional[RuleFlags], source_filter: str,
-                 timeout: float = RULE_TIMEOUT_S) -> list[int]:
+                 timeout: Optional[float] = None) -> list[int]:
     """Indices of events matched by the pattern (raises RuleError / RuleTimeout)."""
     rx = compile_pattern(pattern, flags)
     pred = _matcher(rx, field, source_filter or "")
-    return _run_with_timeout(lambda: [i for i, e in enumerate(events) if pred(e)], timeout)
+    return _run_with_timeout(lambda: [i for i, e in enumerate(events) if pred(e)],
+                             pass_timeout(len(events)) if timeout is None else timeout)
 
 
 def test_rule(events: list[Event], body: RuleTestInput) -> dict[str, Any]:
@@ -581,7 +597,7 @@ def preview_rule(events: list[Event], r: Rule) -> dict[str, Any]:
     select = (lambda: RulesStore._threshold_hits(r, events, pred)) if (r.conditions and r.threshold) \
         else (lambda: [i for i, e in enumerate(events) if pred(e)])
     try:
-        idx = _run_with_timeout(select)
+        idx = _run_with_timeout(select, pass_timeout(len(events)))
     except RuleTimeout as exc:
         return {"hits": 0, "sample": [], "tookMs": int((time.perf_counter() - t0) * 1000), "error": str(exc)}
     except Exception as exc:  # noqa: BLE001 - a preview must never take a request down
@@ -1007,7 +1023,7 @@ class RulesStore:
 
         Both custom shapes run through the SAME sandbox: the predicate (regex or composed conditions, plus
         the optional windowed burst) is evaluated inside _run_with_timeout, so a pathological rule is
-        abandoned after RULE_TIMEOUT_S rather than hanging the ingest.
+        abandoned after `pass_timeout(len(events))` rather than hanging the ingest.
         """
         try:
             pred = conditions_matcher(r) if r.conditions else _matcher(self.compiled(r), r.field or "any", r.sourceFilter or "")
@@ -1018,7 +1034,7 @@ class RulesStore:
         select = (lambda: self._threshold_hits(r, events, pred)) if (r.conditions and r.threshold) \
             else (lambda: [i for i, e in enumerate(events) if pred(e)])
         try:
-            idx = _run_with_timeout(select)
+            idx = _run_with_timeout(select, pass_timeout(len(events)))
         except RuleTimeout as exc:
             self.errors[r.id] = str(exc)
             r.error = str(exc)

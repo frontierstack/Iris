@@ -41,6 +41,18 @@ def c():
         yield client
 
 
+def _blames_the_pattern(msg: str) -> bool:
+    """The refusal has to name the PATTERN, not the pool.
+
+    The message used to be "evaluation exceeded 5s (catastrophic pattern?)" for both causes, because
+    one 5 s budget covered the whole scan: on a large workspace every custom rule tripped it and the
+    analyst was sent to debug a regex that was fine. The per-match guard is what catches real
+    backtracking, and it says so.
+    """
+    m = msg.lower()
+    return "took longer than" in m and "backtrack" in m
+
+
 def _ev(**kw) -> Event:
     base = dict(id="e1", ts="2026-08-11T00:00:00Z", source="nginx.access", sourceId="s1", file="access.log",
                 host="edge-lb-01", user="svc_deploy", msg="GET /login 401", sev="info", raw="raw line",
@@ -197,7 +209,7 @@ def test_catastrophic_regex_rule_times_out_without_pinning_the_process() -> None
 
     assert hits == 0
     assert elapsed < RULE_TIMEOUT_S + 3, f"the sandbox took {elapsed:.1f}s — the deadline did not hold"
-    assert store.errors["RULE-EVIL"].startswith("evaluation exceeded")
+    assert _blames_the_pattern(store.errors["RULE-EVIL"])
     assert evil.error and "catastrophic" in evil.error
     assert all(d.id != "RULE-EVIL" for e in events for d in e.detections)
 
@@ -227,7 +239,7 @@ def test_condition_rows_get_the_same_deadline() -> None:
     t0 = time.perf_counter()
     assert store.apply_rule(r, events) == 0
     assert time.perf_counter() - t0 < RULE_TIMEOUT_S + 3
-    assert store.errors["RULE-EVIL-COND"].startswith("evaluation exceeded")
+    assert _blames_the_pattern(store.errors["RULE-EVIL-COND"])
     assert not any(e.detections for e in events)
 
 
@@ -253,7 +265,7 @@ def test_a_catastrophic_rule_does_not_stop_the_rest_of_the_pass() -> None:
 
     assert elapsed < RULE_TIMEOUT_S + 4, f"apply_all took {elapsed:.1f}s"
     assert total == 2, "the healthy rules must still produce their detections"
-    assert store.errors["RULE-A"].startswith("evaluation exceeded")
+    assert _blames_the_pattern(store.errors["RULE-A"])
     assert store.errors.get("RULE-B") is None and store.errors.get("RULE-C") is None
     assert [d.id for d in events[-2].detections] == ["RULE-B"]
     assert [d.id for d in events[-1].detections] == ["RULE-C"]
@@ -271,7 +283,7 @@ def test_rule_test_endpoint_reports_the_timeout_instead_of_hanging(c) -> None:
     elapsed = time.perf_counter() - t0
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["hits"] == 0 and "evaluation exceeded" in (body.get("error") or "")
+    assert body["hits"] == 0 and _blames_the_pattern(body.get("error") or "")
     assert elapsed < RULE_TIMEOUT_S + 3, f"the request took {elapsed:.1f}s"
     with STORE.lock:
         STORE.events = []
