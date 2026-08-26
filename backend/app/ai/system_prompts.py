@@ -9,6 +9,12 @@ of it — the analyst's words: *"the ones to add will be in conjunction of the b
 be additional ad hoc prompt for investigations."* (An earlier build had a `replace` mode; it is gone,
 and a stored `mode` field is ignored.)
 
+The BUILT-IN prompt is editable too (*"Allow for editing the built in prompt still"*): `set_builtin`
+stores an override in the same file, `builtin()` is what every run and every composition uses, and
+`reset_builtin` puts the shipped text back. An edit there is powerful and unguarded — it can remove the
+rules about citing real ids, which the citation validator still enforces in code — so the API reports
+`builtinEdited` and the UI says what is at stake and offers the way back.
+
 `settings.ai.systemPromptId` names the one used by default; a run can name another
 (`AiInvestigateRequest.systemPromptId`), and `""` means the built-in prompt alone. An id that no longer
 exists NEVER fails or silently swaps the prompt: `resolve()` says so, and the investigator streams a
@@ -33,6 +39,7 @@ from .prompts import INVESTIGATOR_SYSTEM
 MAX_PROMPTS = 50
 MAX_NAME = 120
 MAX_TEXT = 40_000
+MAX_BUILTIN = 60_000
 
 EXTEND_HEADER = (
     "\n\nADDITIONAL INSTRUCTIONS FOR THIS INVESTIGATION\n"
@@ -54,6 +61,7 @@ class SystemPromptStore:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self._rows: list[dict[str, Any]] = []
+        self._builtin: str = ""          # '' = the shipped prompt; otherwise the analyst's edited text
         self._loaded_from: Optional[Path] = None
 
     # ------------------------------------------------------------- persistence
@@ -66,11 +74,15 @@ class SystemPromptStore:
         if self._loaded_from == path:
             return
         rows: list[dict[str, Any]] = []
+        builtin = ""
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
             rows = raw.get("prompts") if isinstance(raw, dict) else raw
+            if isinstance(raw, dict) and isinstance(raw.get("builtin"), str):
+                builtin = raw["builtin"][:MAX_BUILTIN]
         except (OSError, ValueError):
             rows = []
+        self._builtin = builtin.strip()
         self._rows = []
         for r in rows or []:
             if not isinstance(r, dict) or not r.get("id"):
@@ -82,7 +94,10 @@ class SystemPromptStore:
         path = self._path()
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f"system_prompts.{uuid.uuid4().hex[:6]}.tmp")
-        tmp.write_text(json.dumps({"prompts": self._rows}, indent=2), encoding="utf-8")
+        blob: dict[str, Any] = {"prompts": self._rows}
+        if self._builtin:
+            blob["builtin"] = self._builtin
+        tmp.write_text(json.dumps(blob, indent=2), encoding="utf-8")
         tmp.replace(path)
 
     # ------------------------------------------------------------- reads
@@ -98,6 +113,39 @@ class SystemPromptStore:
                 if r["id"] == prompt_id:
                     return dict(r)
         return None
+
+    # ------------------------------------------------------------- the built-in prompt
+    def builtin(self) -> str:
+        """The built-in prompt IN FORCE: the analyst's edit if there is one, else the shipped text."""
+        with self.lock:
+            self._ensure_loaded_locked()
+            return self._builtin or INVESTIGATOR_SYSTEM
+
+    def builtin_edited(self) -> bool:
+        with self.lock:
+            self._ensure_loaded_locked()
+            return bool(self._builtin)
+
+    def set_builtin(self, text: str) -> str:
+        """Replace the built-in prompt. Saving the shipped text verbatim clears the override, so
+        `builtin_edited` never claims an edit that changed nothing."""
+        s = str(text or "").replace("\r\n", "\n").strip()
+        if not s:
+            raise PromptError("the built-in prompt cannot be empty — use 'restore' to go back to the shipped text")
+        if len(s) > MAX_BUILTIN:
+            raise PromptError(f"the built-in prompt is over {MAX_BUILTIN:,} characters")
+        with self.lock:
+            self._ensure_loaded_locked()
+            self._builtin = "" if s == INVESTIGATOR_SYSTEM.strip() else s
+            self._save_locked()
+            return self._builtin or INVESTIGATOR_SYSTEM
+
+    def reset_builtin(self) -> str:
+        with self.lock:
+            self._ensure_loaded_locked()
+            self._builtin = ""
+            self._save_locked()
+        return INVESTIGATOR_SYSTEM
 
     # ------------------------------------------------------------- writes
     def create(self, name: str, text: str) -> dict[str, Any]:
@@ -148,18 +196,22 @@ class SystemPromptStore:
         """
         if prompt_id is None:
             prompt_id = config.get_settings().ai.systemPromptId or ""
+        base = self.builtin()
+        edited = self.builtin_edited()
         if not prompt_id:
-            return INVESTIGATOR_SYSTEM, {"id": "", "name": "", "missing": ""}
+            return base, {"id": "", "name": "", "missing": "", "builtinEdited": edited}
         row = self.get(prompt_id)
         if row is None:
-            return INVESTIGATOR_SYSTEM, {"id": "", "name": "", "missing": prompt_id}
-        return compose(row), {"id": row["id"], "name": row["name"], "missing": ""}
+            return base, {"id": "", "name": "", "missing": prompt_id, "builtinEdited": edited}
+        return compose(row, base), {"id": row["id"], "name": row["name"], "missing": "", "builtinEdited": edited}
 
 
-def compose(row: dict[str, Any]) -> str:
-    """The effective system prompt for one saved row: the built-in prompt, then the analyst's text.
-    Pure — the preview endpoint uses it too."""
-    return INVESTIGATOR_SYSTEM + EXTEND_HEADER.format(name=row.get("name", "")) + row["text"]
+def compose(row: dict[str, Any], base: Optional[str] = None) -> str:
+    """The effective system prompt for one saved row: the built-in prompt IN FORCE (the analyst's edit
+    if any), then their additional instructions. `base` defaults to `PROMPTS.builtin()`."""
+    if base is None:
+        base = PROMPTS.builtin()
+    return base + EXTEND_HEADER.format(name=row.get("name", "")) + row["text"]
 
 
 def _name(v: Any) -> str:

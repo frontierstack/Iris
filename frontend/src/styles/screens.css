@@ -1714,6 +1714,15 @@
   border: 1px solid var(--accent);
   border-radius: var(--radius-md);
 }
+.sp-builtin {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+}
+.sp-textarea--tall {
+  min-height: 420px;
+}
 .sp-textarea {
   width: 100%;
   min-height: 200px;

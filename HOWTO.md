@@ -537,8 +537,9 @@ objective); use the × on the title bar.
 
 **System prompts.** Settings → **System prompts** holds *additional* instructions for investigations — a report
 format, what counts as critical in your environment, sources to distrust, the questions a phishing case always has to
-answer. A saved prompt is always **added to** the built-in prompt (the built-in rules on searching, citing real event
-ids and stopping stay in force; it cannot be replaced). Pick one as the **default**; the assistant panel's composer has
+answer. A saved prompt is always **added to** the built-in prompt. The built-in prompt itself is editable there too
+(*Edit built-in prompt*, with *Restore shipped prompt* to go back) — it carries the rules on searching, citing real
+event ids and stopping, so edit it knowingly; the citation check itself lives in code and stays. Pick one as the **default**; the assistant panel's composer has
 an **Instructions** picker to run a single question with another one, or with none. *View effective* shows the exact
 text the model receives, and the built-in prompt is readable there too. Saved prompts live in
 `ai/system_prompts.json` in the data directory and are kept by *Clear all data*, like rules.

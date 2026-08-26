@@ -692,10 +692,16 @@ async def investigate(store: Any, objective: str, run_id: str,
                f"Pick another under Settings → System prompts.")
         HISTORY.append(run_id, {"kind": "warning", "text": msg})
         yield {"type": "warning", "message": msg, "ids": []}
-    if sp["id"]:
-        note = f"additional instructions: {sp['name']}"
+    if sp["id"] or sp["builtinEdited"]:
+        parts = []
+        if sp["builtinEdited"]:
+            parts.append("built-in prompt: edited (Settings → System prompts)")
+        if sp["id"]:
+            parts.append(f"additional instructions: {sp['name']}")
+        note = " · ".join(parts)
         HISTORY.append(run_id, {"kind": "status", "text": note})
-        yield {"type": "status", "text": note, "systemPrompt": {"id": sp["id"], "name": sp["name"]}}
+        yield {"type": "status", "text": note,
+               "systemPrompt": {"id": sp["id"], "name": sp["name"], "builtinEdited": sp["builtinEdited"]}}
     # the focus note is context for the MODEL only — the transcript stores the analyst's words verbatim
     asked = objective + (f"\n\n(The analyst opened this from: {focus})" if focus else "")
     messages: list[dict[str, Any]] = [

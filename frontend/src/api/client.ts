@@ -526,6 +526,11 @@ export const api = {
     request<SystemPrompt>(`/api/ai/system-prompts/${encodeURIComponent(id)}`, json('PUT', body)),
   aiDeleteSystemPrompt: (id: string) =>
     request<{ ok: boolean; id: string; defaultReset: boolean }>(`/api/ai/system-prompts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  /** Replace the built-in prompt for every run from now on; saving the shipped text verbatim clears the edit. */
+  aiEditBuiltinPrompt: (text: string) =>
+    request<{ builtin: string; builtinEdited: boolean }>('/api/ai/system-prompts/builtin', json('PUT', { text })),
+  aiResetBuiltinPrompt: () =>
+    request<{ builtin: string; builtinEdited: boolean }>('/api/ai/system-prompts/builtin', { method: 'DELETE' }),
   /** The exact text the model receives with this prompt selected: the built-in prompt with the instructions appended. */
   aiEffectiveSystemPrompt: (id: string) =>
     request<{ id: string; name: string; text: string }>(`/api/ai/system-prompts/${encodeURIComponent(id)}/effective`),

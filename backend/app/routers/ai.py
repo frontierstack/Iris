@@ -160,9 +160,34 @@ def _prompt_or_404(prompt_id: str) -> dict:
 @router.get("/system-prompts")
 def list_system_prompts() -> dict:
     """Every saved prompt (additional instructions, always appended to the built-in prompt), the
-    built-in prompt itself, and which one runs by default (`settings.ai.systemPromptId`; '' = none)."""
+    built-in prompt IN FORCE (`builtin` — the analyst's edit when `builtinEdited`, else the shipped text,
+    which `builtinDefault` always carries), and which one runs by default (`settings.ai.systemPromptId`;
+    '' = none)."""
     return {"prompts": PROMPTS.list(), "activeId": get_settings().ai.systemPromptId or "",
-            "builtin": INVESTIGATOR_SYSTEM}
+            "builtin": PROMPTS.builtin(), "builtinDefault": INVESTIGATOR_SYSTEM,
+            "builtinEdited": PROMPTS.builtin_edited()}
+
+
+class BuiltinBody(BaseModel):
+    text: str
+
+
+# Declared BEFORE the `/{prompt_id}` routes: 'builtin' would otherwise match as an id.
+@router.put("/system-prompts/builtin")
+def edit_builtin_prompt(body: BuiltinBody) -> dict:
+    """Replace the built-in prompt for every run from now on. Saving the shipped text verbatim
+    clears the edit."""
+    try:
+        text = PROMPTS.set_builtin(body.text)
+    except PromptError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"builtin": text, "builtinEdited": PROMPTS.builtin_edited()}
+
+
+@router.delete("/system-prompts/builtin")
+def reset_builtin_prompt() -> dict:
+    """Back to the shipped prompt."""
+    return {"builtin": PROMPTS.reset_builtin(), "builtinEdited": False}
 
 
 @router.post("/system-prompts", status_code=201)

@@ -278,7 +278,8 @@ export interface AiSettings { provider: AiProvider; model: string; baseUrl: stri
  * investigation, always appended to the built-in prompt — the tool discipline and citation rules stay.
  */
 export interface SystemPrompt { id: string; name: string; text: string; createdAt: string; updatedAt: string }
-export interface SystemPromptsResponse { prompts: SystemPrompt[]; activeId: string; builtin: string }
+/** `builtin` is the built-in prompt IN FORCE (the analyst's edit when `builtinEdited`); `builtinDefault` is always the shipped text. */
+export interface SystemPromptsResponse { prompts: SystemPrompt[]; activeId: string; builtin: string; builtinDefault: string; builtinEdited: boolean }
 /** The MCP server Iris exposes to outside agents. `token` is masked on read, like ai.apiKey. */
 export interface McpSettings { enabled: boolean; allowWrites: boolean; token: string }
 /** Ingest behaviour. `autoEnrich` false means phase 2 never runs unless it is asked for, per source. */

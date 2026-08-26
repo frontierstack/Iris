@@ -41,7 +41,9 @@ def _clean():
     for row in PROMPTS.list():
         PROMPTS.delete(row["id"])
     config.update_settings({"ai": {"systemPromptId": ""}})
+    PROMPTS.reset_builtin()
     yield
+    PROMPTS.reset_builtin()
     for row in PROMPTS.list():
         PROMPTS.delete(row["id"])
     config.update_settings({"ai": {"systemPromptId": ""}})
@@ -51,7 +53,7 @@ def test_crud_over_the_api(client):
     r = client.get("/api/ai/system-prompts")
     assert r.status_code == 200
     assert r.json()["prompts"] == [] and r.json()["activeId"] == ""
-    assert r.json()["builtin"] == INVESTIGATOR_SYSTEM
+    assert r.json()["builtin"] == INVESTIGATOR_SYSTEM and r.json()["builtinEdited"] is False
 
     r = client.post("/api/ai/system-prompts", json={"name": "House style", "text": "Write in British English."})
     assert r.status_code == 201, r.text
@@ -94,6 +96,51 @@ def test_deleting_the_default_resets_settings(client):
     r = client.delete(f"/api/ai/system-prompts/{row['id']}")
     assert r.json()["defaultReset"] is True
     assert client.get("/api/settings").json()["ai"]["systemPromptId"] == ""
+
+
+def test_the_builtin_prompt_is_editable_and_restorable(client):
+    r = client.put("/api/ai/system-prompts/builtin", json={"text": "You are Iris. Cite ids."})
+    assert r.status_code == 200 and r.json()["builtinEdited"] is True
+    listing = client.get("/api/ai/system-prompts").json()
+    assert listing["builtin"] == "You are Iris. Cite ids." and listing["builtinEdited"] is True
+    assert listing["builtinDefault"] == INVESTIGATOR_SYSTEM      # the shipped text is always readable
+
+    # an ad hoc prompt composes on top of the EDITED built-in, not the shipped one
+    row = client.post("/api/ai/system-prompts", json={"name": "extra", "text": "Answer in French."}).json()
+    eff = client.get(f"/api/ai/system-prompts/{row['id']}/effective").json()["text"]
+    assert eff.startswith("You are Iris. Cite ids.") and eff.endswith("Answer in French.")
+    assert INVESTIGATOR_SYSTEM not in eff
+
+    # the edit survives a reload from disk
+    PROMPTS._loaded_from = None
+    assert PROMPTS.builtin() == "You are Iris. Cite ids."
+
+    # saving the shipped text verbatim is not an edit; empty is refused
+    assert client.put("/api/ai/system-prompts/builtin", json={"text": INVESTIGATOR_SYSTEM}).json()["builtinEdited"] is False
+    assert client.put("/api/ai/system-prompts/builtin", json={"text": "   "}).status_code == 400
+
+    client.put("/api/ai/system-prompts/builtin", json={"text": "edited again"})
+    r = client.delete("/api/ai/system-prompts/builtin")
+    assert r.json() == {"builtin": INVESTIGATOR_SYSTEM, "builtinEdited": False}
+    assert PROMPTS.builtin() == INVESTIGATOR_SYSTEM
+    # 'builtin' is a route, never a prompt id
+    assert client.get("/api/ai/system-prompts/builtin/effective").status_code == 404
+
+
+@pytest.mark.anyio
+async def test_an_edited_builtin_prompt_reaches_the_model():
+    PROMPTS.set_builtin("Edited base prompt.")
+    fake = CaptureModel()
+    evs = await _run(fake)
+    assert fake.system[-1] == "Edited base prompt."
+    st = [e for e in evs if e.get("type") == "status" and e.get("systemPrompt")]
+    assert st and st[0]["systemPrompt"]["builtinEdited"] is True and "edited" in st[0]["text"]
+    extra = PROMPTS.create("extra", "And a haiku.")
+    await _run(fake, system_prompt_id=extra["id"])
+    assert fake.system[-1].startswith("Edited base prompt.") and fake.system[-1].endswith("And a haiku.")
+    PROMPTS.reset_builtin()
+    await _run(fake)
+    assert fake.system[-1] == INVESTIGATOR_SYSTEM
 
 
 @pytest.mark.anyio

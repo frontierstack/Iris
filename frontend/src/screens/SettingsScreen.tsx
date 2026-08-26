@@ -463,6 +463,8 @@ function SystemPrompts({ settings }: { settings: Settings }) {
   const [text, setText] = useState('');
   const [confirmDel, setConfirmDel] = useState<SystemPrompt | null>(null);
   const [showBuiltin, setShowBuiltin] = useState(false);
+  const [builtinDraft, setBuiltinDraft] = useState<string | null>(null);   // null = not editing
+  const [confirmRestore, setConfirmRestore] = useState(false);
   const [effective, setEffective] = useState<{ id: string; text: string } | null>(null);
 
   const invalidate = () => { void qc.invalidateQueries({ queryKey: qk.aiSystemPrompts }); };
@@ -497,6 +499,17 @@ function SystemPrompts({ settings }: { settings: Settings }) {
       onError: (e) => toast.error('Could not change the default prompt', e),
     });
   };
+  const saveBuiltin = useMutation({
+    mutationFn: (text: string) => api.aiEditBuiltinPrompt(text),
+    onSuccess: (r) => { toast.success(r.builtinEdited ? 'Built-in prompt updated' : 'Built-in prompt is back to the shipped text', 'Every run from now on uses it'); setBuiltinDraft(null); invalidate(); },
+    onError: (e) => toast.error('Could not save the built-in prompt', e),
+  });
+  const restoreBuiltin = useMutation({
+    mutationFn: () => api.aiResetBuiltinPrompt(),
+    onSuccess: () => { toast.success('Built-in prompt restored', 'The shipped text is in force again'); setConfirmRestore(false); setBuiltinDraft(null); invalidate(); },
+    onError: (e) => toast.error('Could not restore the built-in prompt', e),
+  });
+  const builtinDirty = builtinDraft !== null && builtinDraft !== (list.data?.builtin ?? '');
   const viewEffective = (p: SystemPrompt) => {
     if (effective?.id === p.id) { setEffective(null); return; }
     api.aiEffectiveSystemPrompt(p.id).then((r) => setEffective({ id: p.id, text: r.text })).catch((e) => toast.error('Could not load the effective prompt', e));
@@ -582,14 +595,42 @@ function SystemPrompts({ settings }: { settings: Settings }) {
         <button className="advanced__head" onClick={() => setShowBuiltin((v) => !v)} aria-expanded={showBuiltin}>
           <Icon.Chevron className={cx('advanced__caret', showBuiltin && 'open')} />
           Built-in prompt
-          <span className="field__hint" style={{ marginLeft: 8 }}>read-only · {list.data ? `${list.data.builtin.length.toLocaleString()} characters` : ''}</span>
+          {list.data?.builtinEdited && <span className="pill pill--warn" style={{ marginLeft: 8 }}>edited</span>}
+          <span className="field__hint" style={{ marginLeft: 8 }}>{list.data ? `${list.data.builtin.length.toLocaleString()} characters · ` : ''}what every investigation starts from; saved prompts are added after it</span>
         </button>
         {showBuiltin && (
-          <div className="advanced__body">
-            <pre className="sp-pre">{list.data?.builtin ?? ''}</pre>
+          <div className="advanced__body sp-builtin">
+            {builtinDraft === null ? (
+              <>
+                <pre className="sp-pre">{list.data?.builtin ?? ''}</pre>
+                <div className="form-row">
+                  <button className="btn btn--sm" onClick={() => setBuiltinDraft(list.data?.builtin ?? '')} disabled={!list.data}>Edit built-in prompt</button>
+                  {list.data?.builtinEdited && <button className="btn btn--sm btn--ghost" onClick={() => setConfirmRestore(true)}>Restore shipped prompt</button>}
+                  <span className="field__hint">
+                    {list.data?.builtinEdited
+                      ? 'This is your edited text. The shipped prompt is one click away and nothing else is lost.'
+                      : 'This is the prompt Iris ships with. Editing it changes every run; the citation check and the record / summary nudges live in code and stay in force whatever it says.'}
+                  </span>
+                </div>
+              </>
+            ) : (
+              <>
+                <textarea className="sp-textarea sp-textarea--tall" value={builtinDraft} onChange={(e) => setBuiltinDraft(e.target.value)} spellCheck={false} aria-label="Built-in prompt" />
+                <div className="field__hint"><span style={{ color: 'var(--warn)' }}>Careful:</span> this text carries the rules on how to search, when to stop, and to cite real event ids. Removing them changes how every investigation behaves. {builtinDraft.length.toLocaleString()} / 60,000 characters.</div>
+                <div className="form-row">
+                  <button className="btn btn--primary btn--sm" onClick={() => saveBuiltin.mutate(builtinDraft)} disabled={!builtinDirty || !builtinDraft.trim() || saveBuiltin.isPending}>{saveBuiltin.isPending && <span className="btn__spinner" />}Save built-in prompt</button>
+                  <button className="btn btn--sm" onClick={() => setBuiltinDraft(null)} disabled={saveBuiltin.isPending}>Cancel</button>
+                  {list.data?.builtinEdited && <button className="btn btn--sm btn--ghost" onClick={() => setBuiltinDraft(list.data?.builtinDefault ?? '')}>Paste shipped text</button>}
+                </div>
+              </>
+            )}
           </div>
         )}
       </div>
+
+      <ConfirmDialog open={confirmRestore} title="Restore the shipped built-in prompt?" busy={restoreBuiltin.isPending}
+        text="Your edited text is discarded and every run from now on starts from the prompt Iris ships with. Saved prompts are untouched."
+        confirmLabel="Restore" onConfirm={() => restoreBuiltin.mutate()} onCancel={() => setConfirmRestore(false)} />
 
       <ConfirmDialog open={!!confirmDel} title="Delete this system prompt?" danger busy={del.isPending}
         text={confirmDel ? `"${confirmDel.name}" will be removed.${confirmDel.id === activeId ? ' It is the default — the assistant goes back to the built-in prompt.' : ''} Conversations already run on it are unaffected.` : ''}

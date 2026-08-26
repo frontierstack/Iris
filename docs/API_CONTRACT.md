@@ -1187,7 +1187,14 @@ type AiRunEvent =
    built-in prompt alone). An id that no longer exists never fails a run and is never swapped for another prompt:
    the run streams a `warning` and uses the built-in prompt. A run on a saved prompt streams one `status` event
    carrying `systemPrompt:{id,name}`.
-   - `GET  /api/ai/system-prompts` → `{prompts:SystemPrompt[], activeId:string, builtin:string}`
+   - `GET  /api/ai/system-prompts` → `{prompts:SystemPrompt[], activeId:string, builtin:string, builtinDefault:string,
+     builtinEdited:boolean}` — `builtin` is the built-in prompt IN FORCE (the analyst's edit when `builtinEdited`),
+     `builtinDefault` the shipped text
+   - `PUT  /api/ai/system-prompts/builtin` body `{text}` → `{builtin, builtinEdited}` — replace the built-in prompt for
+     every run from now on (400 empty / > 60,000 chars; saving the shipped text verbatim clears the edit). Saved
+     prompts compose on top of whatever built-in text is in force. A run on an edited built-in prompt says so in its
+     `status` event (`systemPrompt.builtinEdited`).
+   - `DELETE /api/ai/system-prompts/builtin` → `{builtin, builtinEdited:false}` — back to the shipped prompt
    - `POST /api/ai/system-prompts` body `{name, text}` → `SystemPrompt` (201; 400 names the problem —
      empty name/text, name > 120 chars, text > 40,000 chars, more than 50 prompts)
    - `PUT  /api/ai/system-prompts/{id}` body `{name?, text?}` → `SystemPrompt` (404 unknown)
