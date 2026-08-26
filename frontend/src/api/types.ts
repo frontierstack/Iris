@@ -36,6 +36,11 @@ export interface Source {
   enrichError?: string | null;
   /** when the full parse finished, ISO-8601 UTC */
   enrichedAt?: string | null;
+  /** Curated case-set entries whose event id this source's phase-2 parse dropped and that
+   *  `_reanchor_case_set` could not re-point at their own line. The entries are KEPT — they are the
+   *  analyst's work — but they no longer resolve to evidence, and until now nothing said so.
+   *  Empty, never null: "nothing lost" is a real answer. */
+  lostCitations?: string[];
   /** LIVE parse detail — the same shape a job row carries, read straight off the server's tracker.
    *  Non-null ONLY while this source is actually being read (state 'PARSING', or enrich 'enriching').
    *  The Sources table could otherwise only show a spinner, which on a 639 MB capture is twenty minutes

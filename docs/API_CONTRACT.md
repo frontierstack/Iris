@@ -34,6 +34,16 @@ interface Source { id:string; file:string; parser:string; events:number; range:[
   origin?:'case'|'library';
   /* Always sent by this server. `range` is null and every event carries ts:'' until enrich === 'enriched'. */
   enrich:EnrichState; enrichError?:string|null; enrichedAt?:string|null /*ISO-8601 UTC*/;
+  /* Case-set event ids this source's phase 2 could no longer resolve, and that re-anchoring could not
+     heal either — the line is genuinely gone (a CSV header row phase 2 correctly drops, a record the
+     two phases split differently). The curated entry is KEPT and still on the timeline; what it has
+     lost is its pointer at the evidence, and the screens must SAY so rather than showing an entry that
+     silently resolves to nothing. Empty for every source that lost nothing, never null. Computed per
+     RESPONSE from the last phase-2 merge and never persisted, exactly like `progress` — a restart does
+     not replay a warning about curation that may since have been re-anchored or removed. An entry the
+     remap carried over, or that `_reanchor_case_set` re-pointed at its own line, is NOT reported here:
+     it lost nothing. */
+  lostCitations?:string[];
   /* LIVE parse detail for this source — the same ParseProgress a job row carries (see "Upload & parse
      jobs"), read straight off jobs.PARSE_PROGRESS. Non-null ONLY while this source is actually being
      read: state 'PARSING' or enrich 'enriching'. A spinner says "something is happening"; on a 639 MB

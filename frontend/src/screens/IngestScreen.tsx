@@ -1268,6 +1268,17 @@ export function IngestScreen() {
                   enrichment failed — {s.enrichError}
                 </div>
               )}
+              {!!s.lostCitations?.length && (
+                <div
+                  className="enrich-err"
+                  title={`Case-set entries that no longer resolve to a line in this file: ${s.lostCitations.join(', ')}`}
+                >
+                  {s.lostCitations.length === 1
+                    ? '1 timeline entry lost its evidence link'
+                    : `${s.lostCitations.length} timeline entries lost their evidence link`}
+                  {' '}— they are still on the case, but no longer point at a line here
+                </div>
+              )}
             </div>
           ))}
         </div>

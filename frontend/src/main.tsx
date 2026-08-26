@@ -36,7 +36,13 @@ import './styles/findings.css';
 import './styles/graph-v2.css';
 import './styles/rawlog.css';
 import './styles/search-fields.css';
-import { App } from './App';
+import { App, preloadRouteChunk } from './App';
+
+// Ask for THIS route's chunk now, not after React has rendered the shell and reached its Suspense
+// boundary — see the note on `preloadRouteChunk`. It is one statement here because it has to run
+// before anything else does any work; putting it inside a component would put it back behind the
+// render it exists to overlap with.
+preloadRouteChunk(window.location.pathname);
 
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>

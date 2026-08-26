@@ -267,12 +267,36 @@ def library_entries() -> list[tuple[str, str]]:
 
 
 def forget_staged(file_name: str) -> None:
-    """Drop a staged file's index entry (the bytes are removed by the caller)."""
-    _update_library_index(lambda idx: idx.pop(Path(file_name).name, None) is not None)
+    """Drop what Iris remembers about a staged file — and no more than that.
+
+    Two callers, two different meanings, and this used to treat them the same:
+
+      * DELETE /api/library/unattached/{name} — the BYTES are going away. Every trace goes with them:
+        the index entry, and the parsed-pool cache, which is keyed on this file and could never be
+        reached again to be invalidated.
+      * DELETE /api/sources/{sid} on a library-origin source — which for one member of an expanded
+        archive names the CONTAINER, shared with every sibling. Those bytes deliberately STAY
+        (`Store.delete_sources` refuses to unlink a file a survivor still reads from), so wiping the
+        index entry threw away the only record of the name the analyst uploaded, and
+        `pool_store.forget` threw away the cached parse of every OTHER member — for a click that
+        removed one of them. Worse, the manifest still named the deleted member, so the next restart
+        re-expanded the container and put it straight back in the pool.
+
+    Which case it is is not a parameter, it is a fact about the pool: what still reads these bytes now
+    that the delete has finished. Asking the store keeps the caller in routers/sources.py unchanged
+    and cannot get out of step with what actually survived.
+    """
+    name = Path(file_name).name
+    with STORE.lock:
+        live = {sid for sid, lib in STORE.source_library.items()
+                if lib == name and sid in STORE.sources}
+    if live:
+        pool_store.keep_only_members(name, live)
+        invalidate_library_cache()
+        return
+    _update_library_index(lambda idx: idx.pop(name, None) is not None)
     invalidate_library_cache()
-    # The parsed-pool cache is keyed on this file; leaving it behind would keep a copy of the events
-    # of a file the analyst removed, and the entry could never be reached again to be invalidated.
-    pool_store.forget(Path(file_name).name)
+    pool_store.forget(name)
 
 
 def _library_path(file_name: str) -> Path:
@@ -963,19 +987,42 @@ def attach(body: AttachBody) -> list[Source]:
                 str(s.get("path") or "").replace("\\", "/").rsplit("/", 1)[-1]: str(s.get("file") or "")
                 for s in (known.get("sources") or [])
             })
+        # COPY the bytes into the case; never materialise them. This branch is reached for a staged
+        # file that is NOT in the pool, and the commonest reason for that is that the pool refused it
+        # FOR MEMORY — so `read_bytes()` here held the whole of the analyst's 1.15 GB DNS export in
+        # RAM, and `add_file(name, blob)` then wrote a second full-size copy out of that same blob:
+        # >2.3 GB of transient to attach a file that was left out because the machine could not hold
+        # it. `shutil.copyfile` streams it — the pattern `Store.attach_library_source` already uses,
+        # with the comment "not read_bytes(): a multi-GB capture whole in RAM" — and
+        # `ingest_upload_path` expands the container FROM DISK, zip and tar one member at a time,
+        # instead of needing the whole archive as one `bytes` before it can look at the first entry.
+        # A file that is not a container is never read at all: it is already at `dest`, so the source
+        # points there and phase 1 streams it.
+        #
+        # The bytes still land under cases/<id>/uploads, which is what keeps two cases independent on
+        # disk — `ingest_upload_path` removes `dest` only when it expanded it into member files that
+        # have their own bytes, and keeps it for a passthrough or a refused container.
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", Path(display).name) or "upload.log"
+        dest = STORE.upload_dir / f"{uuid.uuid4().hex[:8]}_{safe}"
         try:
-            data = src_path.read_bytes()
+            STORE.upload_dir.mkdir(parents=True, exist_ok=True)
+            size = src_path.stat().st_size
+            shutil.copyfile(src_path, dest)
         except OSError as exc:
+            dest.unlink(missing_ok=True)
             raise HTTPException(500, f"could not read {item.fileName}: {config.safe_os_error(exc)}")
-        # add_file writes its own copy into the active case's uploads, so the two cases stay independent.
-        # ingest_upload also expands archives and reports the ones it refuses (encrypted / bombed).
         # Attaching a large file parses in a background thread just like an upload does, so it gets a job
         # too — otherwise the analyst's longest-running ingest would be the one with no visible progress.
-        jid = REGISTRY.create(display, len(data), "case", STORE.case_id).id
-        REGISTRY.begin_parse(jid, len(data))
+        # ingest_upload_path also reports a container it refuses (encrypted / bombed) as an ERROR source.
+        jid = REGISTRY.create(display, size, "case", STORE.case_id).id
+        REGISTRY.begin_parse(jid, size)
         try:
-            ingested = STORE.ingest_upload(display, data)
+            ingested = STORE.ingest_upload_path(display, dest)
         except Exception as exc:
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                pass
             REGISTRY.fail(jid, f"{type(exc).__name__}: {exc}")
             raise
         from .sources import _report  # local import: sources imports this module

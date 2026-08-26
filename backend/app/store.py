@@ -289,6 +289,15 @@ class Store:
         # millions of events on every poll — that scan, under the store lock, was a big part of why the
         # endpoint took 15 s during ingest.
         self.source_parse_errors: dict[str, int] = {}
+        # sid -> case-set event ids this source's phase 2 could not carry over AND that re-anchoring
+        # could not heal. `_swap_many` already worked this out — it is what decides to KEEP the entry
+        # instead of dropping it — and then threw it away into `EnrichResult.lost_citations`, which
+        # nothing in the tree ever read. A curated timeline entry that quietly stops resolving is the
+        # silent-omission failure refused everywhere else here, so it is reported on the source that
+        # dropped it, on the row `GET /api/case` already builds (`Source.lostCitations`).
+        # In memory only: it describes the LAST phase-2 merge against the case set as it is now, and a
+        # restart must not replay a warning about curation that has since been re-anchored or removed.
+        self.source_lost_citations: dict[str, list[str]] = {}
         self.unmapped_fields = 0
         self.rules_fired = 0
         self._rule_hits: dict[str, int] = {}      # see rule_hit_counts()
@@ -561,6 +570,9 @@ class Store:
             self.summary = ""
             self.skews = {k: v for k, v in self.skews.items() if k in keep}
             self.source_parse_errors = {k: v for k, v in self.source_parse_errors.items() if k in keep}
+            # The case set is emptied a few lines below, so every id these name is gone with it — a
+            # report that outlived the curation it was about would be a warning nobody can act on.
+            self.source_lost_citations = {}
             self.unmapped_fields = 0
             self.rules_fired = 0
             self._entities_count = 0
@@ -2161,8 +2173,23 @@ class Store:
         parser will use. An id that does not parse keeps a deterministic place rather than a random
         one — if any of them are malformed the pairing is unsafe anyway, and `one_to_one` is the guard
         that matters there.
+
+        The walk of `self.events` stays, deliberately. It is 27-60 ms per million events and it is
+        the only thing here that OBSERVES what the pool actually holds: `one_to_one` is a length
+        check against this list, and it is what decides whether ids are reused positionally or
+        reassigned with a raw-text remap. Regenerating the ids arithmetically from
+        `source_id_base`/`source_prefix` and the source's recorded event count — proposed, and
+        refused — would make that guard compare a belief against itself. The pool and the belief do
+        come apart: a source's raw events can still be sitting in the bulk buffer (`_pending`) when
+        phase 2 lands, which is a real deficit this walk sees and arithmetic would not.
+
+        What DID go is the sort, which was the expensive half — see `_ids_in_suffix_order`.
         """
         prefix = self.source_prefix.get(sid, "") or "e"
+        ids = [e.id for e in self.events if e.sourceId == sid]
+        placed = _ids_in_suffix_order(ids, prefix)
+        if placed is not None:
+            return placed
 
         def seq(eid: str) -> tuple[int, str]:
             if eid.startswith(prefix):
@@ -2172,7 +2199,7 @@ class Store:
                     pass
             return (-1, eid)
 
-        return sorted((e.id for e in self.events if e.sourceId == sid), key=seq)
+        return sorted(ids, key=seq)
 
     def enrich_source(self, sid: str, batches: Optional[list] = None) -> "enrich.EnrichResult":
         """Phase 2: parse and normalize a source that is currently in the pool as raw lines.
@@ -2600,6 +2627,13 @@ class Store:
                 # the hint routes `bump` to invalidate(), which is the default for everything but a
                 # rolling merge - see search.note_append.
                 self._append_hint = None
+                # `_owner_of` below needs the index that describes `base`, and the next statement
+                # overwrites it. It used to READ `self.event_index` after the swap, so it was handed
+                # the NEW index and `.get(<an id the merge dropped>)` was always None — which is the
+                # one question it is asked. `lost` therefore came back empty on every merge and no
+                # dropped citation was ever attributed to a source. The retry above has just confirmed
+                # `self.events is base` under this same lock, so this is base's index.
+                prev_index = self.event_index
                 self.events = merged
                 self.event_index = index
                 self.ts = ts
@@ -2616,9 +2650,8 @@ class Store:
                     # events that is seconds during which no request is served.
                     #
                     # It is needed for at most `len(case_set)` ids, and the OLD index answers each in
-                    # O(1): `self.event_index` still describes `base` here, because the retry above
-                    # has just confirmed `self.events is base` under this same lock.
-                    old_index = self.event_index
+                    # O(1) — `prev_index`, captured above BEFORE the swap overwrote it.
+                    old_index = prev_index
 
                     def _owner_of(eid: str) -> Optional[str]:
                         pos = old_index.get(eid)
@@ -2654,8 +2687,40 @@ class Store:
         # ids just moved for a whole batch of sources: re-point any entry whose pointer no longer
         # matches its anchor. Cheap when nothing drifted — it walks the case set, not the pool.
         self._reanchor_case_set()
+        self._record_lost_citations(lost)
         enrich.MERGE.finish()
         return lost
+
+    def _record_lost_citations(self, lost: dict[str, list[str]]) -> None:
+        """Report, per source, the curated entries whose evidence pointer this merge really did lose.
+
+        Called AFTER `_reanchor_case_set`, and that ordering is the whole point: an entry whose line
+        is still in the pool under a new id has just been re-pointed at it and has lost NOTHING —
+        reporting it would be a warning about work that already succeeded. What is left is an entry
+        that is still keyed on an id the pool no longer has: the line is genuinely gone (a CSV header
+        row phase 2 correctly drops, a record the two phases split differently). Those stay on the
+        timeline, deliberately, and now they say so.
+
+        Every source in the merge is written, including the ones that lost nothing — a source is
+        re-enriched after an error, and a stale report of a citation that has since come back is worse
+        than none. Bounded by the case set, which is dozens of entries; this walks it, not the pool.
+        """
+        with self.lock:
+            for sid, ids in lost.items():
+                still = [k for k in ids if k in self.case_set and k not in self.event_index]
+                if still:
+                    self.source_lost_citations[sid] = still
+                else:
+                    self.source_lost_citations.pop(sid, None)
+            if any(lost.values()):
+                for sid, ids in self.source_lost_citations.items():
+                    src = self.sources.get(sid)
+                    if src is not None and ids:
+                        print(f"[iris] {src.file}: {len(ids)} curated timeline entr"
+                              f"{'y' if len(ids) == 1 else 'ies'} lost the event id "
+                              f"{'it cited' if len(ids) == 1 else 'they cited'} to a re-parse and could "
+                              f"not be re-anchored — the entries are kept, the line is gone: "
+                              f"{', '.join(ids[:5])}{' …' if len(ids) > 5 else ''}", flush=True)
 
     @staticmethod
     def _family_for_delimited(filename: str) -> str:
@@ -3328,6 +3393,7 @@ class Store:
                 self.source_prefix.pop(sid, None)
                 self.skews.pop(sid, None)
                 self.source_parse_errors.pop(sid, None)
+                self.source_lost_citations.pop(sid, None)
                 self.source_member.pop(sid, None)
                 path = self.source_paths.pop(sid, None)
                 if path is not None:
@@ -3622,14 +3688,9 @@ class Store:
                           self.sources[sid].range, self.sources[sid].enrich) for sid in order}
         code = {sid: k for k, sid in enumerate(order)}
         arr = np.fromiter((code.get(e.sourceId, -1) for e in events), dtype=np.int32, count=len(events))
-        groups = []
-        for sid in order:
-            idx = np.flatnonzero(arr == code[sid])
-            if len(idx):
-                groups.append((sid, idx))
-        stray = np.flatnonzero(arr < 0)
-        if len(stray):
-            groups.append(("", stray))   # events of a source that is gone: extracted, never cached
+        # ONE stable counting split, not one `flatnonzero` pass per source — see `_split_by_code`,
+        # which is byte-identical to the scan it replaced and is required to stay that way.
+        groups = _split_by_code(arr, order, code)
         sigs = {sid: f"{GRAPH_FORMAT}|{m[0]}|{m[1]}|{m[2]}|{m[3]}" for sid, m in meta.items()}
         return groups, sigs
 
@@ -3905,16 +3966,22 @@ class Store:
             # runs on a request thread.
             row = live.get(src.id) if live else None
             live_row = row is not None and (src.state == "PARSING" or src.enrich == "enriching")
+            # Curation this source's phase 2 could not carry over. Same lifecycle as `progress`:
+            # attached here, never written onto the stored Source, so nothing persists it into the
+            # parsed-pool cache or the library index.
+            dropped = self.source_lost_citations.get(src.id)
             # Live parse detail only while the source is genuinely being read: a tracker row can
             # outlive the work by a moment (finish() is the last statement of the parse), and a READY
             # source showing a live percentage is a claim about work that is over.
-            if not live_row and not src.sample:
+            if not live_row and not src.sample and not dropped:
                 return src
             update: dict = {}
             if live_row:
                 update["progress"] = ParseProgressInfo(**row)
             if src.sample:
                 update["sample"] = None
+            if dropped:
+                update["lostCitations"] = list(dropped)
             return src.model_copy(update=update)
 
         with self.lock:
@@ -4083,6 +4150,93 @@ def _build_index(events: list) -> dict:
     (`enrich.MergeProgress`), not to pretend the wait can be chunked away.
     """
     return {e.id: i for i, e in enumerate(events)}
+
+
+def _ids_in_suffix_order(ids: list[str], prefix: str) -> Optional[list[str]]:
+    """`ids` ordered by their hex suffix in ONE pass, or None when they are not a clean 1..k run.
+
+    `_raw_ids_in_record_order` ended in `sorted(ids, key=seq)`, which is a Python key call and a tuple
+    comparison per id. That sort — not the pool walk in front of it — is the expensive half of the
+    call as soon as one source is large: measured, a 10 M-event source costs ~0.5 s to gather and
+    5.5 s (already chronological) to 29 s (a merged, out-of-order syslog) to sort. The analyst has a
+    10 M-row CSV, and phase 2 pays this every time that source is interpreted.
+
+    Phase 1 assigns ids strictly in record order (`enrich._raw_events` increments once per record), so
+    a source's ids are `prefix + hex(1..k)`. When the gathered list IS that set, each once, ordering
+    it is a bucket placement: `seq`'s primary key is precisely that integer, all k are distinct, so
+    there are no ties to break and the placed list EQUALS `sorted(ids, key=seq)` by construction.
+
+    Anything else refuses and the caller falls back to the original expression — a gap, a duplicate, a
+    foreign prefix, a suffix that is not hex, a value outside 1..k. That refusal is the whole safety
+    argument: this may only take the fast path when it has SEEN the ids that justify it, never when it
+    has merely computed which ids ought to be there. Handing a reused id back to the wrong line is
+    what CLAUDE.md calls the worst bug in this project (see `_raw_ids_in_record_order`), so the
+    function is proved observationally identical on every input rather than on the expected one —
+    `tests/test_enrich_id_order.py` runs the property against `sorted(key=seq)` on random input.
+    """
+    k = len(ids)
+    slots: list[Optional[str]] = [None] * k
+    plen = len(prefix)
+    for eid in ids:
+        if not eid.startswith(prefix):
+            return None
+        try:
+            v = int(eid[plen:], 16)
+        except ValueError:
+            return None
+        # `int()` accepts leading/trailing space and a sign, and '0x' forms; the range check plus the
+        # occupied-slot check below reject every one of those that could collide, and a suffix that
+        # merely SPELLS the right number differently ('01' for 1) is caught by the duplicate slot.
+        if v < 1 or v > k or slots[v - 1] is not None:
+            return None
+        slots[v - 1] = eid
+    # k distinct slots filled by k ids: no None survives, and the list is ascending in the key.
+    return slots  # type: ignore[return-value]
+
+
+def _split_by_code(arr: np.ndarray, order: list[str], code: dict[str, int]) -> list[tuple[str, np.ndarray]]:
+    """[(sourceId, ascending pool positions)] in `order`, strays (code < 0) LAST under the name "".
+
+    This was one `np.flatnonzero(arr == code[sid])` PER SOURCE — a full pass over the whole pool for
+    every file in the workspace, so the analyst's 680-file library cost 680 passes over 11.4 M int32
+    rows on every graph build. Measured at that shape: 5.1-9.4 s for the loop against 0.65 s here.
+
+    One stable counting split replaces it: a histogram of the codes gives each group's extent, and a
+    STABLE argsort of the codes lists every position grouped by code and ascending WITHIN each code —
+    which is exactly what `flatnonzero` returned, group for group. Equality is by construction and not
+    by luck: stability is the documented guarantee of `kind="stable"`, and it is the only property
+    relied on. The dtype hint below is a speed choice with no bearing on the answer.
+
+    Byte-identical is the REQUIREMENT here, not a nicety (CLAUDE.md, "Parallel graph extraction"):
+    chunk order reproduces dict insertion order, which is the node ranking's positional tie-break, so
+    a reordered group would change the graph without changing a single event. The group order, the
+    "" stray group's place at the end, the omission of empty groups, the ascending positions and the
+    intp dtype all match the scan; `tests/test_graph_groups_split.py` pins each against it on
+    randomised input.
+
+    Codes are shifted by one so the stray bucket (-1) becomes 0 and the histogram needs no mask. int16
+    is used when it fits because numpy radix-sorts small integer keys — measured 7.8x against the scan
+    where int32 keys managed 3.6x — and int32 is the correctness-preserving fallback for the (absurd)
+    case of more than 32k sources, where the per-source loop is hopeless anyway.
+    """
+    n = len(order)
+    keys = arr + 1
+    keys = keys.astype(np.int16 if n + 1 <= 32767 else np.int32, copy=False)
+    counts = np.bincount(keys.astype(np.intp, copy=False), minlength=n + 1)
+    bounds = np.zeros(n + 2, dtype=np.intp)
+    np.cumsum(counts[:n + 1], out=bounds[1:])
+    positions = np.argsort(keys, kind="stable")
+    groups: list[tuple[str, np.ndarray]] = []
+    for k, sid in enumerate(order):
+        s, e = int(bounds[k + 1]), int(bounds[k + 2])
+        if e > s:
+            # .copy(), so each group owns its buffer exactly as `flatnonzero` did and the big argsort
+            # buffer is released with the last reference rather than pinned by 680 views of it.
+            groups.append((sid, positions[s:e].copy()))
+    s, e = int(bounds[0]), int(bounds[1])
+    if e > s:
+        groups.append(("", positions[s:e].copy()))   # a source that is gone: extracted, never cached
+    return groups
 
 
 def _epochs(events: list[Event]) -> np.ndarray:

@@ -27,11 +27,11 @@
  * rejoins by POLLING `GET /api/ai/runs/{id}?since=<seq>`. Both write into the same
  * `AiTranscriptEntry[]`, so there is one renderer, not two.
  */
-import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { api } from '../api/client';
-import type { AiAction, AiInvestigateRequest, AiRun, AiRunEvent, AiScope, AiTranscriptEntry } from '../api/types';
+import type { AiAction, AiInvestigateRequest, AiRun, AiRunEvent, AiTranscriptEntry } from '../api/types';
 import { qk, useSettings } from '../hooks/queries';
 import { useToast } from '../hooks/useToast';
 import { cx, errMsg } from '../utils/format';
@@ -39,34 +39,9 @@ import { renderMarkdown } from '../utils/markdown';
 import { FloatingWindow } from './FloatingWindow';
 import { PromptPicker } from './PromptPicker';
 import { Icon } from './icons';
-
-export interface AiTarget { scope: AiScope; id?: string; eventIds?: string[]; label: string }
-
-interface AiCtx {
-  open: (target: AiTarget) => void;
-  close: () => void;
-  isOpen: boolean;
-}
-const Ctx = createContext<AiCtx | null>(null);
-
-export function useAiPanel(): AiCtx {
-  const c = useContext(Ctx);
-  if (!c) throw new Error('useAiPanel must be used inside AiPanelProvider');
-  return c;
-}
-
-export function AiPanelProvider({ children }: { children: ReactNode }) {
-  const [target, setTarget] = useState<AiTarget | null>(null);
-  const open = useCallback((t: AiTarget) => setTarget(t), []);
-  const close = useCallback(() => setTarget(null), []);
-  const value = useMemo(() => ({ open, close, isOpen: target !== null }), [open, close, target]);
-  return (
-    <Ctx.Provider value={value}>
-      {children}
-      {target && <AiPanel target={target} onClose={close} />}
-    </Ctx.Provider>
-  );
-}
+// The context, the `useAiPanel` hook and this type live in AiPanelContext.tsx, which is what the app
+// imports. This module is loaded only when the panel is actually opened — see the note there.
+import type { AiTarget } from './AiPanelContext';
 
 const POLL_MS = 900;
 // How often streamed prose is committed to state. Tokens arrive faster than anything can be read and

@@ -150,9 +150,15 @@ class Batch:
     nbytes: int = 0                         # source bytes this chunk covered (progress accounting)
 
 
-# Strings shorter than this are shared; longer ones are assumed unique (a URL, a user agent) and
-# sharing them costs a dict entry to save nothing.
+# Values at or under this length are ALWAYS shared: short enough that the dict entry is worth it
+# whatever the column's cardinality. Longer ones go through `_shared_long`.
 _SHARE_MAX_LEN = 64
+# A long value is never shared past this. Nothing this big repeats often enough to pay for hashing it,
+# and it is the guard against a parser handing back a whole embedded document as one field.
+_SHARE_LONG_MAX_LEN = 4096
+# Long values of ONE column examined before that column is judged. Small, because the judgement is
+# cheap to be wrong about in either direction and the cost of probing is paid on every long column.
+_SHARE_PROBE = 512
 
 
 def _shared(v: str, cache: dict[str, str]) -> str:
@@ -161,6 +167,52 @@ def _shared(v: str, cache: dict[str, str]) -> str:
     if got is None:
         cache[v] = got = v
     return got
+
+
+def _shared_long(v: str, key: str, cache: dict[str, str], stat: dict[str, list[int]],
+                 off: set[str]) -> str:
+    """`_shared` for a value over `_SHARE_MAX_LEN` — but only while its own COLUMN keeps repeating.
+
+    The old rule was a flat 64-character cutoff, on the reasoning that a longer value "is assumed
+    unique (a URL, a user agent) and sharing it costs a dict entry to save nothing". Half of that is
+    right and half of it is backwards, and the half that is backwards is expensive:
+
+      * A URL, a request id, a signature IS unique, and sharing it does cost a dict entry for nothing.
+      * A **user agent** is the opposite. Measured on a 20-column proxy CSV: eight distinct 110-character
+        agent strings across 20,000 rows, and the cutoff refused every one of them — **160 bytes per
+        event**, 1.6 GB on a 10 M-event pool, on a machine that segfaults under allocation pressure and
+        where pool memory is the ceiling on how much evidence Iris can hold. A Windows event message,
+        a category path, a policy name, a TLS cipher suite and a referrer are all the same shape:
+        LONG and LOW-CARDINALITY, which is exactly what sharing exists for.
+
+    So length is the wrong question; CARDINALITY is the question, and cardinality is a property of the
+    COLUMN, not of the value. Simply raising the cutoff asks neither: measured on a corpus whose long
+    columns are all unique, `_SHARE_MAX_LEN = 512` saved **zero** bytes and cost **17 %** wall clock
+    (64.3 -> 75.0 us/event), because every one of those values still has to be hashed end to end before
+    the dict can report a miss. Capping the cache would not have helped — the cost is the lookup, not
+    the entry.
+
+    Each key therefore gets `[examined, hits]`. After `_SHARE_PROBE` long values it is judged once: a
+    hit rate under half puts the column in `off` and it is left alone for the rest of the batch. A
+    low-cardinality column keeps ~100 % and keeps sharing; a unique one pays 512 lookups and stops.
+    The state is per BATCH and dies with it, exactly like `cache` — still never `sys.intern`, which is
+    immortal and would turn a high-cardinality column into a leak.
+    """
+    st = stat.get(key)
+    if st is None:
+        stat[key] = st = [0, 0]
+    got = cache.get(v)
+    if got is None:
+        cache[v] = v
+    else:
+        v = got
+        st[1] += 1
+    st[0] += 1
+    if st[0] >= _SHARE_PROBE and st[1] * 2 < st[0]:
+        # Judged, once. The caller tests `off` BEFORE calling, so a dead column costs one set
+        # membership on a key whose hash is already cached — not a call and a dict walk per value.
+        off.add(key)
+    return v
 
 
 def normalize_batch(parsed: list[ParsedEvent], sid: str, filename: str, family: str) -> Batch:
@@ -194,6 +246,10 @@ def normalize_batch(parsed: list[ParsedEvent], sid: str, filename: str, family: 
     # One entry per DISTINCT string in this batch. Scoped to the batch, never `sys.intern`:
     # interning is immortal, and a high-cardinality column (a URL, a request id) would then be a leak.
     shared: dict[str, str] = {}
+    # per-COLUMN [examined, hits] for values over `_SHARE_MAX_LEN`, and the columns already judged
+    # not to repeat — see `_shared_long`
+    long_stat: dict[str, list[int]] = {}
+    long_off: set[str] = set()
     events: list[Event] = []
     for i in range(n):
         pe = parsed[i]
@@ -226,7 +282,14 @@ def normalize_batch(parsed: list[ParsedEvent], sid: str, filename: str, family: 
         for k, v in pe.fields.items():
             if v is None or v == "":
                 continue
-            fields[_shared(k, shared)] = _shared(v, shared) if len(v) <= _SHARE_MAX_LEN else v
+            k = _shared(k, shared)
+            n_v = len(v)
+            if n_v <= _SHARE_MAX_LEN:
+                v = _shared(v, shared)
+            elif n_v <= _SHARE_LONG_MAX_LEN and k not in long_off:
+                # long: shared only while THIS column keeps repeating (`_shared_long`)
+                v = _shared_long(v, k, shared, long_stat, long_off)
+            fields[k] = v
         events.append(Event(
             id="", ts=(to_iso(t) if t is not None else ""), source=family, sourceId=sid, file=filename,
             host=host, user=user, msg=pe.msg or pe.raw[:200], sev=infer_severity(pe),  # type: ignore[arg-type]

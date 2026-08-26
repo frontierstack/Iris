@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import ipaddress
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Callable, Iterable, Optional
 
 from .detect import Param, Rule, register_builtins
@@ -249,7 +250,14 @@ class _Tuning:
 
 
 # --------------------------------------------------------------------------- helpers
+@lru_cache(maxsize=65536)
 def _is_public(value: str) -> bool:
+    """Cached because rule 0018 asks it once per (host, ip-neighbour) PAIR, not once per address:
+    on the analyst-sized graph that is 45,831 calls over ~7,000 distinct addresses, and each one
+    parses the string with `ipaddress` and then asks six properties of the result — measured 1.77 s
+    of a 6.42 s profile. Same input, same answer; `normalize.is_public_ip` is cached on the detection
+    path for exactly this reason. The size is bounded so a long-lived process cannot grow one entry
+    per address it has ever seen."""
     try:
         ip = ipaddress.ip_address(value)
     except ValueError:
@@ -304,8 +312,10 @@ def _neighbours_by_type(builder: Any) -> dict[str, dict[str, dict[str, set[str]]
     """
     out: dict[str, dict[str, dict[str, set[str]]]] = {}
     for (src, dst, rel) in builder.edges:
-        st, _ = _split(src)
-        dt, _ = _split(dst)
+        # `_split` inlined: only the TYPE half is wanted here and this runs twice per relation —
+        # 442,478 calls on the analyst's graph, each returning a tuple that is immediately discarded.
+        st = src.partition(":")[0]
+        dt = dst.partition(":")[0]
         out.setdefault(src, {}).setdefault(rel, {}).setdefault(dt, set()).add(dst)
         out.setdefault(dst, {}).setdefault(rel, {}).setdefault(st, set()).add(src)
     return out
@@ -335,6 +345,20 @@ def evaluate(builder: Any) -> list[GraphFinding]:
 
     Findings are returned severity-first, then by the size of the thing found, so the top of the list is
     the largest fan-out at the highest severity rather than whichever rule happened to run first.
+
+    A candidate is collected as a CHEAP TUPLE — its metric, its node, and whatever the sentence will
+    need — and `_finding` runs only for the rows that survive `MAX_FINDINGS_PER_RULE`. That matters
+    because `_finding` formats a summary, sorts the neighbour ids and, above all, calls `_cite`, which
+    walks a node's head-plus-ring event indices and resolves each one against the pool. Measured on a
+    graph of the size CLAUDE.md records for the analyst's workspace (18,429 nodes / 221,239 relations):
+    64,418 findings were built and cited in order to return 250.
+
+    It is EXACT, not an approximation of the old answer. `emit` sorted the finished findings on
+    `-f.metric` with a stable sort, so a tie was broken by the order the nodes were appended, which is
+    `builder.nodes` iteration order. The tuples are appended in that same order and sorted on the same
+    number by the same stable sort, so the survivors and their order cannot move.
+    `tests/test_graph_rules_candidates.py` keeps the build-everything-first version as the oracle and
+    compares finding for finding on randomised graphs.
     """
     off = _disabled()
     rules = {r.id: r for r in GRAPH_RULES if r.id not in off}
@@ -345,9 +369,9 @@ def evaluate(builder: Any) -> list[GraphFinding]:
     index = _neighbours_by_type(builder)
     found: list[GraphFinding] = []
 
-    def emit(rule_id: str, rows: list[GraphFinding]) -> None:
-        rows.sort(key=lambda f: -f.metric)
-        found.extend(rows[:MAX_FINDINGS_PER_RULE])
+    def emit(rows: list[tuple], make: Callable[[tuple], GraphFinding]) -> None:
+        rows.sort(key=lambda r: -r[0])          # r[0] IS the metric, and the sort is stable
+        found.extend(make(r) for r in rows[:MAX_FINDINGS_PER_RULE])
 
     # ---- fan-out rules over nodes. One pass, every node, each rule checking its own shape.
     r10 = rules.get("SIGMA-GRAPH-0010")
@@ -375,81 +399,114 @@ def evaluate(builder: Any) -> list[GraphFinding]:
     a46_det = tune.n("SIGMA-GRAPH-0046", "minDetections")
     a46_deg = tune.n("SIGMA-GRAPH-0046", "minDegree")
 
-    rows10: list[GraphFinding] = []
-    rows14: list[GraphFinding] = []
-    rows18: list[GraphFinding] = []
-    rows22: list[GraphFinding] = []
-    rows26: list[GraphFinding] = []
-    rows34: list[GraphFinding] = []
-    rows38: list[GraphFinding] = []
-    rows46: list[GraphFinding] = []
+    # (metric, node id, node, …whatever that rule's sentence needs). Nothing here formats a string,
+    # sorts a neighbour list or touches the pool.
+    rows10: list[tuple] = []
+    rows14: list[tuple] = []
+    rows18: list[tuple] = []
+    rows22: list[tuple] = []
+    rows26: list[tuple] = []
+    rows34: list[tuple] = []
+    rows38: list[tuple] = []
+    rows46: list[tuple] = []
 
     for node_id, node in builder.nodes.items():
         ntype = node.type
         if r10 and ntype == "ip":
             users = _linked(index, node_id, "user", a10_rels)
             if len(users) >= a10_min:
-                rows10.append(_finding(r10, node_id, node,
-                                       f"{node.value} authenticated as {len(users)} different accounts "
-                                       f"({', '.join(sorted(_values(users))[:5])}"
-                                       f"{', …' if len(users) > 5 else ''})",
-                                       len(users), "accounts", sorted(users), builder, overrides=ovs))
+                rows10.append((len(users), node_id, node, users))
         if r14 and ntype == "user":
             ips = _linked(index, node_id, "ip", a14_rels)
             if len(ips) >= a14_min:
-                rows14.append(_finding(r14, node_id, node,
-                                       f"{node.value} was used from {len(ips)} different addresses",
-                                       len(ips), "addresses", sorted(ips), builder, overrides=ovs))
+                rows14.append((len(ips), node_id, node, ips))
         if r18 and ntype == "host":
             ips = {i for i in _linked(index, node_id, "ip", a18_rels) if _is_public(i.partition(':')[2])}
             if len(ips) >= a18_min:
-                rows18.append(_finding(r18, node_id, node,
-                                       f"{node.value} reached {len(ips)} different public addresses",
-                                       len(ips), "external addresses", sorted(ips), builder, overrides=ovs))
+                rows18.append((len(ips), node_id, node, ips))
         if r22 and ntype in a22_types:
             hosts = _linked(index, node_id, "host")
             if len(hosts) >= a22_min:
-                rows22.append(_finding(r22, node_id, node,
-                                       f"{node.label or node.value} is present on {len(hosts)} hosts "
-                                       f"({', '.join(sorted(_values(hosts))[:5])}"
-                                       f"{', …' if len(hosts) > 5 else ''})",
-                                       len(hosts), "hosts", sorted(hosts), builder, overrides=ovs))
+                rows22.append((len(hosts), node_id, node, hosts))
         if r26 and ntype in a26_types:
             files = len(node.files)
             if files >= a26_min:
-                rows26.append(_finding(r26, node_id, node,
-                                       f"{node.value} appears in {files} different log files "
-                                       f"({', '.join(sorted(node.files)[:3])}"
-                                       f"{', …' if files > 3 else ''})",
-                                       files, "log files", [], builder, overrides=ovs))
+                rows26.append((files, node_id, node))
         if r34 and ntype == "domain":
             ips = _linked(index, node_id, "ip", a34_rels)
             if len(ips) >= a34_min:
-                rows34.append(_finding(r34, node_id, node,
-                                       f"{node.value} resolved to {len(ips)} different addresses",
-                                       len(ips), "addresses", sorted(ips), builder, overrides=ovs))
+                rows34.append((len(ips), node_id, node, ips))
         if r38 and ntype == "user":
             hosts = _linked(index, node_id, "host")
             if len(hosts) >= a38_min:
-                rows38.append(_finding(r38, node_id, node,
-                                       f"{node.value} appears on {len(hosts)} hosts "
-                                       f"({', '.join(sorted(_values(hosts))[:5])}"
-                                       f"{', …' if len(hosts) > 5 else ''})",
-                                       len(hosts), "hosts", sorted(hosts), builder, overrides=ovs))
+                rows38.append((len(hosts), node_id, node, hosts))
         if r46 and node.detections >= a46_det:
             deg = builder.degree(node_id)
             if deg >= a46_deg:
-                rows46.append(_finding(r46, node_id, node,
-                                       f"{node.value} fired {node.detections} detections and connects to "
-                                       f"{deg} other entities",
-                                       node.detections, "detections", [], builder,
-                                       sev=node.sev if node.sev in ("critical", "high") else None,
-                                       overrides=ovs))
+                rows46.append((node.detections, node_id, node, deg))
 
-    for rid, rows in (("SIGMA-GRAPH-0010", rows10), ("SIGMA-GRAPH-0014", rows14), ("SIGMA-GRAPH-0018", rows18),
-                      ("SIGMA-GRAPH-0022", rows22), ("SIGMA-GRAPH-0026", rows26), ("SIGMA-GRAPH-0034", rows34),
-                      ("SIGMA-GRAPH-0038", rows38), ("SIGMA-GRAPH-0046", rows46)):
-        emit(rid, rows)
+    def make10(r: tuple) -> GraphFinding:
+        n, node_id, node, users = r
+        return _finding(r10, node_id, node,
+                        f"{node.value} authenticated as {n} different accounts "
+                        f"({', '.join(sorted(_values(users))[:5])}"
+                        f"{', …' if n > 5 else ''})",
+                        n, "accounts", sorted(users), builder, overrides=ovs)
+
+    def make14(r: tuple) -> GraphFinding:
+        n, node_id, node, ips = r
+        return _finding(r14, node_id, node,
+                        f"{node.value} was used from {n} different addresses",
+                        n, "addresses", sorted(ips), builder, overrides=ovs)
+
+    def make18(r: tuple) -> GraphFinding:
+        n, node_id, node, ips = r
+        return _finding(r18, node_id, node,
+                        f"{node.value} reached {n} different public addresses",
+                        n, "external addresses", sorted(ips), builder, overrides=ovs)
+
+    def make22(r: tuple) -> GraphFinding:
+        n, node_id, node, hosts = r
+        return _finding(r22, node_id, node,
+                        f"{node.label or node.value} is present on {n} hosts "
+                        f"({', '.join(sorted(_values(hosts))[:5])}"
+                        f"{', …' if n > 5 else ''})",
+                        n, "hosts", sorted(hosts), builder, overrides=ovs)
+
+    def make26(r: tuple) -> GraphFinding:
+        files, node_id, node = r
+        return _finding(r26, node_id, node,
+                        f"{node.value} appears in {files} different log files "
+                        f"({', '.join(sorted(node.files)[:3])}"
+                        f"{', …' if files > 3 else ''})",
+                        files, "log files", [], builder, overrides=ovs)
+
+    def make34(r: tuple) -> GraphFinding:
+        n, node_id, node, ips = r
+        return _finding(r34, node_id, node,
+                        f"{node.value} resolved to {n} different addresses",
+                        n, "addresses", sorted(ips), builder, overrides=ovs)
+
+    def make38(r: tuple) -> GraphFinding:
+        n, node_id, node, hosts = r
+        return _finding(r38, node_id, node,
+                        f"{node.value} appears on {n} hosts "
+                        f"({', '.join(sorted(_values(hosts))[:5])}"
+                        f"{', …' if n > 5 else ''})",
+                        n, "hosts", sorted(hosts), builder, overrides=ovs)
+
+    def make46(r: tuple) -> GraphFinding:
+        dets, node_id, node, deg = r
+        return _finding(r46, node_id, node,
+                        f"{node.value} fired {dets} detections and connects to "
+                        f"{deg} other entities",
+                        dets, "detections", [], builder,
+                        sev=node.sev if node.sev in ("critical", "high") else None,
+                        overrides=ovs)
+
+    for rows, make in ((rows10, make10), (rows14, make14), (rows18, make18), (rows22, make22),
+                       (rows26, make26), (rows34, make34), (rows38, make38), (rows46, make46)):
+        emit(rows, make)
 
     # ---- edge-shaped rules. One pass over the relations.
     r30 = rules.get("SIGMA-GRAPH-0030")
@@ -458,8 +515,8 @@ def evaluate(builder: Any) -> list[GraphFinding]:
     a30_ratio = max(1, min(100, tune.n("SIGMA-GRAPH-0030", "failureRatio")))
     a42_rare = tune.n("SIGMA-GRAPH-0042", "rareCount")
     a42_busy = tune.n("SIGMA-GRAPH-0042", "busyCount")
-    rows30: list[GraphFinding] = []
-    rows42: list[GraphFinding] = []
+    rows30: list[tuple] = []
+    rows42: list[tuple] = []
     if r30 or r42:
         for (src, dst, rel), ed in builder.edges.items():
             if r30 and ed.count >= a30_min and ed.outcomes:
@@ -468,14 +525,10 @@ def evaluate(builder: Any) -> list[GraphFinding]:
                 if total and (bad * 100) // total >= a30_ratio:
                     node = builder.nodes.get(src)
                     if node is not None:
-                        pct = (bad * 100) // total
-                        rows30.append(_finding(r30, src, node,
-                                               f"{src.partition(':')[2]} → {dst.partition(':')[2]}: "
-                                               f"{pct}% of {total} {rel.replace('_', ' ')} events failed or were denied",
-                                               bad, "failed events", [dst], builder, overrides=ovs))
+                        rows30.append((bad, src, node, dst, rel, (bad * 100) // total, total))
             if r42 and ed.count <= a42_rare:
-                st, _ = _split(src)
-                dt, _ = _split(dst)
+                st = src.partition(":")[0]
+                dt = dst.partition(":")[0]
                 user_id, host_id = ("", "")
                 if st == "user" and dt == "host":
                     user_id, host_id = src, dst
@@ -485,12 +538,24 @@ def evaluate(builder: Any) -> list[GraphFinding]:
                     host = builder.nodes.get(host_id)
                     user = builder.nodes.get(user_id)
                     if host is not None and user is not None and host.count >= a42_busy:
-                        rows42.append(_finding(r42, user_id, user,
-                                               f"{user.value} appears {ed.count} time(s) on {host.value}, a host "
-                                               f"carrying {host.count:,} events",
-                                               host.count, "host events", [host_id], builder, overrides=ovs))
-    emit("SIGMA-GRAPH-0030", rows30)
-    emit("SIGMA-GRAPH-0042", rows42)
+                        rows42.append((host.count, user_id, user, host_id, host, ed.count))
+
+    def make30(r: tuple) -> GraphFinding:
+        bad, src, node, dst, rel, pct, total = r
+        return _finding(r30, src, node,
+                        f"{src.partition(':')[2]} → {dst.partition(':')[2]}: "
+                        f"{pct}% of {total} {rel.replace('_', ' ')} events failed or were denied",
+                        bad, "failed events", [dst], builder, overrides=ovs)
+
+    def make42(r: tuple) -> GraphFinding:
+        hcount, user_id, user, host_id, host, count = r
+        return _finding(r42, user_id, user,
+                        f"{user.value} appears {count} time(s) on {host.value}, a host "
+                        f"carrying {hcount:,} events",
+                        hcount, "host events", [host_id], builder, overrides=ovs)
+
+    emit(rows30, make30)
+    emit(rows42, make42)
 
     # Exclusions apply here too, but ONLY the ones that can be evaluated against a node — a node has a
     # type and a value and no fields, so an exclusion reading `dst_port` cannot be checked against one.

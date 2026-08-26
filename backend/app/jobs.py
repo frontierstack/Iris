@@ -635,7 +635,7 @@ class JobRegistry:
         This is what makes a THREADED parse (files over store.SYNC_LIMIT) land in the registry: nothing
         calls back when the thread finishes, so the job is resolved the next time anybody reads the list.
         """
-        case_id, sources = _store_snapshot()
+        _, sources = _store_snapshot()   # the active case id is deliberately unused — see the loop below
         settled = _pool_settled()
         now = time.time()
         in_flight = PARSE_PROGRESS.active()
@@ -643,9 +643,29 @@ class JobRegistry:
             self._ensure_loaded()
             changed = False
             for job in self._jobs.values():
-                # A LIBRARY job belongs to no case (`caseId` is ''), so it can never match the active
-                # case id — it would have sat in `parsing` forever now that finish() defers to us.
-                if job.state == "parsing" and job.sourceIds and job.caseId in (case_id, ""):
+                # The SOURCES decide this, never the case. `job.sourceIds` are globally unique
+                # (`uuid4().hex[:8]`, or a uuid5 of the staged name for a library file), so the rows
+                # looked up below can only ever be this job's own — which is what made the case check
+                # redundant, and what made it harmful.
+                #
+                # It used to read `job.caseId in (case_id, "")`. A library job carries '' and passed;
+                # a CASE job carries the case that was active when the upload was declared, and the
+                # moment the analyst opened another case — or created one, which the AI investigator
+                # does mid-run, or deleted this one, which leaves a `pending` id — that job matched
+                # nothing and was skipped on every sync for the life of the process. It sat at
+                # `parsing` with a spinner and stayed in the `active` count, so the Ingest screen
+                # permanently reported work that did not exist. Worse, it also swallowed the one
+                # thing this registry exists for: a source that FAILED phase 2 under the old case
+                # never had its error reported, because the row that would have carried it was never
+                # examined again.
+                #
+                # Nothing here can resolve a job wrongly as a result: every branch below still reads
+                # this job's own source rows, still refuses while any of them is PARSING, queued,
+                # enriching or (with autoEnrich on) raw, and still reports an ERROR source as an
+                # error. A job whose sources have left the workspace with the case falls to the
+                # settled/nothing-in-flight branch, which is the verdict that path already reached
+                # for a file the analyst deleted.
+                if job.state == "parsing" and job.sourceIds:
                     rows = [sources[s] for s in job.sourceIds if s in sources]
                     if (not rows and settled
                             and not any(r["sourceId"] in job.sourceIds for r in in_flight)):

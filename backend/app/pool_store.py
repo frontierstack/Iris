@@ -544,6 +544,73 @@ def forget(name: str) -> None:
         pass
 
 
+def keep_only_members(name: str, keep: "set[str]") -> bool:
+    """Prune a staged file's cache down to the members that are still in the pool.
+
+    `forget()` is right when the BYTES are going away — every entry keyed on them is unreachable for
+    good. It is wrong for the other delete: one member of a staged archive removed while its siblings
+    stay. `Store.delete_sources` deliberately refuses to unlink a file a surviving sibling still reads
+    from, so the container is still staged, still expanded into the pool, and still worth its cache —
+    but `forget()` unlinked the manifest and EVERY member `.pkl`, so one click threw away the cached
+    parse of all the others and the next restart re-expanded the container and re-parsed every member
+    of it. On a 200-member bundle that is the whole of its ingest cost, paid again.
+
+    It was not only slow. A re-expansion re-parses from the bytes, which are still there, so the
+    member the analyst deleted came straight back into the pool — same sid, same events. The delete
+    did not survive a restart at all. Rewriting the manifest without that sid is what makes it stick.
+
+    The invariant `load()` rests on is untouched: it needs the manifest AND every member the manifest
+    names, and "a partially cached archive is a miss, never a partial pool". A manifest that no longer
+    names the deleted member is fully satisfied by the members that remain — this narrows what the
+    manifest CLAIMS, it never serves a claim it cannot meet.
+
+    Order is manifest first, member files second. Interrupted the other way round the manifest would
+    name a `.pkl` that is gone, which is a miss and a re-parse; this way an interruption leaves a
+    manifest that is already consistent with what is on disk.
+    """
+    if not name:
+        return False
+    if not enabled():
+        # Nothing will read these entries. Behave exactly as `forget()` did rather than leaving a
+        # half-pruned tree behind a switch that may be turned back on.
+        forget(name)
+        return False
+    d = _dir()
+    stem = _stem(name)
+    try:
+        sig = signature(name)
+        man = _read(d / f"{stem}.manifest", sig) if sig else None
+        if not man:
+            # No manifest, a stale one, or the file itself has changed: the siblings could not be
+            # served from this entry anyway, so there is nothing to protect and it is pure disk.
+            forget(name)
+            return False
+        listed = [str(s) for s in (man.get("sids") or [])]
+        sids = [s for s in listed if s in keep]
+        dropped = [s for s in listed if s not in keep]
+        if not dropped:
+            return True                       # nothing left the pool; leave the entry exactly as it is
+        if not sids:
+            forget(name)                      # the last member went — same case as the whole file going
+            return True
+        unparsed = [r for r in (man.get("unparsed") or [])
+                    if isinstance(r, dict) and str(r.get("sid") or "") in keep]
+        if not _write(d / f"{stem}.manifest",
+                      {"format": POOL_FORMAT, "sig": sig, "sids": sids,
+                       "unparsed": unparsed, "at": time.time()}):
+            # A manifest that could not be narrowed still names the deleted member, so it would
+            # restore it on the next boot. Losing the cache is the safe direction; keeping a manifest
+            # that resurrects deleted evidence is not.
+            forget(name)
+            return False
+        for sid in dropped:
+            (d / f"{stem}.{sid}.pkl").unlink(missing_ok=True)
+        return True
+    except OSError:
+        forget(name)
+        return False
+
+
 def prune() -> int:
     """Delete cache entries whose staged file is gone. Returns the number of files removed.
 

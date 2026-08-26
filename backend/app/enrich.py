@@ -612,15 +612,28 @@ class EnrichQueue:
                 # itself rather than on work in flight, and the phase has to say so or the next source
                 # looks like it is being interpreted when nothing is.
                 self._set_phase("idle")
-            if drained:
-                # The storm is over: this is the ONE index warm that matters. Every bump during the run
-                # skipped it (Store.warm_search_async), because a ~75 s pure-Python rebuild that is
-                # discarded on the next source's bump is what starves the GIL and makes every other
-                # request slow. Failing here must never take the worker down — a search will warm it too.
-                try:
-                    store.warm_search_async()
-                except Exception:
-                    log.debug("post-enrichment index warm failed", exc_info=True)
+                if drained:
+                    # The storm is over: this is the ONE index warm that matters. Every bump during the
+                    # run skipped it (Store.warm_search_async), because a ~75 s pure-Python rebuild that
+                    # is discarded on the next source's bump is what starves the GIL and makes every
+                    # other request slow. Failing here must never take the worker down — a search will
+                    # warm it too.
+                    #
+                    # It lives INSIDE this `finally` because the batch has more than one way out and
+                    # they must all reach it. It used to sit after the try/finally, which the parallel
+                    # small-source path never reached: `_parse_small_parallel` is followed by
+                    # `continue`, and `continue` runs the `finally` and then goes straight back to the
+                    # top of the loop, skipping everything after it. A library of many small files is
+                    # peeled by `_peel_small` and drains through exactly that path, so the compensating
+                    # warm this whole design leans on never fired — the index stayed stale after a run
+                    # that may have taken hours, and the analyst's next search paid the scan path
+                    # (35-45 s per query at 11 M events) before anything rebuilt it. Every `continue`
+                    # in this loop is therefore safe by construction now, including the `pool_loading`
+                    # one: that path puts its source back on the queue, so `drained` is False.
+                    try:
+                        store.warm_search_async()
+                    except Exception:
+                        log.debug("post-enrichment index warm failed", exc_info=True)
 
 
 # How much phase-2 work shares one pool merge. Bounded by BOTH a count and a wall clock: the merge is

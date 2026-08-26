@@ -5,11 +5,12 @@ array backend from app.compute.xp() (cupy when CUDA is active, numpy otherwise).
 """
 from __future__ import annotations
 
+import heapq
 import os
 import re
 from array import array
 from collections import Counter, defaultdict
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Iterator, Optional
 
 import numpy as np
 
@@ -67,6 +68,16 @@ _EMPTY_I = np.zeros(0, dtype=np.int32)
 def _ints(idx: array) -> np.ndarray:
     """An `array('i')` event-index list as an int32 numpy view — no copy, no per-element Python int."""
     return np.frombuffer(idx, dtype=np.int32) if len(idx) else _EMPTY_I
+
+
+def _dedup(it: Iterable[int]) -> Iterator[int]:
+    """Drop repeats from an ASCENDING run — an event that fired two of the rules being asked about
+    appears in both per-rule lists and must still be considered once, in its own position."""
+    prev = -1
+    for j in it:
+        if j != prev:
+            yield j
+            prev = j
 
 
 # Rows per chunk of the co-occurrence product. Kept under 2**24 so the float32 accumulation used on the
@@ -161,6 +172,16 @@ class Analyzer:
         # reads them (len, slice, iterate, set()) at 4 bytes an entry instead of a 28-byte int object.
         self.entity_index: dict[str, array] = defaultdict(lambda: array("i"))
         self.source_index: dict[str, array] = defaultdict(lambda: array("i"))
+        # Seed indices per DETECTION id, ascending. `correlations_for` answers "what else fired the
+        # same rule?" and used to do it by walking EVERY seed in the pool and building a transient set
+        # of that event's detection ids — O(all seeds) with an allocation each, on the event-detail
+        # request thread, for a page that is supposed to be a dictionary lookup. Measured on this
+        # machine at 150,000 seeds: 75-80 ms of that one scan per open, and 240 ms for the whole call
+        # once a broadly-firing rule gave it a hundred thousand candidates to insert and sort.
+        # It is filled here because this pass is ALREADY reading `e.detections`, so it is free; it is
+        # array('i') for the same reason the two indexes above are — 4 bytes an entry rather than a
+        # 28-byte int object — and it holds one entry per (seed, detection), not per event.
+        self.seeds_by_rule: dict[str, array] = defaultdict(lambda: array("i"))
         self.templates: Counter = Counter()
         self.seeds: list[int] = []
         self._egress = 0
@@ -177,7 +198,18 @@ class Analyzer:
                 # poison every span it touched. It keeps its detections and is still searchable; it just
                 # does not claim a position in a sequence. Enriching the source is what gives it one.
                 self.seeds.append(i)
-                if any(d.id == "SIGMA-NET-0022" for d in e.detections) and e.fields.get("bytes", "").isdigit():
+                egress = False
+                for d in e.detections:
+                    # `i` only ever grows, so comparing the last entry is a COMPLETE dedupe. It is
+                    # here because nothing stops a rule tagging one event twice (`add_detection`
+                    # appends), and a repeated index would spend one of the bounded candidate slots
+                    # in `_same_detection` on an event that is already in the list.
+                    idx = self.seeds_by_rule[d.id]
+                    if not idx or idx[-1] != i:
+                        idx.append(i)
+                    if d.id == "SIGMA-NET-0022":
+                        egress = True
+                if egress and e.fields.get("bytes", "").isdigit():
                     self._egress += int(e.fields["bytes"])
         # Indices of the events that actually carry a time, for the handful of places that need the
         # pool's overall span. `ts` is sorted with the unstamped ones last, so this is a prefix.
@@ -452,6 +484,39 @@ class Analyzer:
         return f"co-occur in {fams.most_common(1)[0][0]}"
 
     # ------------------------------------------------------ correlations
+    def _same_detection(self, cands: dict[int, list[str]], i: int, det_ids: set[str], limit: int) -> None:
+        """Append "same detection" to the candidates that earn it, without walking the pool.
+
+        There are two groups and they are different problems:
+
+        * A `j` the entity and time passes have ALREADY put in `cands` only needs the reason appended
+          IN PLACE, so its position in the dict — which is what the final stable sort uses to break a
+          tie — does not move. Both of those passes are already bounded (5,000 per entity, 2,000 in
+          the window), so this loop is bounded too.
+        * Every OTHER matching seed can be reached through this one reason and no other, so `rank`
+          scores it `(-4, -sev, |dt|)` — the first element CONSTANT, because a seed always has
+          detections. At most `limit` of them can survive `sorted(cands, key=rank)[:limit]`, so only
+          the `limit` smallest by that exact tail are inserted, in ascending index order. That is the
+          order the old full pass inserted them in, so a tie is broken exactly as it was before.
+
+        The old code asked the same question from the other end — `for j in self.seeds`, building a set
+        of every seed's detection ids and intersecting — which is the whole pool's worth of seeds and
+        one allocation each, per event opened. `seeds_by_rule` is that question's index.
+        """
+        events, ts, seed_mask = self.events, self.ts, self.seed_mask
+        for j in list(cands):
+            if j != i and seed_mask[j] and any(d.id in det_ids for d in events[j].detections):
+                cands[j].append("same detection")
+        if len(det_ids) == 1:
+            merged: Iterable[int] = self.seeds_by_rule.get(next(iter(det_ids)), ())
+        else:
+            merged = _dedup(heapq.merge(*(self.seeds_by_rule.get(r, ()) for r in sorted(det_ids))))
+        ti = ts[i]
+        best = heapq.nsmallest(limit, ((-SEV_ORDER.get(events[j].sev, 0), abs(ts[j] - ti), j)
+                                       for j in merged if j != i and j not in cands))
+        for j in sorted(k[2] for k in best):
+            cands[j].append("same detection")
+
     def correlations_for(self, i: int, limit: int = 7) -> list[Correlation]:
         events, ts = self.events, self.ts
         e = events[i]
@@ -473,9 +538,7 @@ class Analyzer:
                 cands[j].append(f"within {int(abs(ts[j] - ts[i]))}s")
         det_ids = {d.id for d in e.detections}
         if det_ids:
-            for j in self.seeds:
-                if j != i and det_ids & {d.id for d in events[j].detections}:
-                    cands[j].append("same detection")
+            self._same_detection(cands, i, det_ids, limit)
 
         def rank(j: int) -> tuple:
             reasons = cands[j]

@@ -2,7 +2,7 @@ import { Icon } from '../components/icons';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api/client';
-import { useAiPanel } from '../components/AiPanel';
+import { useAiPanel } from '../components/AiPanelContext';
 import { NoteAboutButton } from '../components/CaseNotes';
 import { AddToCaseButton } from '../components/CaseSet';
 import { ErrorState, Loading, SevTag } from '../components/ui';

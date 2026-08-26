@@ -1,12 +1,12 @@
 import { useQuery } from '@tanstack/react-query';
-import { useEffect, useMemo, useState, type ReactNode, useRef } from 'react';
+import { Suspense, useEffect, useMemo, useState, type ReactNode, useRef } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { qk, useAnomalyCount, useCase, useCases, useHealth, useInvalidateCaseData } from '../hooks/queries';
 import { useHotkey } from '../hooks/useHotkey';
 import type { PoolProgress } from '../api/types';
 import { cx, fmtBytes, fmtCompact, fmtEta } from '../utils/format';
-import { useAiPanel } from './AiPanel';
+import { useAiPanel } from './AiPanelContext';
 import { EnrichBanner } from './Enrichment';
 import { Icon } from './icons';
 import { Toasts } from './ui';
@@ -336,7 +336,23 @@ export function AppShell({ children }: { children?: ReactNode }) {
             of the corpus. The strip removes itself the moment nothing is outstanding — a `skipped`
             source is a decision, not an omission, and never keeps it alive. */}
         <EnrichBanner />
-        <div className="content">{children ?? <Outlet />}</div>
+        {/* Each screen is its own chunk (see App.tsx). The boundary sits HERE, inside the shell, so the
+            sidebar, the header and the banner stay painted while a route's code arrives — a boundary
+            around the router would blank the whole window instead.
+
+            The fallback is NOTHING, on purpose, and the trade is stated rather than hidden: for the few
+            milliseconds a chunk takes, the content area is EMPTY while the shell stays put. These chunks
+            are same-origin, content-hashed and served `immutable` (see "Deploying: FOUR caches"), so
+            after the first visit the load is a cache read, and the first visit after a deploy is one
+            local request — measured cold, cache disabled, on this host at ~30 ms for the largest of
+            them (the graph). A spinner that appears and disappears inside one
+            frame is worse than a blank region: it is motion the analyst cannot act on and cannot even
+            read, on a screen whose rule is that nothing animates for decoration. If a chunk ever grew
+            large enough to be seen waiting, the honest fallback would be the screen's own skeleton, not
+            a spinner. */}
+        <div className="content">
+          <Suspense fallback={null}>{children ?? <Outlet />}</Suspense>
+        </div>
       </main>
       <Toasts />
     </div>

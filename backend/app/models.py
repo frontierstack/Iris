@@ -329,6 +329,16 @@ class Source(BaseModel):
     # Live parse detail, attached per RESPONSE (never stored on the source and never persisted) — see
     # ParseProgressInfo. Non-null only while this source is genuinely being read.
     progress: Optional[ParseProgressInfo] = None
+    # Case-set event ids this source's phase 2 could not carry over, and that re-anchoring could not
+    # heal — the line they cited is genuinely gone. `_swap_many` has always WORKED THIS OUT (it is what
+    # decides to keep the entry rather than drop it) and then thrown it away into
+    # `EnrichResult.lost_citations`, which nothing logged, served or displayed. A curated entry that
+    # silently stops resolving is the silent-omission failure this project refuses everywhere else, so
+    # it is reported on the source whose enrichment dropped it.
+    # Attached per RESPONSE from `Store.source_lost_citations`, exactly like `progress`: never stored on
+    # the object `pool_store` serialises, so a restart cannot replay a stale warning about curation that
+    # has since been re-anchored or removed. Empty, never null — "nothing lost" is a real answer.
+    lostCitations: list[str] = Field(default_factory=list)
 
 
 class Cluster(BaseModel):

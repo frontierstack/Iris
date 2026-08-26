@@ -30,7 +30,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 import numpy as np
 
@@ -146,6 +146,12 @@ class SearchIndex:
     # scan makes several. `np.frombuffer` shares the allocation, so this costs no extra memory; it is
     # None when the index lives on the GPU, where the vector path is the right one anyway.
     raw: Optional[bytes] = None
+    # The HOST arrays this index was packed from, held ONLY between `build_index` returning and
+    # `get_index` persisting them — see `get_index` for why the persist happens there and not here.
+    # `build_index` sets it, `get_index` clears it the moment the write is done, and it is None on
+    # every index anyone else ever sees. It is excluded from repr/compare because it is multi-GB
+    # scratch, not part of what an index IS.
+    host_arrays: Optional[dict] = field(default=None, repr=False, compare=False)
 
 
 _SEP_S = _SEP.decode("latin-1")
@@ -298,11 +304,9 @@ def build_index(events: list[Event], ts: np.ndarray, version: int, sig: str = ""
     t0 = time.perf_counter()
     n = len(events)
     _status_begin(n, version)
-    # Append into ONE growing bytearray instead of materializing every document and joining them: the
-    # join held the whole corpus twice at peak, which on a 1.16 GB index is 2.3 GB of transient RSS.
-    # One document per event into a list, then ONE join and ONE cumsum. `packed += _doc(e)` grew a
-    # bytearray by reallocation and wrote each offset in Python; the join writes the buffer once and
-    # the offsets come from numpy. Measured at 1 M events: 7.0 s -> 5.0 s, identical bytes and offsets.
+    # One document per event into a list, then ONE cumsum for the offsets and ONE buffer for the bytes.
+    # `packed += _doc(e)` grew a bytearray by reallocation and wrote every offset in Python; the offsets
+    # come from numpy instead. Measured at 1 M events: 7.0 s -> 5.0 s, identical bytes and offsets.
     docs: list[bytes] = []
     append = docs.append
     for i, e in enumerate(events):
@@ -312,11 +316,44 @@ def build_index(events: list[Event], ts: np.ndarray, version: int, sig: str = ""
     offsets = np.zeros(n + 1, dtype=np.int64)
     if n:
         np.cumsum(np.fromiter(map(len, docs), dtype=np.int64, count=n), out=offsets[1:])
-    packed = bytearray(b"".join(docs))
-    del docs
+    # ONE buffer, and the documents are LET GO once it exists. Two separate mistakes lived here:
+    #
+    #   * `bytearray(b"".join(docs))` made a second full copy — the join allocates the whole corpus
+    #     and the bytearray copies it — so the pack held three copies of every byte at peak.
+    #   * `del docs` freed NOTHING. `append = docs.append` is a bound method, so it kept the list, and
+    #     every document in it, alive for the whole rest of the function: through `byte_histogram`
+    #     and (before the persist moved to `get_index`) through a 49 s write of the cache file. The
+    #     `del` read as though the corpus were released there. It was not.
+    #
+    # Measured on a 289 MB buffer (300 k events), peak RSS over the pre-build baseline. Read it with
+    # `psutil.memory_info().peak_wset`, never a sampling THREAD: `b"".join` and `bytearray()` hold the
+    # GIL for their whole duration, so the sampler is not scheduled during the very allocation it is
+    # there to catch and it reports the peak as absent.
+    #
+    #   | packing                            | peak at the pack | peak of the whole build |
+    #   | bytearray(b"".join(docs)); del docs |          1.410 GB|                 1.630 GB|
+    #   | b"".join(docs); del docs            |          1.150 GB|                 1.630 GB|
+    #   | this                                |          1.150 GB|                 0.790 GB *|
+    #
+    # * the whole-build figure is not a typo and it is the point: dropping the `bytearray()` wrapper
+    #   ALONE buys nothing end to end, because the peak simply moves to `byte_histogram`, whose
+    #   `np.bincount` promotes a 64 MB chunk to intp and so allocates ~512 MB ON TOP OF WHATEVER RSS
+    #   IS AT THAT MOMENT — and with the documents still held, that moment is a whole corpus higher
+    #   than it needs to be. Only releasing them makes the second column move.
+    #
+    # Which term dominates depends on the size, and at the analyst's scale it is the copy: with a
+    # 4.1 GB buffer and a ~4.6 GB documents list, the pack peaked at ~+12.8 GB and now peaks at
+    # ~+8.7 GB. This VM SEGFAULTS under allocation pressure (see CLAUDE.md), so that is a stability
+    # question rather than a number.
+    #
+    # `packed` is therefore `bytes`, not `bytearray` — immutable, which is right for an index nothing
+    # may write to. `bytes.find` is the same memmem `_find_all` wants and `np.frombuffer` shares the
+    # same allocation, so `raw` and `text` are still ONE buffer. (`index_store.load` hands back a
+    # bytearray for the restored path; both satisfy every reader here.)
+    packed = b"".join(docs)
+    del docs, append     # `append` is a BOUND METHOD of that list: without it the `del` frees nothing
     # ONE allocation, two views: `raw` is what `bytes.find` searches, `buf` is what the vector path
-    # and the on-disk cache use. `bytes(packed)` would copy the whole buffer, so the bytearray is kept
-    # as-is — it has `.find` too.
+    # and the on-disk cache use. `np.frombuffer` shares the allocation, so the second view is free.
     raw_buf = packed
     buf = np.frombuffer(raw_buf, dtype=np.uint8) if n else np.zeros(0, dtype=np.uint8)
     sev = np.fromiter((_SEV_CODE.get(e.sev, 4) for e in events), dtype=np.int8, count=n)
@@ -352,11 +389,14 @@ def build_index(events: list[Event], ts: np.ndarray, version: int, sig: str = ""
     # after the transfer, so the device copy is counted rather than uploaded a second time
     idx.byte_counts = byte_histogram(idx.text if idx.on_gpu else buf)
     idx.build_ms = (time.perf_counter() - t0) * 1000.0
-    # Persist from the HOST arrays, which are still alive here whether or not the device copy
-    # succeeded — saving from `idx.text` would pull 5.4 GB back off the GPU to write it.
+    # CAPTURED here, WRITTEN by `get_index` — the index has to be published before a 49 s disk write,
+    # not after it. These are the HOST arrays, which are still alive whatever the device copy did:
+    # persisting from `idx.text` would pull 5.4 GB back off the GPU to write it, and that is the one
+    # property of this that may never change. Holding them costs no memory — every one of them is the
+    # array the index itself is built on, not a copy.
     if sig:
-        index_store.save(idx, sig, {"text": buf, "offsets": offsets, "sev": sev, "source": codes,
-                                    "ts": ts, "byte_counts": np.asarray(idx.byte_counts)})
+        idx.host_arrays = {"text": buf, "offsets": offsets, "sev": sev, "source": codes,
+                           "ts": ts, "byte_counts": np.asarray(idx.byte_counts)}
     _status_done(idx)
     return idx
 
@@ -715,6 +755,16 @@ def index_ready(events: list[Event], ts: np.ndarray, version: int,
     return idx
 
 
+class _SaveMeta(NamedTuple):
+    """The three fields `index_store.save` reads off an index, snapshotted before the write.
+
+    The index is live and published by then, and `note_append` mutates `version` in place on it.
+    """
+    n: int
+    version: int
+    sources: list[str]
+
+
 def get_index(events: list[Event], ts: np.ndarray, version: int, sig: str = "") -> SearchIndex:
     """The index, BUILDING IT IF NEEDED. Only the background warm may call this.
 
@@ -731,8 +781,26 @@ def get_index(events: list[Event], ts: np.ndarray, version: int, sig: str = "") 
         idx = index_from_cache(sig, events, ts, version) if sig else None
         if idx is None:
             idx = build_index(events, ts, version, sig=sig)
+        # PUBLISH FIRST, PERSIST SECOND, and the order is the whole point. Writing the cache measured
+        # `saved 4078 MB in 49 s` on the analyst's workspace, and for every one of those 49 s the
+        # correct index was finished and sitting in memory while `index_ready` still answered None —
+        # so every query that arrived took the 35-45 s scan path for an index that was already built.
+        # A query only ever takes `_lock`, so the assignment below is all it takes to end that.
         with _lock:
             _index = idx
+        host, idx.host_arrays = idx.host_arrays, None
+        if host is not None:
+            # Under `_build_lock` deliberately, NOT on a thread of its own. The lock is what stops a
+            # second build starting, and a second build means a second writer to the same cache file;
+            # queries never take it, so holding it across the write costs them nothing. What it does
+            # cost is a rebuild that wants to start during the save — which is the right trade, since
+            # that rebuild would invalidate the file being written anyway.
+            #
+            # `save` reads `n`, `version` and `sources` off what it is handed. `n` and `sources` are
+            # fixed at build; `version` is NOT — `note_append` moves it in place once the index is
+            # published, which is now possible during this write. It is passed by value so the header
+            # records the version this file was actually built for.
+            index_store.save(_SaveMeta(idx.n, idx.version, idx.sources), sig, host)
         return idx
 
 

@@ -3,7 +3,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { ENTITY_TYPES, RELATIONS, type EntityType, type GraphEdge, type GraphNode, type GraphReviewEvent, type Relation } from '../api/types';
-import { useAiPanel } from '../components/AiPanel';
+import { useAiPanel } from '../components/AiPanelContext';
 import { ScopeToggle } from '../components/CaseSet';
 import { DerivedPauseActions } from '../components/Enrichment';
 import { Icon } from '../components/icons';
