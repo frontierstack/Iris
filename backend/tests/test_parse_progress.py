@@ -547,9 +547,25 @@ def test_search_never_builds_the_index_on_the_request_path(monkeypatch) -> None:
     search_mod.invalidate()
 
 
+def _idle_index(timeout: float = 15.0) -> None:
+    """Drop the index and wait for any warm an earlier test left in flight.
+
+    `invalidate()` releases the index but cannot un-start a background warm, and while that thread
+    runs `building` is the honest status — so asserting `idle` straight after invalidating races
+    whatever ran before this test rather than saying anything about this one. This file was flaky
+    exactly there: the same code failed one run and passed the next.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        search_mod.invalidate()
+        if search_mod.index_status()["state"] != "building":
+            return
+        time.sleep(0.05)
+
+
 def test_the_index_reports_that_it_is_warming(monkeypatch) -> None:
     events, ts = _events_for_index(3000)
-    search_mod.invalidate()
+    _idle_index()
     assert search_mod.index_status()["state"] == "idle"
     search_mod.get_index(events, ts, 4243)
     st = search_mod.index_status()

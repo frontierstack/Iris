@@ -361,24 +361,37 @@ function MappingDrawer({ source, onClose, onViewRaw }: { source: Source | null; 
   const [fields, setFields] = useState<string[]>([]);
   const [delimiter, setDelimiter] = useState('');
 
+  // `sample` is a raw excerpt of the log — 1.5-2.4 kB per source, against ~365 B for the whole rest
+  // of the row — and this drawer is the only thing that reads it. Shipping it in the /api/case list
+  // was ~1.6 MB of raw log text in every poll of the most-polled endpoint at 680 files, so the list
+  // no longer carries it and the drawer fetches the one source it is actually showing.
+  const detail = useQuery({
+    queryKey: ['source', source?.id],
+    queryFn: () => api.getSource(source!.id),
+    enabled: !!source,
+    staleTime: 60_000,
+  });
+  const full = detail.data ?? source;
+
   useEffect(() => {
-    if (!source) return;
-    setDelimiter(source.delimiter ?? '');
-    const guessed = source.guessedFields ?? [];
+    if (!full) return;
+    setDelimiter(full.delimiter ?? '');
+    const guessed = full.guessedFields ?? [];
     if (guessed.length) setFields(guessed);
     else {
-      const d = source.delimiter ?? '';
-      const n = source.sample && d ? source.sample.split(d).length : 1;
+      const d = full.delimiter ?? '';
+      const n = full.sample && d ? full.sample.split(d).length : 1;
       setFields(Array.from({ length: n }, (_, i) => `field_${i + 1}`));
     }
-    // reset only when a different source opens (the case poll refreshes the object identity)
-  }, [source?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+    // reset only when a different source opens, or when its detail arrives (the case poll refreshes
+    // the object identity, which is why this cannot depend on the object itself)
+  }, [source?.id, detail.data?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const sampleParts = useMemo(() => {
-    if (!source?.sample) return [];
-    const d = delimiter || source.delimiter || '';
-    return d ? source.sample.split(d) : [source.sample];
-  }, [source, delimiter]);
+    if (!full?.sample) return [];
+    const d = delimiter || full.delimiter || '';
+    return d ? full.sample.split(d) : [full.sample];
+  }, [full, delimiter]);
 
   const mut = useMutation({
     mutationFn: () => api.setMapping(source!.id, { fields: fields.map((f) => f.trim()).filter(Boolean), delimiter: delimiter || undefined }),

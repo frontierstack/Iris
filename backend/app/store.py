@@ -3643,15 +3643,26 @@ class Store:
         live = PARSE_PROGRESS.all_rows()
 
         def _with_progress(src: Source) -> Source:
+            # `sample` is a raw excerpt of the file — measured 1,506 and 2,359 bytes on the analyst's
+            # two CSVs, against 365 bytes for everything else on the row. On a 680-file library that is
+            # ~1.6 MB of raw log text serialised into EVERY poll of the most-polled endpoint in the
+            # app, for a field exactly one screen reads: the mapping drawer, one source at a time,
+            # which fetches the source itself (`GET /api/sources/{id}`, api.getSource). So the list
+            # shape drops it. Never by mutating `src` — `self.sources` holds the real objects and this
+            # runs on a request thread.
             row = live.get(src.id) if live else None
-            if row is None:
+            live_row = row is not None and (src.state == "PARSING" or src.enrich == "enriching")
+            # Live parse detail only while the source is genuinely being read: a tracker row can
+            # outlive the work by a moment (finish() is the last statement of the parse), and a READY
+            # source showing a live percentage is a claim about work that is over.
+            if not live_row and not src.sample:
                 return src
-            # Only while the source is genuinely being read. A tracker row can outlive the work by a
-            # moment (finish() is the last statement of the parse), and a READY source showing a live
-            # percentage is a claim about work that is over.
-            if src.state != "PARSING" and src.enrich != "enriching":
-                return src
-            return src.model_copy(update={"progress": ParseProgressInfo(**row)})
+            update: dict = {}
+            if live_row:
+                update["progress"] = ParseProgressInfo(**row)
+            if src.sample:
+                update["sample"] = None
+            return src.model_copy(update=update)
 
         with self.lock:
             case_ids_ = self.case_source_ids()

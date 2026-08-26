@@ -314,3 +314,28 @@ def test_an_upload_during_a_library_load_reaches_the_pool_at_once() -> None:
         t.join(10)
 
     assert any(e.sourceId == "mid1" for e in st.events)
+
+
+# ------------------------------- #14 the raw sample riding along on the most-polled endpoint
+def test_the_case_payload_does_not_ship_a_raw_sample_per_source(c) -> None:
+    """`sample` is a raw excerpt of the log, and only the mapping drawer reads it.
+
+    Measured on the analyst's two CSVs: 1,506 and 2,359 bytes of raw log text, against ~365 bytes for
+    the whole rest of the source row. `/api/case` carries every library source and is the most-polled
+    endpoint in the app, so at 680 files that was ~1.6 MB of log text serialised into every poll — for
+    a field one drawer reads, one source at a time. It comes from `GET /api/sources/{id}` now.
+    """
+    rows = _stage(c, "sampled.log", LOG)
+    sid = rows[0]["id"]
+
+    body = c.get("/api/case").json()
+    listed = [s for s in body["librarySources"] if s["id"] == sid]
+    assert listed, "the source is missing from the case payload entirely"
+    assert not listed[0].get("sample"), "the case payload is still shipping the raw sample"
+
+    # ...and the drawer's own fetch still has it, or the mapping preview has nothing to show
+    detail = c.get(f"/api/sources/{sid}").json()
+    assert detail.get("sample"), "GET /api/sources/{id} must still carry the sample"
+
+    # the field is not simply gone from the store: stripping happens on the response, on a COPY
+    assert STORE.sources[sid].sample, "the store's own Source object was mutated"
