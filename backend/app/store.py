@@ -1217,6 +1217,8 @@ class Store:
         rows = entries if entries is not None else self._library_todo()
         added = 0
         from_cache = 0
+        files_cached = 0        # staged files served from the pool cache
+        files_parsed = 0        # staged files that had to be read and parsed again
         # Entries whose staged file is gone can never be read again — on this workspace one of them is
         # 3.3 GB. Swept here because this is the one place that runs when the library is known and
         # settled, and it costs a directory listing.
@@ -1259,6 +1261,7 @@ class Store:
                 if cached is not None:
                     added += len(cached)
                     from_cache += len(cached)
+                    files_cached += 1
                     with self.lock:
                         self.pool_pending = max(0, self.pool_pending - 1)
                         self.pool_loaded += 1
@@ -1285,12 +1288,23 @@ class Store:
                     continue
                 sids = self._add_library_members(name, display, None, background_ok=False)
                 added += len(sids)
+                files_parsed += 1
                 with self.lock:
                     self.pool_pending = max(0, self.pool_pending - 1)
                     self.pool_loaded += 1
                     self.pool_bytes_done += nbytes
                     self.pool_current_file = ""
                     self._plan_state(name, "done", size=nbytes, events=sum(s.events for s in sids))
+        if from_cache or files_parsed:
+            # The two cheaper caches both announce themselves (`[iris] graph cache: ...`, `[iris]
+            # search index cache: ...`); the one that can cost HOURS said nothing at all, so a restart
+            # that silently re-parsed a 1.76 GB library was indistinguishable from one that restored
+            # it in seconds. `pool_store` only ever logged failures.
+            print(f"[iris] pool cache: {files_cached} of {files_cached + files_parsed} staged file(s) "
+                  f"restored ({from_cache} source(s)); {files_parsed} parsed"
+                  + ("" if not files_parsed else " - a changed file, or a parser/normalizer change since"
+                                                 " they were cached (detect.py is deliberately not part"
+                                                 " of that key)"))
         if from_cache:
             # Restored events carry the detections they were saved with, so the tally has to include
             # them. It is counted here, after the bulk buffer has flushed — inside the loop the events
@@ -1388,7 +1402,10 @@ class Store:
                     self.pool_current_file = ""
                     self.pool_bytes_done = self.pool_bytes_total
                 self.bump()
-                self._refresh_detections_async()
+                # `resave_cache=True` ONLY here: this is the pass that corrects a stamp the cache
+                # wrote under older rules, and writing the correction back is what stops every
+                # restart from rebuilding the whole derived layer twice. See _resave_pool_cache.
+                self._refresh_detections_async(resave_cache=True)
 
         if background_ok and total > LIBRARY_SYNC_LIMIT:
             print(f"[iris] loading {len(rows)} library file(s) ({total / 1e6:.0f} MB) in the background")
@@ -2124,6 +2141,64 @@ class Store:
             pool_store.save_member(name, src, events, errors, progress=tick)
         except Exception as exc:  # noqa: BLE001 — a cache write may never fail an ingest
             print(f"[iris] pool cache: could not cache {sid} ({type(exc).__name__}: {exc})")
+
+    def _resave_pool_cache(self) -> int:
+        """Rewrite the cached copy of every library source, after the catalogue changed what is on them.
+
+        `pipeline_digest()` deliberately excludes `detect.py`, so a rule fix does NOT invalidate the
+        parsed-pool cache — re-parsing a 1.76 GB library because a regex was tightened would be far
+        worse. The consequence is that a cached source comes back carrying the detections that were
+        current when it was WRITTEN, and only the correction pass that follows a library load fixes
+        them. Measured on the analyst's workspace: the cache held 1,293 SIGMA-APP-0070 hits where the
+        current rule produces 10, all 1,283 of them the false-positive class the `_secret_real` fix
+        removed. Two things followed from that, and the first is the serious one:
+
+          * for the length of the pass — 26 s there, minutes at 11 M events — every screen showed
+            1,283 secret-leak detections the current catalogue rejects;
+          * the correction was real, so the bump was real, so the search index, the entity graph, the
+            correlation analysis and the anomaly roll-up were all built TWICE on every restart,
+            forever, because nothing ever wrote the corrected stamp back.
+
+        So it is written back, once, and it converges: the next restart's pass finds nothing to change,
+        reports so, and neither bumps nor re-saves. The cost is one rewrite of the entries that already
+        exist (~2 s for 180 MB here, ~60-120 s at 11 M events) on a background thread, against a
+        permanent per-restart cost of a 4.1 GB index re-read plus two from-scratch derived builds.
+
+        Only from the STARTUP path (`load_library`). A source delete also runs a correction pass, and a
+        delete must never kick off a multi-gigabyte rewrite.
+        """
+        try:
+            with self.lock:
+                targets = [sid for sid, origin in self.source_origin.items()
+                           if origin == "library" and self.source_library.get(sid)]
+            targets = [sid for sid in targets
+                       if pool_store.has_member(self.source_library.get(sid, ""), sid)]
+            if not targets:
+                return 0
+            # ONE pass to group; the pass that just ran took minutes, so this is noise. Pool order,
+            # not record order: nothing downstream depends on it (every event carries its own id, and
+            # `_append_events` re-sorts the pool on restore).
+            want = set(targets)
+            grouped: dict[str, list[Event]] = {sid: [] for sid in targets}
+            for e in self.events:
+                bucket = grouped.get(e.sourceId)
+                if bucket is not None:
+                    bucket.append(e)
+            t0 = time.time()
+            done = 0
+            for sid in targets:
+                if sid not in want:
+                    continue
+                self._cache_library_source(sid, grouped[sid], report=False)
+                done += 1
+            if done:
+                print(f"[iris] pool cache: rewrote {done} source(s) with the corrected detections "
+                      f"in {time.time() - t0:.1f}s - the next restart has nothing to correct")
+            return done
+        except Exception as exc:  # noqa: BLE001 - a cache write may never fail a detection pass
+            print(f"[iris] pool cache: could not rewrite the corrected stamp "
+                  f"({type(exc).__name__}: {exc})")
+            return 0
 
     # ---------------------------------------------------------------- batched phase 2
     @contextmanager
@@ -2876,7 +2951,7 @@ class Store:
             time.sleep(0.02)
         return False
 
-    def _refresh_detections_async(self) -> None:
+    def _refresh_detections_async(self, resave_cache: bool = False) -> None:
         """Re-evaluate the rule catalogue off the request thread, coalescing repeated calls.
 
         Only windowed rules can change when events are removed (`find_bursts` counts events inside a
@@ -2913,6 +2988,13 @@ class Store:
                     with self.lock:
                         if changed:
                             self.bump()
+                    # The bump goes FIRST: it is what publishes the correction, and the derived layer
+                    # must not keep serving the old detections for the length of a cache rewrite.
+                    # `_detect_busy` stays set across the rewrite, so "refreshing" covers the whole
+                    # job and `wait_detections` waits for all of it.
+                    if changed and resave_cache:
+                        self._resave_pool_cache()
+                    with self.lock:
                         if not self._detect_again:
                             self._detect_busy = False
                             return

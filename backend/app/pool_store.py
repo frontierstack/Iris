@@ -310,6 +310,21 @@ def save_member(name: str, src: Source, events: list[Event], errors: int,
 
 
 # --------------------------------------------------------------------------- load
+def has_member(name: str, sid: str) -> bool:
+    """Is there already a cache entry for this member? Existence only — not validity.
+
+    The guard on re-saving a corrected stamp (`Store._resave_pool_cache`): rewriting an entry that is
+    already there is the point, MINTING one as a side effect of a detection pass is not. A stale or
+    foreign entry still counts as present — it is about to be overwritten with a good one.
+    """
+    if not enabled() or not name or not sid:
+        return False
+    try:
+        return (_dir() / f"{_stem(name)}.{sid}.pkl").exists()
+    except OSError:
+        return False
+
+
 def load(name: str) -> Optional[list[tuple[Source, list[Event], int]]]:
     """Every member of a staged file as it was parsed last time, or None on ANY doubt."""
     if not enabled():

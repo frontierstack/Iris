@@ -15,6 +15,7 @@ from __future__ import annotations
 import pytest
 
 from app import config, pool_store
+from app.models import Detection
 from app.store import STORE
 
 LOG = (b"2026-08-19T10:00:00Z host1 sshd[11]: Failed password for root from 10.0.0.5 port 22 ssh2\n"
@@ -374,3 +375,80 @@ def test_prune_keeps_the_entries_that_are_still_backed_by_a_file():
     # and it is still usable
     _forget_memory()
     assert _load_pool(on_disk) == 1
+
+
+# --------------------------------------------------------------------------- the corrected stamp
+# `pipeline_digest()` deliberately excludes detect.py: a rule fix must never cost a re-parse of a
+# 1.76 GB library. The price is that a cached source comes back carrying the detections that were
+# current when it was WRITTEN, and only the correction pass after a library load fixes them. Measured
+# on the analyst's workspace, the cache held 1,293 SIGMA-APP-0070 hits where the current rule produces
+# 10 — every one of the 1,283 the false-positive class the `_secret_real` fix removed. So for the
+# length of that pass every screen showed detections the catalogue rejects, and because the correction
+# was REAL the bump was real: the search index, the graph, the analysis and the anomaly roll-up were
+# rebuilt twice on every restart, forever, because nothing wrote the correction back. Now it is
+# written back once and it converges.
+def _stamp_ids() -> set[str]:
+    return {d.id for e in STORE.events for d in e.detections}
+
+
+def test_the_cache_converges_after_a_correction_changes_the_stamp():
+    on_disk = _stage()
+    _load_pool(on_disk)
+    _enrich_everything()
+    sid = next(iter(STORE.sources))
+
+    # Plant the stale stamp in the CACHE, exactly as a since-tightened rule would have left behind.
+    evs = [e for e in STORE.events if e.sourceId == sid]
+    assert evs
+    for e in evs:
+        e.detections = [Detection(name="stale rule", id="TEST-STALE", level="high")]
+    STORE._cache_library_source(sid, evs, report=False)
+
+    # A restart: the pool comes back from the cache still carrying it.
+    _forget_memory()
+    _load_pool(on_disk)
+    assert "TEST-STALE" in _stamp_ids(), "the cache did not serve the planted stamp"
+
+    v0 = STORE.version
+    STORE._refresh_detections_async(resave_cache=True)
+    assert STORE.wait_detections(60)
+    assert "TEST-STALE" not in _stamp_ids()
+    assert STORE.version > v0, "a real correction MUST still invalidate the derived layer"
+
+    # ...and the next restart has nothing to correct, so nothing is invalidated and nothing rewritten.
+    _forget_memory()
+    _load_pool(on_disk)
+    assert "TEST-STALE" not in _stamp_ids(), "the corrected stamp was not written back to the cache"
+    v1 = STORE.version
+    STORE._refresh_detections_async(resave_cache=True)
+    assert STORE.wait_detections(60)
+    assert STORE.version == v1, "the second restart rebuilt the derived layer for nothing"
+
+
+def test_only_the_startup_path_rewrites_the_cache(monkeypatch):
+    """A source delete runs the same correction pass. It must never kick off a multi-gigabyte rewrite."""
+    on_disk = _stage()
+    _load_pool(on_disk)
+    _enrich_everything()
+    sid = next(iter(STORE.sources))
+
+    calls = {"n": 0}
+    real = STORE.__class__._resave_pool_cache
+    monkeypatch.setattr(STORE.__class__, "_resave_pool_cache",
+                        lambda self: (calls.__setitem__("n", calls["n"] + 1), real(self))[1])
+
+    def dirty() -> None:
+        for e in STORE.events:
+            if e.sourceId == sid:
+                e.detections = [Detection(name="planted", id="TEST-PLANTED", level="info")]
+                return
+
+    dirty()
+    STORE._refresh_detections_async()                      # the delete path: no flag
+    assert STORE.wait_detections(60)
+    assert calls["n"] == 0
+
+    dirty()
+    STORE._refresh_detections_async(resave_cache=True)     # the startup path
+    assert STORE.wait_detections(60)
+    assert calls["n"] == 1
