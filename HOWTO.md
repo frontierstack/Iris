@@ -535,13 +535,12 @@ read the evidence it is citing while it works, instead of opening and closing a 
 page underneath stays clickable and <kbd>Esc</kbd> no longer closes it (that would throw away a half-written
 objective); use the × on the title bar.
 
-**System prompts.** Settings → **System prompts** holds standing instructions for the assistant — a report format,
-what counts as critical in your environment, sources to distrust, a language. Each saved prompt either **extends**
-the built-in prompt (it is appended as an "Analyst instructions" section; the built-in rules on searching, citing
-real event ids and stopping stay in force) or **replaces** it (sent instead of it, verbatim — the assistant then
-only knows what you tell it). Pick one as the **default**; the assistant panel's composer has a **Prompt** picker
-to run a single question on another one, or on the built-in prompt alone. *View effective* shows the exact text
-the model receives, and the built-in prompt is readable there too. Saved prompts live in
+**System prompts.** Settings → **System prompts** holds *additional* instructions for investigations — a report
+format, what counts as critical in your environment, sources to distrust, the questions a phishing case always has to
+answer. A saved prompt is always **added to** the built-in prompt (the built-in rules on searching, citing real event
+ids and stopping stay in force; it cannot be replaced). Pick one as the **default**; the assistant panel's composer has
+an **Instructions** picker to run a single question with another one, or with none. *View effective* shows the exact
+text the model receives, and the built-in prompt is readable there too. Saved prompts live in
 `ai/system_prompts.json` in the data directory and are kept by *Clear all data*, like rules.
 
 ### 7. Settings

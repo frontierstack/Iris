@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
-import type { AiTestResult, ComputeMode, ComputeStatus, Settings, SystemPrompt, SystemPromptMode, ThemeName } from '../api/types';
+import type { AiTestResult, ComputeMode, ComputeStatus, Settings, SystemPrompt, ThemeName } from '../api/types';
 import { Icon } from '../components/icons';
 import { useAuthStatus } from '../components/LoginGate';
 import { Bar, ConfirmDialog, ErrorState, Loading, Toggle } from '../components/ui';
@@ -445,15 +445,11 @@ function AiAssistant({ settings }: { settings: Settings }) {
 }
 
 /* ───────── System prompts ─────────
-   Standing instructions for the investigator, saved on the server. The built-in prompt carries the
-   operating rules the loop depends on (answer first, cite real ids, record as you go, the search DSL);
-   an `extend` prompt is appended to it, a `replace` prompt is sent instead of it. One of them can be
-   the default; the panel can pick another per run.                                                  */
-const MODE_HELP: Record<SystemPromptMode, string> = {
-  extend: 'Added to the built-in prompt as an "Analyst instructions" section — the tool discipline and citation rules stay in force.',
-  replace: 'Sent INSTEAD of the built-in prompt, verbatim. Iris still refuses invented event ids and still sends its record / summary nudges; everything else the model knows about the workspace has to be in your text.',
-};
-
+   ADDITIONAL instructions for the investigator, saved on the server, always appended to the built-in
+   prompt (which carries the operating rules the loop depends on — answer first, cite real ids, record as
+   you go, the search DSL). One can be the default; the panel can pick another per run. The analyst's
+   words: "the ones to add will be in conjunction of the built in prompt … additional ad hoc prompt for
+   investigations" — so there is deliberately no way to replace the built-in prompt here.             */
 function SystemPrompts({ settings }: { settings: Settings }) {
   const toast = useToast();
   const qc = useQueryClient();
@@ -465,7 +461,6 @@ function SystemPrompts({ settings }: { settings: Settings }) {
   const [editing, setEditing] = useState<SystemPrompt | 'new' | null>(null);
   const [name, setName] = useState('');
   const [text, setText] = useState('');
-  const [mode, setMode] = useState<SystemPromptMode>('extend');
   const [confirmDel, setConfirmDel] = useState<SystemPrompt | null>(null);
   const [showBuiltin, setShowBuiltin] = useState(false);
   const [effective, setEffective] = useState<{ id: string; text: string } | null>(null);
@@ -474,14 +469,14 @@ function SystemPrompts({ settings }: { settings: Settings }) {
   const open = (p: SystemPrompt | 'new') => {
     setEditing(p);
     setEffective(null);
-    if (p === 'new') { setName(''); setText(''); setMode('extend'); } else { setName(p.name); setText(p.text); setMode(p.mode); }
+    if (p === 'new') { setName(''); setText(''); } else { setName(p.name); setText(p.text); }
   };
   const close = () => { setEditing(null); setEffective(null); };
 
   const upsert = useMutation({
     mutationFn: () => editing === 'new' || !editing
-      ? api.aiCreateSystemPrompt({ name: name.trim(), text, mode })
-      : api.aiUpdateSystemPrompt(editing.id, { name: name.trim(), text, mode }),
+      ? api.aiCreateSystemPrompt({ name: name.trim(), text })
+      : api.aiUpdateSystemPrompt(editing.id, { name: name.trim(), text }),
     onSuccess: (row) => { toast.success(editing === 'new' ? 'System prompt saved' : 'System prompt updated', row.name); invalidate(); close(); },
     onError: (e) => toast.error('Could not save the system prompt', e),
   });
@@ -508,10 +503,10 @@ function SystemPrompts({ settings }: { settings: Settings }) {
   };
 
   const canSave = !!name.trim() && !!text.trim() && !upsert.isPending;
-  const dirty = editing === 'new' ? (!!name || !!text) : editing ? (name !== editing.name || text !== editing.text || mode !== editing.mode) : false;
+  const dirty = editing === 'new' ? (!!name || !!text) : editing ? (name !== editing.name || text !== editing.text) : false;
 
   return (
-    <Section id="prompts" title="System prompts" desc="standing instructions for the AI assistant · saved on this server · one is the default, the panel can pick another per run" collapsible
+    <Section id="prompts" title="System prompts" desc="additional instructions for investigations · always added to the built-in prompt · one can be the default, the panel picks per run" collapsible
       footer={<>
         {editing ? (
           <>
@@ -529,10 +524,10 @@ function SystemPrompts({ settings }: { settings: Settings }) {
       <div className="field">
         <label className="field__label" htmlFor="sp-default">Default prompt</label>
         <select id="sp-default" value={activeId} onChange={(e) => setDefault(e.target.value)} disabled={save.isPending}>
-          <option value="">Built-in prompt only</option>
-          {prompts.map((p) => <option key={p.id} value={p.id}>{p.name} · {p.mode}</option>)}
+          <option value="">None — built-in prompt only</option>
+          {prompts.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
         </select>
-        <div className="field__hint">Used by every investigation unless the assistant panel picks another for that run. The built-in prompt is what Iris ships with — how to search, how to cite, when to stop.</div>
+        <div className="field__hint">Added to every investigation unless the assistant panel picks another for that run. The built-in prompt is always there — how to search, how to cite, when to stop — a saved prompt comes after it.</div>
       </div>
 
       {prompts.length > 0 && (
@@ -542,7 +537,6 @@ function SystemPrompts({ settings }: { settings: Settings }) {
               <div className="sp-row__main">
                 <div className="sp-row__name">
                   {p.name}
-                  <span className={cx('pill', p.mode === 'replace' ? 'pill--accent' : 'pill--muted')} title={MODE_HELP[p.mode]}>{p.mode === 'replace' ? 'replaces built-in' : 'extends built-in'}</span>
                   {p.id === activeId && <span className="badge badge--ok"><span className="badge__dot" />default</span>}
                 </div>
                 <div className="sp-row__meta" title={fmtTs(p.updatedAt)}>{p.text.length.toLocaleString()} characters · updated {fmtRelative(p.updatedAt)}</div>
@@ -555,7 +549,7 @@ function SystemPrompts({ settings }: { settings: Settings }) {
               </div>
               {effective?.id === p.id && (
                 <div className="sp-row__effective">
-                  <div className="field__hint">Exactly what the model receives as its system message with this prompt selected.</div>
+                  <div className="field__hint">Exactly what the model receives as its system message with this prompt selected — the built-in prompt, then these instructions.</div>
                   <pre className="sp-pre">{effective.text}</pre>
                 </div>
               )}
@@ -564,7 +558,7 @@ function SystemPrompts({ settings }: { settings: Settings }) {
         </ul>
       )}
       {!list.isLoading && prompts.length === 0 && !editing && (
-        <div className="field__hint">No saved prompts yet. The assistant runs on the built-in prompt. Save one to give it standing instructions — a report format, what counts as critical in your environment, sources to distrust, a language.</div>
+        <div className="field__hint">No saved prompts yet. The assistant runs on the built-in prompt. Save one to add instructions for a kind of investigation — a report format, what counts as critical in your environment, sources to distrust, the questions a phishing case always has to answer.</div>
       )}
 
       {editing && (
@@ -574,26 +568,12 @@ function SystemPrompts({ settings }: { settings: Settings }) {
               <label className="field__label" htmlFor="sp-name">Name</label>
               <input id="sp-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. House report format" maxLength={120} spellCheck={false} autoFocus />
             </div>
-            <div className="field">
-              <span className="field__label">Mode</span>
-              <div className="sp-modes" role="radiogroup" aria-label="How the prompt is used">
-                {(['extend', 'replace'] as SystemPromptMode[]).map((m) => (
-                  <label key={m} className={cx('sp-mode', mode === m && 'active')}>
-                    <input type="radio" name="sp-mode" value={m} checked={mode === m} onChange={() => setMode(m)} />
-                    <span className="sp-mode__name">{m === 'extend' ? 'Extend the built-in prompt' : 'Replace the built-in prompt'}</span>
-                    <span className="sp-mode__desc">{MODE_HELP[m]}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
           </div>
           <div className="field">
-            <label className="field__label" htmlFor="sp-text">Prompt text</label>
+            <label className="field__label" htmlFor="sp-text">Instructions</label>
             <textarea id="sp-text" className="sp-textarea" value={text} onChange={(e) => setText(e.target.value)} rows={12} spellCheck={false}
-              placeholder={mode === 'extend'
-                ? 'Standing instructions, e.g. "Write findings in British English. Treat anything from 10.0.0.0/8 as internal. Every note ends with a confidence rating."'
-                : 'The whole system prompt. The built-in one is shown below for reference — copy what you need from it.'} />
-            <div className="field__hint">{text.length.toLocaleString()} / 40,000 characters. {mode === 'replace' && <span style={{ color: 'var(--warn)' }}>Replace mode drops the built-in guidance on the search DSL, aggregation tools and stopping rules — the assistant will only know what you tell it here.</span>}</div>
+              placeholder='e.g. "Write findings in British English. Treat anything from 10.0.0.0/8 as internal. For a phishing case always establish sender, first click, and credential use. Every note ends with a confidence rating."' />
+            <div className="field__hint">{text.length.toLocaleString()} / 40,000 characters. Appended to the built-in prompt (shown below) — it cannot override the evidence rules: cited event ids must still be real.</div>
           </div>
         </div>
       )}

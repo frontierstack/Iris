@@ -32,7 +32,7 @@ from ..ai.agents import analyze_stream
 from ..ai.client import LLMClient
 from ..ai.investigator import investigate, limits
 from ..ai.prompts import INVESTIGATOR_SYSTEM
-from ..ai.system_prompts import MODES, PROMPTS, PromptError, compose
+from ..ai.system_prompts import PROMPTS, PromptError, compose
 from ..ai.tools import REGISTRY
 from ..config import SettingsError, get_settings, is_masked, migrate_provider, update_settings, validate_base_url
 from ..models import AiRun
@@ -148,7 +148,6 @@ def stop_run(run_id: str) -> dict:
 class SystemPromptBody(BaseModel):
     name: Optional[str] = None
     text: Optional[str] = None
-    mode: Optional[Literal["extend", "replace"]] = None
 
 
 def _prompt_or_404(prompt_id: str) -> dict:
@@ -160,33 +159,33 @@ def _prompt_or_404(prompt_id: str) -> dict:
 
 @router.get("/system-prompts")
 def list_system_prompts() -> dict:
-    """Every saved system prompt, the built-in one they extend, and which one runs by default.
-    `activeId` is `settings.ai.systemPromptId` — '' means the built-in prompt alone."""
+    """Every saved prompt (additional instructions, always appended to the built-in prompt), the
+    built-in prompt itself, and which one runs by default (`settings.ai.systemPromptId`; '' = none)."""
     return {"prompts": PROMPTS.list(), "activeId": get_settings().ai.systemPromptId or "",
-            "builtin": INVESTIGATOR_SYSTEM, "modes": list(MODES)}
+            "builtin": INVESTIGATOR_SYSTEM}
 
 
 @router.post("/system-prompts", status_code=201)
 def create_system_prompt(body: SystemPromptBody) -> dict:
     try:
-        return PROMPTS.create(body.name or "", body.text or "", body.mode or "extend")
+        return PROMPTS.create(body.name or "", body.text or "")
     except PromptError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/system-prompts/{prompt_id}/effective")
 def effective_system_prompt(prompt_id: str) -> dict:
-    """The EXACT text the model would receive with this prompt selected — an author has to be able to
-    read what 'extend' produces, not guess at it."""
+    """The EXACT text the model would receive with this prompt selected — the built-in prompt with the
+    analyst's instructions appended; an author has to be able to read that, not guess at it."""
     row = _prompt_or_404(prompt_id)
-    return {"id": row["id"], "name": row["name"], "mode": row["mode"], "text": compose(row)}
+    return {"id": row["id"], "name": row["name"], "text": compose(row)}
 
 
 @router.put("/system-prompts/{prompt_id}")
 def update_system_prompt(prompt_id: str, body: SystemPromptBody) -> dict:
     _prompt_or_404(prompt_id)
     try:
-        row = PROMPTS.update(prompt_id, name=body.name, text=body.text, mode=body.mode)
+        row = PROMPTS.update(prompt_id, name=body.name, text=body.text)
     except PromptError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if row is None:

@@ -274,13 +274,11 @@ export type AiProvider = 'none' | 'openai';
 /** `systemPromptId` names the saved system prompt the investigator uses by default; '' = the built-in prompt alone. */
 export interface AiSettings { provider: AiProvider; model: string; baseUrl: string; apiKey: string; agents: number; verifyTls: boolean; caBundle: string; systemPromptId: string }
 /**
- * A saved system prompt for the investigator (Settings → System prompts). `extend` is appended to the
- * built-in prompt as an ANALYST INSTRUCTIONS section — the tool discipline and citation rules stay;
- * `replace` is sent INSTEAD of the built-in prompt, verbatim.
+ * A saved prompt for the investigator (Settings → System prompts): ADDITIONAL instructions for a kind of
+ * investigation, always appended to the built-in prompt — the tool discipline and citation rules stay.
  */
-export type SystemPromptMode = 'extend' | 'replace';
-export interface SystemPrompt { id: string; name: string; text: string; mode: SystemPromptMode; createdAt: string; updatedAt: string }
-export interface SystemPromptsResponse { prompts: SystemPrompt[]; activeId: string; builtin: string; modes: SystemPromptMode[] }
+export interface SystemPrompt { id: string; name: string; text: string; createdAt: string; updatedAt: string }
+export interface SystemPromptsResponse { prompts: SystemPrompt[]; activeId: string; builtin: string }
 /** The MCP server Iris exposes to outside agents. `token` is masked on read, like ai.apiKey. */
 export interface McpSettings { enabled: boolean; allowWrites: boolean; token: string }
 /** Ingest behaviour. `autoEnrich` false means phase 2 never runs unless it is asked for, per source. */

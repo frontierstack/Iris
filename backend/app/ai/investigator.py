@@ -683,7 +683,7 @@ async def investigate(store: Any, objective: str, run_id: str,
         return
 
     tools = tool_schemas()
-    # The system prompt: the built-in one, or a saved one the analyst wrote (ai/system_prompts.py) —
+    # The system prompt: the built-in one, plus the analyst's saved instructions (ai/system_prompts.py) —
     # `system_prompt_id` None = the settings default, '' = built-in, an id = that prompt. A missing id
     # is REPORTED and the built-in prompt runs; it is never swapped for some other saved prompt.
     system_text, sp = PROMPTS.resolve(system_prompt_id)
@@ -693,9 +693,9 @@ async def investigate(store: Any, objective: str, run_id: str,
         HISTORY.append(run_id, {"kind": "warning", "text": msg})
         yield {"type": "warning", "message": msg, "ids": []}
     if sp["id"]:
-        note = f"system prompt: {sp['name']} ({sp['mode']})"
+        note = f"additional instructions: {sp['name']}"
         HISTORY.append(run_id, {"kind": "status", "text": note})
-        yield {"type": "status", "text": note, "systemPrompt": {"id": sp["id"], "name": sp["name"], "mode": sp["mode"]}}
+        yield {"type": "status", "text": note, "systemPrompt": {"id": sp["id"], "name": sp["name"]}}
     # the focus note is context for the MODEL only — the transcript stores the analyst's words verbatim
     asked = objective + (f"\n\n(The analyst opened this from: {focus})" if focus else "")
     messages: list[dict[str, Any]] = [

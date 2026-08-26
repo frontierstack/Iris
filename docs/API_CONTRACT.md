@@ -188,7 +188,7 @@ interface Settings {
   compute:{ mode:'auto'|'cuda'|'cpu' };           // user preference
   ai:{ provider:'none'|'openai'; model:string /*default gpt-4o-mini*/; baseUrl:string /*optional; blank = https://api.openai.com/v1; any OpenAI-compatible endpoint works*/;
        apiKey:string /*masked on read: '••••'+last4 or ''*/ ; agents:number /*1..4 parallel analysis agents*/ ;
-       systemPromptId:string /*the saved system prompt the investigator runs on by default; '' = the built-in prompt alone*/ }
+       systemPromptId:string /*the saved instructions appended to the built-in prompt by default; '' = the built-in prompt alone*/ }
   /* The MCP server Iris EXPOSES to outside agents (Cursor / Claude Code / Claude Desktop). Off by default:
      enabling it hands a remote model the whole evidence pool. `allowWrites` is a second switch — a read
      cannot change a case, a write can. `token` is REQUIRED, not optional: enabled with no token FAILS
@@ -1179,21 +1179,22 @@ type AiRunEvent =
    that id (already finished, or never started). Pass your own `runId` on the request if you want to be able to stop
    it before the first byte arrives. Closing the stream also ends the run.
 - **Saved system prompts** (`app/ai/system_prompts.py`, `$IRIS_DATA_DIR/ai/system_prompts.json` — CONFIGURATION,
-   kept by clear-all like rules.json). `SystemPrompt {id, name, text, mode:'extend'|'replace', createdAt, updatedAt}`.
-   `extend` is appended to the built-in investigator prompt as an ANALYST INSTRUCTIONS section (the tool discipline
-   and the citation rules stay in force); `replace` is sent INSTEAD of it, verbatim. `settings.ai.systemPromptId`
+   kept by clear-all like rules.json). `SystemPrompt {id, name, text, createdAt, updatedAt}` — ADDITIONAL instructions
+   for a kind of investigation, always appended to the built-in investigator prompt under an "ADDITIONAL INSTRUCTIONS"
+   header (the tool discipline and the citation rules stay in force; there is no way to replace the built-in prompt —
+   a legacy `mode` field in a request or on disk is ignored). `settings.ai.systemPromptId`
    names the default; `AiInvestigateRequest.systemPromptId` picks one per run (omitted = the default, `''` = the
    built-in prompt alone). An id that no longer exists never fails a run and is never swapped for another prompt:
    the run streams a `warning` and uses the built-in prompt. A run on a saved prompt streams one `status` event
-   carrying `systemPrompt:{id,name,mode}`.
-   - `GET  /api/ai/system-prompts` → `{prompts:SystemPrompt[], activeId:string, builtin:string, modes:string[]}`
-   - `POST /api/ai/system-prompts` body `{name, text, mode?}` → `SystemPrompt` (201; 400 names the problem —
+   carrying `systemPrompt:{id,name}`.
+   - `GET  /api/ai/system-prompts` → `{prompts:SystemPrompt[], activeId:string, builtin:string}`
+   - `POST /api/ai/system-prompts` body `{name, text}` → `SystemPrompt` (201; 400 names the problem —
      empty name/text, name > 120 chars, text > 40,000 chars, more than 50 prompts)
-   - `PUT  /api/ai/system-prompts/{id}` body `{name?, text?, mode?}` → `SystemPrompt` (404 unknown)
+   - `PUT  /api/ai/system-prompts/{id}` body `{name?, text?}` → `SystemPrompt` (404 unknown)
    - `DELETE /api/ai/system-prompts/{id}` → `{ok, id, defaultReset:boolean}` — deleting the default resets
      `settings.ai.systemPromptId` to `''`, so no run starts with a warning about a prompt that is gone
-   - `GET  /api/ai/system-prompts/{id}/effective` → `{id, name, mode, text}` — the EXACT system message the model
-     receives with this prompt selected (what `extend` actually produces)
+   - `GET  /api/ai/system-prompts/{id}/effective` → `{id, name, text}` — the EXACT system message the model
+     receives with this prompt selected (the built-in prompt, then the instructions)
 - `GET  /api/ai/tools` → `{ tools:{name,description,writes,parameters:string[]}[], limits:{...} }` — the exact tool
    surface, so the UI and a reviewer can see what the agent is able to do.
 - `GET  /api/ai/runs?limit=30&caseId=` → `{runs:AiRun[]}` — the conversation history, newest first. Summaries

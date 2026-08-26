@@ -1,15 +1,13 @@
-"""Saved SYSTEM PROMPTS for the investigator (`$IRIS_DATA_DIR/ai/system_prompts.json`).
+"""Saved ADDITIONAL INSTRUCTIONS for the investigator (`$IRIS_DATA_DIR/ai/system_prompts.json`).
 
 The built-in system prompt (`prompts.INVESTIGATOR_SYSTEM`) carries the operating rules the rest of the
-loop depends on — answer first, cite real event ids, record as you go, how the search DSL works. An
-analyst still needs to steer it: the house report format, what "critical" means in their environment,
-which sources to distrust, a language. That is a saved prompt. Each one has a `mode`:
-
-  * `extend` (default) — appended to the built-in prompt as an ANALYST INSTRUCTIONS section. The
-    tool discipline and the citation rules stay in force; the analyst's text shapes the rest.
-  * `replace` — used INSTEAD of the built-in prompt, verbatim. For someone who wants full control and
-    accepts that the run's own nudges (record, summarise, check-in) still arrive as user turns and that
-    the citation validator still refuses invented ids — those live in code, not in the prompt.
+loop depends on — answer first, cite real event ids, record as you go, how the search DSL works. A saved
+prompt is what the analyst adds ON TOP of that for a kind of investigation: the house report format,
+what "critical" means in their environment, which sources to distrust, a language, the questions a
+phishing case always has to answer. It is ALWAYS appended to the built-in prompt, never used instead
+of it — the analyst's words: *"the ones to add will be in conjunction of the built in prompt. This will
+be additional ad hoc prompt for investigations."* (An earlier build had a `replace` mode; it is gone,
+and a stored `mode` field is ignored.)
 
 `settings.ai.systemPromptId` names the one used by default; a run can name another
 (`AiInvestigateRequest.systemPromptId`), and `""` means the built-in prompt alone. An id that no longer
@@ -27,7 +25,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Optional
 
 from .. import config
 from .prompts import INVESTIGATOR_SYSTEM
@@ -35,14 +33,12 @@ from .prompts import INVESTIGATOR_SYSTEM
 MAX_PROMPTS = 50
 MAX_NAME = 120
 MAX_TEXT = 40_000
-Mode = Literal["extend", "replace"]
-MODES = ("extend", "replace")
 
 EXTEND_HEADER = (
-    "\n\nANALYST INSTRUCTIONS\n"
-    "The analyst running this workspace has saved the following standing instructions (system prompt "
-    "{name!r}). Follow them wherever they do not conflict with the evidence rules above — a cited event "
-    "id must still be real, and a claim must still trace to a line in the pool.\n\n"
+    "\n\nADDITIONAL INSTRUCTIONS FOR THIS INVESTIGATION\n"
+    "The analyst has attached the following instructions ({name!r}) to this investigation. Follow them "
+    "wherever they do not conflict with the evidence rules above — a cited event id must still be real, "
+    "and a claim must still trace to a line in the pool.\n\n"
 )
 
 
@@ -104,9 +100,9 @@ class SystemPromptStore:
         return None
 
     # ------------------------------------------------------------- writes
-    def create(self, name: str, text: str, mode: str = "extend") -> dict[str, Any]:
+    def create(self, name: str, text: str) -> dict[str, Any]:
         row = {"id": "sp-" + uuid.uuid4().hex[:10], "name": _name(name), "text": _text(text),
-               "mode": _mode(mode), "createdAt": _now(), "updatedAt": _now()}
+               "createdAt": _now(), "updatedAt": _now()}
         with self.lock:
             self._ensure_loaded_locked()
             if len(self._rows) >= MAX_PROMPTS:
@@ -115,8 +111,8 @@ class SystemPromptStore:
             self._save_locked()
         return dict(row)
 
-    def update(self, prompt_id: str, *, name: Optional[str] = None, text: Optional[str] = None,
-               mode: Optional[str] = None) -> Optional[dict[str, Any]]:
+    def update(self, prompt_id: str, *, name: Optional[str] = None,
+               text: Optional[str] = None) -> Optional[dict[str, Any]]:
         with self.lock:
             self._ensure_loaded_locked()
             for r in self._rows:
@@ -126,8 +122,6 @@ class SystemPromptStore:
                     r["name"] = _name(name)
                 if text is not None:
                     r["text"] = _text(text)
-                if mode is not None:
-                    r["mode"] = _mode(mode)
                 r["updatedAt"] = _now()
                 self._save_locked()
                 return dict(r)
@@ -148,24 +142,23 @@ class SystemPromptStore:
         """The system prompt a run should use, plus a description of where it came from.
 
         `None` = whatever `settings.ai.systemPromptId` says; `""` = the built-in prompt alone; an id =
-        that saved prompt. Returns `(text, info)` where `info` is `{id, name, mode, missing}` — `missing`
+        that saved prompt. Returns `(text, info)` where `info` is `{id, name, missing}` — `missing`
         is the id that was asked for and does not exist, in which case `text` is the built-in prompt.
         The caller reports that; this never raises and never picks another prompt in its place.
         """
         if prompt_id is None:
             prompt_id = config.get_settings().ai.systemPromptId or ""
         if not prompt_id:
-            return INVESTIGATOR_SYSTEM, {"id": "", "name": "", "mode": "builtin", "missing": ""}
+            return INVESTIGATOR_SYSTEM, {"id": "", "name": "", "missing": ""}
         row = self.get(prompt_id)
         if row is None:
-            return INVESTIGATOR_SYSTEM, {"id": "", "name": "", "mode": "builtin", "missing": prompt_id}
-        return compose(row), {"id": row["id"], "name": row["name"], "mode": row["mode"], "missing": ""}
+            return INVESTIGATOR_SYSTEM, {"id": "", "name": "", "missing": prompt_id}
+        return compose(row), {"id": row["id"], "name": row["name"], "missing": ""}
 
 
 def compose(row: dict[str, Any]) -> str:
-    """The effective system prompt for one saved row (pure — the preview endpoint uses it too)."""
-    if row.get("mode") == "replace":
-        return row["text"]
+    """The effective system prompt for one saved row: the built-in prompt, then the analyst's text.
+    Pure — the preview endpoint uses it too."""
     return INVESTIGATOR_SYSTEM + EXTEND_HEADER.format(name=row.get("name", "")) + row["text"]
 
 
@@ -187,17 +180,10 @@ def _text(v: Any) -> str:
     return s
 
 
-def _mode(v: Any) -> str:
-    s = str(v or "extend").strip().lower()
-    if s not in MODES:
-        raise PromptError("mode must be 'extend' (added to the built-in prompt) or 'replace' (used instead of it)")
-    return s
-
 
 def _normalise(r: dict[str, Any]) -> dict[str, Any]:
     return {"id": str(r["id"]), "name": str(r.get("name") or "untitled")[:MAX_NAME],
             "text": str(r.get("text") or "")[:MAX_TEXT],
-            "mode": r.get("mode") if r.get("mode") in MODES else "extend",
             "createdAt": str(r.get("createdAt") or ""), "updatedAt": str(r.get("updatedAt") or "")}
 
 

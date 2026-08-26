@@ -56,15 +56,17 @@ def test_crud_over_the_api(client):
     r = client.post("/api/ai/system-prompts", json={"name": "House style", "text": "Write in British English."})
     assert r.status_code == 201, r.text
     row = r.json()
-    assert row["mode"] == "extend" and row["id"].startswith("sp-")
+    assert row["id"].startswith("sp-") and "mode" not in row
 
     eff = client.get(f"/api/ai/system-prompts/{row['id']}/effective").json()["text"]
     assert eff.startswith(INVESTIGATOR_SYSTEM) and eff.endswith("Write in British English.")
-    assert "ANALYST INSTRUCTIONS" in eff and "'House style'" in eff
+    assert "ADDITIONAL INSTRUCTIONS" in eff and "'House style'" in eff
 
-    r = client.put(f"/api/ai/system-prompts/{row['id']}", json={"mode": "replace", "text": "You are terse."})
-    assert r.status_code == 200 and r.json()["mode"] == "replace"
-    assert client.get(f"/api/ai/system-prompts/{row['id']}/effective").json()["text"] == "You are terse."
+    # there is no way to drop the built-in prompt: an edit is still appended to it
+    r = client.put(f"/api/ai/system-prompts/{row['id']}", json={"text": "You are terse."})
+    assert r.status_code == 200
+    eff = client.get(f"/api/ai/system-prompts/{row['id']}/effective").json()["text"]
+    assert eff.startswith(INVESTIGATOR_SYSTEM) and eff.endswith("You are terse.")
 
     # a saved prompt survives a reload of the store from disk
     PROMPTS._loaded_from = None
@@ -78,7 +80,10 @@ def test_crud_over_the_api(client):
 def test_validation(client):
     assert client.post("/api/ai/system-prompts", json={"name": "", "text": "x"}).status_code == 400
     assert client.post("/api/ai/system-prompts", json={"name": "a", "text": "  "}).status_code == 400
-    assert client.post("/api/ai/system-prompts", json={"name": "a", "text": "x", "mode": "bogus"}).status_code == 422
+    # a legacy `mode` from an earlier build is ignored, never honoured
+    r = client.post("/api/ai/system-prompts", json={"name": "a", "text": "x", "mode": "replace"})
+    assert r.status_code == 201 and "mode" not in r.json()
+    assert client.get(f"/api/ai/system-prompts/{r.json()['id']}/effective").json()["text"].startswith(INVESTIGATOR_SYSTEM)
     assert client.put("/api/ai/system-prompts/sp-nope", json={"name": "a"}).status_code == 404
 
 
@@ -93,8 +98,8 @@ def test_deleting_the_default_resets_settings(client):
 
 @pytest.mark.anyio
 async def test_the_investigator_uses_the_selected_prompt():
-    ext = PROMPTS.create("Extend me", "Always end with a haiku.", "extend")
-    rep = PROMPTS.create("Replace me", "You are a pirate.", "replace")
+    ext = PROMPTS.create("Extend me", "Always end with a haiku.")
+    rep = PROMPTS.create("Other one", "You are a pirate.")
 
     fake = CaptureModel()
     await _run(fake)                                   # no default set → built-in alone
@@ -107,8 +112,9 @@ async def test_the_investigator_uses_the_selected_prompt():
     st = [e for e in evs if e.get("type") == "status" and e.get("systemPrompt")]
     assert st and st[0]["systemPrompt"]["name"] == "Extend me"
 
-    await _run(fake, system_prompt_id=rep["id"])       # a per-run override
-    assert fake.system[-1] == "You are a pirate."
+    await _run(fake, system_prompt_id=rep["id"])       # a per-run override — still on top of the built-in prompt
+    assert fake.system[-1] == compose(rep) and fake.system[-1].startswith(INVESTIGATOR_SYSTEM)
+    assert fake.system[-1].endswith("You are a pirate.")
 
     await _run(fake, system_prompt_id="")              # '' = built-in even though a default is set
     assert fake.system[-1] == INVESTIGATOR_SYSTEM

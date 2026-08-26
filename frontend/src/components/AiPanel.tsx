@@ -1216,16 +1216,16 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
                   : 'Everything is kept in History and survives a refresh. You can keep asking follow-ups in the same chat.'}
             </span>
             {savedPrompts.length > 0 && (
-              <label className="chat-prompt-pick" title="Which saved system prompt the next run uses — manage them under Settings → System prompts">
-                <span>Prompt</span>
+              <label className="chat-prompt-pick" title="Additional instructions for the next run, added to the built-in prompt — manage them under Settings → System prompts">
+                <span>Instructions</span>
                 <select
                   value={spChoice === null ? '__default' : spChoice}
                   onChange={(e) => pickSystemPrompt(e.target.value === '__default' ? null : e.target.value)}
                   disabled={live}
                   aria-label="System prompt for the next run"
                 >
-                  <option value="__default">Default{defaultPromptName ? ` · ${defaultPromptName}` : ' · built-in'}</option>
-                  <option value="">Built-in only</option>
+                  <option value="__default">Default{defaultPromptName ? ` · ${defaultPromptName}` : ' · none'}</option>
+                  <option value="">None — built-in only</option>
                   {savedPrompts.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                 </select>
               </label>
