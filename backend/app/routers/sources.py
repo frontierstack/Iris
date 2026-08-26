@@ -292,7 +292,14 @@ async def auto_map_all(apply: bool = True, minConfidence: float = 0.5) -> dict:
     return {"total": len(results), "applied": applied, "skipped": skipped, "failed": failed, "results": results}
 
 
-async def _suggest_for(sid: str) -> dict:
+def _mapping_inputs(sid: str) -> tuple:
+    """Everything the suggestion needs that touches the disk or the pool. Runs OFF the event loop.
+
+    Both halves are blocking and one is unbounded: `source_head` reads a file through the Docker
+    bind mount, and `_case_field_vocabulary` walks EVERY event in the workspace counting field
+    names. `_suggest_for` is `async def`, so before this both ran ON the loop - the rule broken
+    is the one CLAUDE.md states outright, and the symptom is every other request in the process
+    stalling for the length of a pass over the pool."""
     src = STORE.sources.get(sid)
     if not src:
         raise HTTPException(404, "source not found")
@@ -311,7 +318,12 @@ async def _suggest_for(sid: str) -> dict:
     parser = STORE.source_parsers.get(sid)
     current = list(getattr(parser, "mapping", None) or src.guessedFields or [])
     delimiter = src.delimiter or getattr(parser, "delimiter", None)
-    return await suggest_mapping(lines, current, delimiter, src.file, known_fields=_case_field_vocabulary(exclude=sid))
+    return lines, current, delimiter, src.file, _case_field_vocabulary(exclude=sid)
+
+
+async def _suggest_for(sid: str) -> dict:
+    lines, current, delimiter, file, known = await asyncio.to_thread(_mapping_inputs, sid)
+    return await suggest_mapping(lines, current, delimiter, file, known_fields=known)
 
 
 def _case_field_vocabulary(exclude: str = "", limit: int = 60) -> list[str]:

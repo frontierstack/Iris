@@ -1523,9 +1523,20 @@ class Store:
         with self.bulk_load():
             added = self._add_library_members(path.name, display or path.name, None, background_ok=True)
         self.clear_pool_skip(path.name)
-        with self._detect_lock:
-            self._run_detections()
+        # The same shape `_parse_source` settled on, and for the reason its comment already gives:
+        # this path used to run the WHOLE catalogue over the WHOLE pool, synchronously, on the
+        # request thread - "minutes at parsing 100 % with nothing on screen saying why". Bulk mode
+        # suppresses the per-file stamp, so the events that just arrived are stamped here (work
+        # proportional to the FILE), and the only thing that can genuinely change for the events
+        # already in the pool - windowed BURST rules, whose density moves when neighbours arrive -
+        # is corrected on a background thread that coalesces repeated loads.
+        new_sids = {src.id for src in added}
+        if new_sids:
+            fresh = [e for e in self.events if e.sourceId in new_sids]
+            if fresh:
+                self._stamp_detections(fresh)
         self.bump()
+        self._refresh_detections_async()
         return added
 
     def add_library_file(self, name: str, display: str, data: "Optional[bytes]" = None) -> list[Source]:
