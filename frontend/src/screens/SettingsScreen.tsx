@@ -310,6 +310,10 @@ function AiAssistant({ settings }: { settings: Settings }) {
   const [advanced, setAdvanced] = useState(!!settings.ai.baseUrl || settings.ai.verifyTls === false);
   const [verifyTls, setVerifyTls] = useState(settings.ai.verifyTls !== false);
   const [caBundle, setCaBundle] = useState(settings.ai.caBundle ?? '');
+  const [enforceLimits, setEnforceLimits] = useState(settings.ai.enforceLimits !== false);
+  const [maxSteps, setMaxSteps] = useState(settings.ai.maxSteps ?? 40);
+  const [maxSeconds, setMaxSeconds] = useState(settings.ai.maxSeconds ?? 600);
+  const [maxWrites, setMaxWrites] = useState(settings.ai.maxWrites ?? 200);
   const masked = settings.ai.apiKey;
 
   // Re-seed the form ONLY when the server values actually change. Depending on `settings.ai` (a fresh object on
@@ -327,12 +331,18 @@ function AiAssistant({ settings }: { settings: Settings }) {
     setApiKey('');
     setVerifyTls(settings.ai.verifyTls !== false);
     setCaBundle(settings.ai.caBundle ?? '');
+    setEnforceLimits(settings.ai.enforceLimits !== false);
+    setMaxSteps(settings.ai.maxSteps ?? 40);
+    setMaxSeconds(settings.ai.maxSeconds ?? 600);
+    setMaxWrites(settings.ai.maxWrites ?? 200);
     if (settings.ai.baseUrl || settings.ai.verifyTls === false) setAdvanced(true);
   }, [serverSnapshot, settings.ai]);
 
   const provider = enabled ? 'openai' : 'none';
   const dirty = provider !== settings.ai.provider || model !== (settings.ai.model || DEFAULT_MODEL) || baseUrl !== settings.ai.baseUrl || agents !== settings.ai.agents || apiKey !== ''
-    || verifyTls !== (settings.ai.verifyTls !== false) || caBundle !== (settings.ai.caBundle ?? '');
+    || verifyTls !== (settings.ai.verifyTls !== false) || caBundle !== (settings.ai.caBundle ?? '')
+    || enforceLimits !== (settings.ai.enforceLimits !== false) || maxSteps !== (settings.ai.maxSteps ?? 40)
+    || maxSeconds !== (settings.ai.maxSeconds ?? 600) || maxWrites !== (settings.ai.maxWrites ?? 200);
 
   const testMut = useMutation({
     mutationFn: () => api.aiTest({ provider: 'openai', model: model || DEFAULT_MODEL, baseUrl, apiKey: apiKey || masked, verifyTls, caBundle }),
@@ -341,7 +351,13 @@ function AiAssistant({ settings }: { settings: Settings }) {
   });
 
   const onSave = () => {
-    const patch: Partial<Settings['ai']> = { provider, model: model || DEFAULT_MODEL, baseUrl: baseUrl.trim(), agents, verifyTls, caBundle: caBundle.trim() };
+    const patch: Partial<Settings['ai']> = {
+      provider, model: model || DEFAULT_MODEL, baseUrl: baseUrl.trim(), agents, verifyTls, caBundle: caBundle.trim(),
+      enforceLimits,
+      maxSteps: Math.max(1, Math.round(maxSteps || 40)),
+      maxSeconds: Math.max(5, Math.round(maxSeconds || 600)),
+      maxWrites: Math.max(1, Math.round(maxWrites || 200)),
+    };
     if (apiKey) patch.apiKey = apiKey;
     save.mutate({ ai: patch }, {
       onSuccess: () => { toast.success('AI settings saved', enabled ? `OpenAI · ${model || DEFAULT_MODEL}` : 'Assistant disabled'); setApiKey(''); },
@@ -405,6 +421,50 @@ function AiAssistant({ settings }: { settings: Settings }) {
               <span className="slider-row__val">{agents}</span>
               <span className="field__hint">{['', 'triage only', 'triage + timeline', 'triage + timeline + entities', 'triage + timeline + entities + IOCs'][agents]} → synthesizer</span>
             </div>
+          </div>
+          {/* Run limits. These were env-only, so a case that genuinely needed more just hit the wall
+              and the analyst had no way to say "this one is worth it". Off is a real option, and the
+              copy names exactly what still bounds a run so that switch is made knowingly. */}
+          <div className="field">
+            <div className="ai-toggle-row">
+              <Toggle on={enforceLimits} onChange={setEnforceLimits} label="Limit how far a run can go" />
+              <span className="field__hint">
+                {enforceLimits
+                  ? 'A run stops at whichever ceiling it reaches first and writes its report from what it has.'
+                  : 'No step, time or write ceiling. Use for a case that has to be worked to the end.'}
+              </span>
+            </div>
+            {enforceLimits ? (
+              <div className="form-grid" style={{ marginTop: 10 }}>
+                <div className="field">
+                  <label className="field__label" htmlFor="ai-steps">Tool-calling steps</label>
+                  <input id="ai-steps" type="number" min={1} max={100000} value={maxSteps}
+                    onChange={(e) => setMaxSteps(Number(e.target.value))} />
+                  <div className="field__hint">Default 40. One step is one turn that may call tools. Raise it for investigations that legitimately need to work through many sources.</div>
+                </div>
+                <div className="field">
+                  <label className="field__label" htmlFor="ai-secs">Wall clock (seconds)</label>
+                  <input id="ai-secs" type="number" min={5} max={86400} value={maxSeconds}
+                    onChange={(e) => setMaxSeconds(Number(e.target.value))} />
+                  <div className="field__hint">Default 600. The bound that protects your time rather than the model's.</div>
+                </div>
+                <div className="field">
+                  <label className="field__label" htmlFor="ai-writes">Writes to the case</label>
+                  <input id="ai-writes" type="number" min={1} max={100000} value={maxWrites}
+                    onChange={(e) => setMaxWrites(Number(e.target.value))} />
+                  <div className="field__hint">Default 200. Notes, indicators, timeline entries and graph links a single run may add. Everything it writes is listed and revertible.</div>
+                </div>
+              </div>
+            ) : (
+              <div className="field__hint" style={{ marginTop: 8 }}>
+                <span style={{ color: 'var(--warn)' }}>Nothing will stop a run except your judgement and <b>Stop</b>.</span>{' '}
+                Three things are unaffected because none of them is a policy choice: one tool call still
+                cannot run away with the whole investigation, the transcript still folds itself down when it
+                reaches the model's context window, and Stop still halts the run on the server. The assistant
+                is told it has no budget and is instructed to record findings to the case as it goes, because
+                there is no budget warning coming to remind it.
+              </div>
+            )}
           </div>
           <div className="advanced">
             <button className="advanced__head" onClick={() => setAdvanced((a) => !a)} aria-expanded={advanced}>

@@ -272,7 +272,16 @@ export type ComputeMode = 'auto' | 'cuda' | 'cpu';
 export type AiProvider = 'none' | 'openai';
 
 /** `systemPromptId` names the saved system prompt the investigator uses by default; '' = the built-in prompt alone. */
-export interface AiSettings { provider: AiProvider; model: string; baseUrl: string; apiKey: string; agents: number; verifyTls: boolean; caBundle: string; systemPromptId: string }
+export interface AiSettings {
+  provider: AiProvider; model: string; baseUrl: string; apiKey: string; agents: number;
+  verifyTls: boolean; caBundle: string; systemPromptId: string;
+  /**
+   * The investigator's run budget. `enforceLimits: false` removes the step, wall-clock and write
+   * ceilings entirely — for a case that has to be worked to the end. It does NOT remove the per-call
+   * deadline, the context ceiling, or Stop: none of those is policy.
+   */
+  enforceLimits: boolean; maxSteps: number; maxSeconds: number; maxWrites: number;
+}
 /**
  * A saved prompt for the investigator (Settings → System prompts): ADDITIONAL instructions for a kind of
  * investigation, always appended to the built-in prompt — the tool discipline and citation rules stay.

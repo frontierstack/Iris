@@ -671,6 +671,21 @@ class AISettings(BaseModel):
     # The saved system prompt the investigator uses by default (ai/system_prompts.py); '' = the
     # built-in prompt alone. A run may name another one per request.
     systemPromptId: str = ""
+    # ---- the investigator's RUN BUDGET, editable on Settings -> AI assistant.
+    # These were env-only (IRIS_AI_MAX_STEPS / _MAX_SECONDS), which meant changing them took a restart
+    # and a shell — so in practice a deep investigation hit "budget reached (max_steps)" and the
+    # analyst had no way to say "this one is worth more". `enforceLimits: False` removes the step,
+    # wall-clock and write ceilings ENTIRELY, on the analyst's explicit instruction, for a case that
+    # needs to be worked to the end.
+    #
+    # What is NOT covered by this switch, because none of it is policy: the per-CALL deadline (one
+    # tool may never eat the whole run — see investigator._watch), the context ceiling and compaction
+    # (the provider's window is a fact, not a preference), and Stop. A run with the limits off is
+    # bounded by the analyst's judgement and the Stop button, and the UI says exactly that.
+    enforceLimits: bool = True
+    maxSteps: int = Field(default=40, ge=1, le=100_000)
+    maxSeconds: int = Field(default=600, ge=5, le=86_400)
+    maxWrites: int = Field(default=200, ge=1, le=100_000)
 
 
 class McpSettings(BaseModel):

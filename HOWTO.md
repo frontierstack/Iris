@@ -555,7 +555,9 @@ text the model receives, and the built-in prompt is readable there too. Saved pr
 parse throughput sampled every 2 s with 2–30 min charts, mode auto / CUDA / CPU, *Re-check now*, and
 **Two-phase ingest** — the auto-enrich toggle, which schedules *when* the expensive parse runs, not whether
 it runs) · **AI assistant**
-(enable, model, key, *Test connection*; Advanced → base URL, TLS verification, custom CA bundle) · **System prompts**
+(enable, model, key, *Test connection*; **run limits** — how many tool-calling steps, seconds and case
+writes one investigation may spend, or **off** for a case that has to be worked to the end; Advanced → base
+URL, TLS verification, custom CA bundle) · **System prompts**
 (save / edit standing instructions for the assistant, pick the default — see §6) · **MCP server**
 (below) · **Data** (**Clear all data**, behind a type-the-phrase confirm — it wipes cases, trash, library, the pool,
 jobs and AI conversations; rules and settings are kept, and the panel says so).

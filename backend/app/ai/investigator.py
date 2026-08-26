@@ -81,7 +81,7 @@ from .client import (AIError, BadToolArguments, ContextTooLong, LLMClient, Provi
                      absorb_text_calls, has_tool_call_syntax, parse_text_tool_calls)
 from .history import HISTORY
 from .system_prompts import PROMPTS
-from .prompts import (ARG_TOO_BIG, BUDGET_NOTICE, CHECK_IN, DOCUMENT_CHECK, NO_CASE_LINE,
+from .prompts import (ARG_TOO_BIG, BUDGET_NOTICE, CHECK_IN, DOCUMENT_CHECK, NO_CASE_LINE, run_budget,
                       RECORD_NUDGE, SUMMARY_CHECK, WRAP_UP, investigator_user_prompt)
 from .tools import (REGISTRY, RunContext, ToolError, tool_budget_seconds, tool_schemas,
                     unverified_citations)
@@ -94,6 +94,9 @@ MAX_SECONDS_CAP = 900
 MAX_COMPACTIONS_CAP = 20
 TOOL_RESULT_CHARS = 6000     # one tool result handed back to the model
 MAX_WRITES = 200
+# "no limit" as a number, so the loop's comparisons need no special case. Large enough that no run
+# reaches it, small enough to stay an ordinary int in JSON and in the UI.
+NO_LIMIT = 1_000_000_000
 # How often the loop looks up from a running tool call to check the stop flag and the deadline. The
 # handler runs on a worker thread; this is the event loop watching it, not polling inside it.
 TOOL_POLL = 0.25
@@ -177,25 +180,48 @@ def _env_int(name: str, default: int, cap: int) -> int:
 
 
 def limits(max_steps: Optional[int] = None, max_seconds: Optional[int] = None) -> dict[str, int]:
-    """The four bounds in force for a run.
+    """The bounds in force for a run.
 
     `maxSteps` defaults to 40, not the old 14. The step count was standing in for the context ceiling —
     a long investigation ran out of steps while it was still working, and the analyst got "budget
     reached (max_steps)" instead of an answer. Context is now handled by compaction (ai/compaction.py),
     so steps only have to stop a genuine LOOP, and 40 is where a loop is obvious while real work is not
-    yet finished. The wall clock is the bound that actually protects the analyst's time, and it is
-    unchanged in kind (raised to 600 s by default) — it, and the 200-write limit, remain hard stops.
+    yet finished. The wall clock is the bound that actually protects the analyst's time.
+
+    All three of those are now SETTINGS (`settings.ai`), not env-only constants: changing them used to
+    take a restart and a shell, so a case that genuinely needed forty more steps just hit the wall.
+    `settings.ai.enforceLimits = False` removes them entirely — `enforced: False` in the result, and
+    the ceilings come back as a sentinel no counter reaches. Two things are deliberately NOT covered by
+    that switch, because neither is policy: `maxToolSeconds` (one call may never eat the whole run) and
+    the context ceiling / compaction (the provider's window is a fact). Env vars still SEED the
+    defaults for a headless install; a value saved in the UI wins.
     """
+    ai = None
+    try:
+        ai = get_settings().ai
+    except Exception:  # noqa: BLE001 — a settings read must never stop a run from starting
+        ai = None
     steps = _env_int("IRIS_AI_MAX_STEPS", 40, MAX_STEPS_CAP)
     secs = _env_int("IRIS_AI_MAX_SECONDS", 600, MAX_SECONDS_CAP)
+    writes = MAX_WRITES
+    enforced = True
+    if ai is not None:
+        enforced = bool(getattr(ai, "enforceLimits", True))
+        steps = max(1, int(getattr(ai, "maxSteps", steps) or steps))
+        secs = max(5, int(getattr(ai, "maxSeconds", secs) or secs))
+        writes = max(1, int(getattr(ai, "maxWrites", writes) or writes))
     ctx = _env_int("IRIS_AI_MAX_CONTEXT_TOKENS", 60_000, 500_000)
     compactions = _env_int("IRIS_AI_MAX_COMPACTIONS", 6, MAX_COMPACTIONS_CAP)
     if max_steps:
-        steps = max(1, min(MAX_STEPS_CAP, int(max_steps)))
+        steps = max(1, int(max_steps))
     if max_seconds:
-        secs = max(5, min(MAX_SECONDS_CAP, int(max_seconds)))
-    return {"maxSteps": steps, "maxSeconds": secs, "maxContextTokens": ctx, "maxWrites": MAX_WRITES,
-            "maxCompactions": compactions,
+        secs = max(5, int(max_seconds))
+    if not enforced:
+        # A sentinel rather than a branch at every checkpoint: `step >= NO_LIMIT` is simply never true,
+        # so no comparison in the loop has to learn about this and none can be forgotten.
+        steps = secs = writes = NO_LIMIT
+    return {"maxSteps": steps, "maxSeconds": secs, "maxContextTokens": ctx, "maxWrites": writes,
+            "maxCompactions": compactions, "enforced": int(enforced),
             # a FIFTH bound, per CALL rather than per run: without it one tool could eat the whole
             # wall clock with nothing able to interrupt it. See `_watch`.
             "maxToolSeconds": tool_budget_seconds()}
@@ -705,7 +731,10 @@ async def investigate(store: Any, objective: str, run_id: str,
     # the focus note is context for the MODEL only — the transcript stores the analyst's words verbatim
     asked = objective + (f"\n\n(The analyst opened this from: {focus})" if focus else "")
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": system_text},
+        # The budget block goes on the SYSTEM message, after whatever prompt is in force (shipped,
+        # analyst-edited, or with saved instructions appended): a run has to know what it is actually
+        # working under, and with the limits off that block is the only thing that says so.
+        {"role": "system", "content": system_text + run_budget(lim)},
         {"role": "user", "content": investigator_user_prompt(asked, build_context(store), prior_brief)},
     ]
     started = time.monotonic()
@@ -738,8 +767,10 @@ async def investigate(store: Any, objective: str, run_id: str,
         # plan the agent intended to work through. Those numbers are a runaway-loop ceiling, and the
         # line now says which is which.
         opening = (f"investigating with {client.model} — it stops as soon as it can answer "
-                   f"(ceiling: {lim['maxSteps']} steps / {lim['maxSeconds']}s, {len(tools)} tools "
-                   f"available)")
+                   + (f"(ceiling: {lim['maxSteps']} steps / {lim['maxSeconds']}s, {len(tools)} tools "
+                      f"available)" if lim.get("enforced", 1) else
+                      f"(no step or time limit — Stop is the only thing that ends it early; "
+                      f"{len(tools)} tools available)"))
         if continue_from:
             opening = (f"continuing the conversation with {client.model} — it already has what the "
                        f"earlier turns established")
@@ -808,8 +839,12 @@ async def investigate(store: Any, objective: str, run_id: str,
             # BUDGET NOTICE. Not "can you stop yet?" but "leave room to write it up": past this point
             # a hard stop is close, and the failure mode is a run that spends its last steps on one
             # more search and hands the analyst nothing. Once per run.
-            elif not budget_noticed and (step >= lim["maxSteps"] * BUDGET_NOTICE_AT
-                                         or elapsed() >= lim["maxSeconds"] * BUDGET_NOTICE_AT):
+            # ...and never when there is no budget to be three-quarters of: the notice names a
+            # number of steps remaining, which would be nonsense, and its whole purpose is to leave
+            # room before a stop that is not coming.
+            elif (lim.get("enforced", 1) and not budget_noticed
+                  and (step >= lim["maxSteps"] * BUDGET_NOTICE_AT
+                       or elapsed() >= lim["maxSeconds"] * BUDGET_NOTICE_AT)):
                 budget_noticed = True
                 left = max(0, lim["maxSteps"] - step)
                 messages.append({"role": "user", "content": BUDGET_NOTICE.format(

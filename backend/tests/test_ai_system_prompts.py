@@ -19,6 +19,18 @@ def client():
         yield c
 
 
+def _base(system: str) -> str:
+    """The system message minus the per-run budget block the loop appends (ai/prompts.run_budget).
+
+    The block states the step/time/write ceiling actually in force, which is a SETTING now and can be
+    switched off, so it varies per run and cannot be part of an equality check on the prompt itself.
+    """
+    for marker in ("\n\nRUN BUDGET FOR THIS RUN", "\n\nRUN BUDGET \u2014 NONE"):
+        if marker in system:
+            return system[:system.index(marker)]
+    return system
+
+
 class CaptureModel:
     """A fake provider that records the system message it was handed and answers at once."""
     def __init__(self) -> None:
@@ -138,15 +150,15 @@ async def test_an_edited_builtin_prompt_reaches_the_model():
     PROMPTS.set_builtin("Edited base prompt.")
     fake = CaptureModel()
     evs = await _run(fake)
-    assert fake.system[-1] == "Edited base prompt."
+    assert _base(fake.system[-1]) == "Edited base prompt."
     st = [e for e in evs if e.get("type") == "status" and e.get("systemPrompt")]
     assert st and st[0]["systemPrompt"]["builtinEdited"] is True and "edited" in st[0]["text"]
     extra = PROMPTS.create("extra", "And a haiku.")
     await _run(fake, system_prompt_id=extra["id"])
-    assert fake.system[-1].startswith("Edited base prompt.") and fake.system[-1].endswith("And a haiku.")
+    assert _base(fake.system[-1]).startswith("Edited base prompt.") and _base(fake.system[-1]).endswith("And a haiku.")
     PROMPTS.reset_builtin()
     await _run(fake)
-    assert fake.system[-1] == INVESTIGATOR_SYSTEM
+    assert _base(fake.system[-1]) == INVESTIGATOR_SYSTEM
 
 
 @pytest.mark.anyio
@@ -156,24 +168,24 @@ async def test_the_investigator_uses_the_selected_prompt():
 
     fake = CaptureModel()
     await _run(fake)                                   # no default set → built-in alone
-    assert fake.system[-1] == INVESTIGATOR_SYSTEM
+    assert _base(fake.system[-1]) == INVESTIGATOR_SYSTEM
 
     config.update_settings({"ai": {"systemPromptId": ext["id"]}})
     evs = await _run(fake)                             # the settings default
-    assert fake.system[-1] == compose(ext)
-    assert fake.system[-1].startswith(INVESTIGATOR_SYSTEM) and "Always end with a haiku." in fake.system[-1]
+    assert _base(fake.system[-1]) == compose(ext)
+    assert _base(fake.system[-1]).startswith(INVESTIGATOR_SYSTEM) and "Always end with a haiku." in _base(fake.system[-1])
     st = [e for e in evs if e.get("type") == "status" and e.get("systemPrompt")]
     assert st and st[0]["systemPrompt"]["name"] == "Extend me"
 
     await _run(fake, system_prompt_id=rep["id"])       # a per-run override — still on top of the built-in prompt
-    assert fake.system[-1] == compose(rep) and fake.system[-1].startswith(INVESTIGATOR_SYSTEM)
-    assert fake.system[-1].endswith("You are a pirate.")
+    assert _base(fake.system[-1]) == compose(rep) and _base(fake.system[-1]).startswith(INVESTIGATOR_SYSTEM)
+    assert _base(fake.system[-1]).endswith("You are a pirate.")
 
     await _run(fake, system_prompt_id="")              # '' = built-in even though a default is set
-    assert fake.system[-1] == INVESTIGATOR_SYSTEM
+    assert _base(fake.system[-1]) == INVESTIGATOR_SYSTEM
 
     evs = await _run(fake, system_prompt_id="sp-gone")  # a missing id is reported, never swapped
-    assert fake.system[-1] == INVESTIGATOR_SYSTEM
+    assert _base(fake.system[-1]) == INVESTIGATOR_SYSTEM
     warn = [e for e in evs if e.get("type") == "warning"]
     assert warn and "sp-gone" in warn[0]["message"]
     assert [e for e in evs if e.get("type") == "done"]  # the run still ran

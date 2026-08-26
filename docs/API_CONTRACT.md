@@ -188,7 +188,15 @@ interface Settings {
   compute:{ mode:'auto'|'cuda'|'cpu' };           // user preference
   ai:{ provider:'none'|'openai'; model:string /*default gpt-4o-mini*/; baseUrl:string /*optional; blank = https://api.openai.com/v1; any OpenAI-compatible endpoint works*/;
        apiKey:string /*masked on read: '••••'+last4 or ''*/ ; agents:number /*1..4 parallel analysis agents*/ ;
-       systemPromptId:string /*the saved instructions appended to the built-in prompt by default; '' = the built-in prompt alone*/ }
+       systemPromptId:string /*the saved instructions appended to the built-in prompt by default; '' = the built-in prompt alone*/ ;
+       /* The investigator's RUN BUDGET, editable on Settings -> AI assistant. `enforceLimits:false`
+          removes the step, wall-clock and write ceilings entirely, for a case that has to be worked
+          to the end; `limits()` then reports `enforced:0` and those three come back as a sentinel no
+          counter reaches. It does NOT remove the per-CALL deadline, the context ceiling/compaction or
+          Stop - none of those is a policy choice. IRIS_AI_MAX_STEPS / _MAX_SECONDS still SEED the
+          defaults for a headless install; a value saved in the UI wins. */
+       enforceLimits:boolean; maxSteps:number /*default 40*/; maxSeconds:number /*default 600*/;
+       maxWrites:number /*default 200*/ }
   /* The MCP server Iris EXPOSES to outside agents (Cursor / Claude Code / Claude Desktop). Off by default:
      enabling it hands a remote model the whole evidence pool. `allowWrites` is a second switch — a read
      cannot change a case, a write can. `token` is REQUIRED, not optional: enabled with no token FAILS

@@ -50,15 +50,18 @@ INVESTIGATOR_SYSTEM = (
     "where the analyst asked you to build something. Exhaustively exploring a workspace before saying "
     "anything is the failure mode to avoid — a run that spends its budget and reports nothing is worse "
     "than a short answer with a named gap. If you have enough to answer, stop calling tools and answer.\n\n"
-    "YOUR BUDGET IS A CEILING, NOT A TARGET\n"
-    "You have a step and time limit for one reason: to stop a runaway loop. It is NOT how much work "
-    "this question is worth and it is NOT a plan. A good run is SHORT — one to three tool calls for a "
-    "question about an entity, a count or a breakdown; five to ten for a real reconstruction. Before "
+    "WORK TO THE QUESTION, NOT TO THE BUDGET\n"
+    "Whatever limits this run has exist for one reason: to stop a runaway loop. They are NOT how much "
+    "work the question is worth and they are NOT a plan. A good run is as long as the question needs "
+    "and no longer — one to three tool calls for a question about an entity, a count or a breakdown; "
+    "five to ten for a real reconstruction; more when the analyst has asked you to go deep. Before "
     "every call, ask yourself one thing: will this change what I tell the analyst? If it only adds "
-    "detail to something you can already state, do not make it — finish. Running to the end of the "
-    "budget on a question that was answered at step two is a failure, not thoroughness. Stop as soon "
-    "as the objective is met and say what you did not look at; the analyst can ask for more, and this "
-    "is a conversation — they will.\n\n"
+    "detail to something you can already state, do not make it — finish. Repeating a call you have "
+    "already made, or re-deriving a conclusion you already hold, is never progress. Running on after "
+    "the question was answered at step two is a failure, not thoroughness. Stop as soon as the "
+    "objective is met and say what you did not look at; the analyst can ask for more, and this is a "
+    "conversation — they will. The budget actually in force for THIS run is stated at the end of "
+    "this prompt; read it before you plan.\n\n"
     "THIS IS A CONVERSATION\n"
     "The analyst can reply to you and usually will. If earlier turns of this conversation are "
     "supplied, that work is DONE: do not repeat those tool calls, do not re-derive those conclusions "
@@ -237,6 +240,41 @@ CHECK_IN = (
 # Injected once, when a hard budget stop is close. Not about stopping early — about the report: the
 # failure it prevents is a run that spends its last steps on one more search and leaves the analyst
 # with nothing written down.
+def run_budget(lim: dict) -> str:
+    """The budget block appended to the system message, describing THIS run's actual limits.
+
+    It is appended rather than baked into `INVESTIGATOR_SYSTEM` for two reasons: the limits are
+    settings now and change per run, and the analyst may have EDITED the built-in prompt (see
+    ai/system_prompts.py) — a run must still be told what it is actually working under, whatever text
+    the base carries.
+
+    With the limits off, the guidance has to get STRONGER, not weaker. Nothing external will stop a
+    loop, so the discipline that was previously enforced by a ceiling is now entirely the model's own,
+    and the failure mode changes shape: not "ran out of budget with the report unwritten" but "ran for
+    an hour and recorded nothing". Hence the emphasis on writing to the case as it goes.
+    """
+    if not lim.get("enforced", 1):
+        return (
+            "\n\nRUN BUDGET — NONE\n"
+            "The analyst has removed the step, time and write limits for this run because the case "
+            "needs to be worked to the end. Nothing will stop you except your own judgement and the "
+            "analyst pressing Stop. That makes everything above matter MORE, not less:\n"
+            "- Never repeat a tool call you have already made, and never re-derive a conclusion you "
+            "already hold. Without a ceiling, a loop does not end — it just costs the analyst an hour.\n"
+            "- Take the depth the case deserves. You do not need to ration calls, and you should not "
+            "stop at a shallow answer because a short run feels safer.\n"
+            "- RECORD AS YOU GO, to the case, continuously. A long run that ends with nothing written "
+            "down has produced nothing, and there is no budget warning coming to remind you.\n"
+            "- Still stop when the objective is met. No limit is not an instruction to keep going.")
+    return (
+        f"\n\nRUN BUDGET FOR THIS RUN\n"
+        f"{lim['maxSteps']} tool-calling steps, {lim['maxSeconds']} seconds of wall clock, and "
+        f"{lim['maxWrites']} writes to the case. A ceiling, not a target: most questions are answered "
+        f"well inside it. If you approach it you will be told once, and the run then ends with "
+        f"whatever you have — so record findings as you go rather than saving them for a report you "
+        f"may not get to write.")
+
+
 BUDGET_NOTICE = (
     "BUDGET — about {steps} steps ({seconds}s) remain before this run is stopped and the report is "
     "written from whatever you have. Keep investigating if the evidence warrants it, but do not start "
