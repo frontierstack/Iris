@@ -1044,7 +1044,7 @@ class RulesStore:
             hits += 1
             if not any(d.id == r.id for d in e.detections):
                 e.add_detection(Detection(name=r.name, id=r.id, level=r.sev))
-                e.sev = max_sev(e.sev, r.sev)  # type: ignore[assignment]
+                e.raise_sev(r.sev)   # reversible: see Event.recompute_sev
         return hits
 
     @staticmethod
@@ -1090,6 +1090,7 @@ class RulesStore:
             if e.detections and any(d.id == rid for d in e.detections):
                 kept = [d for d in e.detections if d.id != rid]
                 e.detections = kept or EMPTY_LIST
+                e.recompute_sev()   # the rule took its severity escalation with it
 
     def with_hits(self, rules: list[Rule], events: list[Event]) -> list[Rule]:
         counts: dict[str, int] = {}

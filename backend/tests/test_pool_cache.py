@@ -452,3 +452,35 @@ def test_only_the_startup_path_rewrites_the_cache(monkeypatch):
     STORE._refresh_detections_async(resave_cache=True)     # the startup path
     assert STORE.wait_detections(60)
     assert calls["n"] == 1
+
+
+def test_the_severity_base_survives_the_cache():
+    """A restored event must still be able to give back a severity a rule raised.
+
+    `_base_sev` is a slot, and `_unpack_events` builds events with `__new__` — a slots class raises
+    AttributeError on an unset slot, so it is not optional — but the point is the behaviour: if the
+    cache dropped the base, a rule disabled after the cache was written would leave its events
+    reading `critical` for ever on every restart, with nothing able to put it back.
+    """
+    from app.models import Detection
+
+    on_disk = _stage()
+    _load_pool(on_disk)
+    _enrich_everything()
+    sid = next(iter(STORE.sources))
+
+    victim = next(e for e in STORE.events if e.sourceId == sid)
+    base = victim.sev
+    victim.add_detection(Detection(name="planted", id="TEST-SEV", level="critical"))
+    victim.raise_sev("critical")
+    assert victim.sev == "critical" and victim._base_sev == base
+    STORE._cache_library_source(sid, [e for e in STORE.events if e.sourceId == sid], report=False)
+
+    _forget_memory()
+    _load_pool(on_disk)
+
+    back = next(e for e in STORE.events if e.id == victim.id)
+    assert back.sev == "critical" and back._base_sev == base, "the cache lost the pre-detection severity"
+    back.detections = []
+    back.recompute_sev()
+    assert back.sev == base

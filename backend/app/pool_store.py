@@ -142,7 +142,7 @@ def signature(name: str) -> str:
 # --------------------------------------------------------------------------- packing
 def _pack_event(e: Event) -> tuple:
     return (e.id, e.ts, e.source, e.sourceId, e.file, e.host, e.user, e._msg, e.sev, e.raw,
-            e.fields, e.entities, e.detections)
+            e.fields, e.entities, e.detections, e._base_sev)
 
 
 def _unpack_events(rows: list) -> list[Event]:
@@ -152,7 +152,10 @@ def _unpack_events(rows: list) -> list[Event]:
     for r in rows:
         e = cls.__new__(cls)
         (e.id, e.ts, e.source, e.sourceId, e.file, e.host, e.user, e._msg, e.sev, e.raw,
-         e.fields, e.entities, e.detections) = r
+         e.fields, e.entities, e.detections) = r[:13]
+        # `__new__` leaves every slot unset and a slots class raises AttributeError on an unset one,
+        # so this is not optional. A 13-wide row is one written before the field existed.
+        e._base_sev = r[13] if len(r) > 13 else None
         append(e)
     return out
 

@@ -84,8 +84,18 @@ EMPTY_LIST: list = _FrozenList()
 class Event:
     """One normalized log record, as held in the workspace pool. See the note above before changing it."""
 
+    # `_base_sev` is the 14th slot and the one that had to be justified: 8 bytes on every pooled
+    # event, ~2% of this class and ~0.2% of the 3.4 kB an event really costs. It buys the ability to
+    # UNDO a severity escalation. `sev` is stored, not derived — the packed search index has a sev
+    # column, `sev:` filters on it, the timeline and the anomaly roll-up read it — so a detection
+    # raising it has to be reversible, and it was not: `_tag` did `ev.sev = max_sev(ev.sev, lvl)` and
+    # nothing ever put it back, so DISABLING a rule (or tightening one so it stops matching) left its
+    # events reading `critical` for ever, in search, in the filters and on the timeline. There is no
+    # re-deriving it instead: `normalize.infer_severity` reads `ev.sev` first, so on a pooled event it
+    # would just hand back the escalated value. It is None until something actually raises the
+    # severity, which is a small fraction of any pool.
     __slots__ = ("id", "ts", "source", "sourceId", "file", "host", "user", "_msg", "sev", "raw",
-                 "fields", "entities", "detections")
+                 "fields", "entities", "detections", "_base_sev")
 
     # NOT slots — three attributes the POOL never holds. `baseline` is computed by the analyzer on the
     # detail endpoint, `inCase`/`labels` are case-set membership stamped on read (Store.stamp_membership).
@@ -108,6 +118,7 @@ class Event:
         self.host = host
         self.user = user
         self.sev = sev
+        self._base_sev: Optional[str] = None   # see __slots__: set only while a detection raises sev
         self.raw = raw
         # store msg only where it says something raw[:200] does not (see rule 2 above)
         self._msg = None if msg == raw[:_MSG_DERIVE_LEN] else msg
@@ -170,11 +181,49 @@ class Event:
     # generic `__reduce_ex__` slots path (a dict per instance) is not good enough — a flat tuple is.
     def __getstate__(self) -> tuple:
         return (self.id, self.ts, self.source, self.sourceId, self.file, self.host, self.user,
-                self._msg, self.sev, self.raw, self.fields, self.entities, self.detections)
+                self._msg, self.sev, self.raw, self.fields, self.entities, self.detections,
+                self._base_sev)
 
     def __setstate__(self, s: tuple) -> None:
         (self.id, self.ts, self.source, self.sourceId, self.file, self.host, self.user,
-         self._msg, self.sev, self.raw, self.fields, self.entities, self.detections) = s
+         self._msg, self.sev, self.raw, self.fields, self.entities, self.detections) = s[:13]
+        # tolerate a 13-tuple: a slots class raises AttributeError on an unset slot, and "the pickle
+        # was written by a build without this field" must not become a crash on read
+        self._base_sev = s[13] if len(s) > 13 else None
+
+    def raise_sev(self, level: str) -> None:
+        """Escalate for a detection, remembering what the severity was before the first one.
+
+        Only the FIRST raise records a base — the second detection on the same event is raising an
+        already-escalated value, and `_base_sev` has to keep meaning "what this event was without any
+        detection at all".
+        """
+        if not level:
+            return
+        base = self.sev
+        raised = max_sev(base, level)
+        if raised == base:
+            return
+        if self._base_sev is None:
+            self._base_sev = base
+        self.sev = raised
+
+    def recompute_sev(self) -> None:
+        """Re-derive `sev` from the base plus the detections on this event NOW.
+
+        Called wherever detections are removed — the start of a catalogue pass, and `strip_rule` — so
+        that a rule which stops firing takes its severity with it. An event that was never escalated
+        has `_base_sev is None` and is left alone, which is the overwhelming majority.
+        """
+        base = self._base_sev
+        if base is None:
+            return
+        sev = base
+        for d in self.detections:
+            sev = max_sev(sev, d.level)
+        self.sev = sev
+        if sev == base:
+            self._base_sev = None      # back to un-escalated: stop carrying the base
 
     def __repr__(self) -> str:
         return f"Event(id={self.id!r}, ts={self.ts!r}, source={self.source!r}, msg={self.msg[:60]!r})"

@@ -1626,7 +1626,7 @@ def _tag(ev: Event, rule: Rule, level: Optional[str] = None) -> None:
     if any(d.id == rule.id for d in ev.detections):
         return
     ev.add_detection(Detection(name=name, id=rule.id, level=lvl))  # type: ignore[arg-type]
-    ev.sev = max_sev(ev.sev, lvl)  # type: ignore[assignment]
+    ev.raise_sev(lvl)   # reversible: see Event.__slots__ / recompute_sev
 
 
 _FAMILIES = ("nginx.access", "windows.evtx", "syslog", "k8s.audit", "app.jsonl",
@@ -1828,6 +1828,9 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     for ev in events:
         if ev.detections:  # only pay the assignment where there IS a value; empty means the shared list
             ev.detections = EMPTY_LIST
+            # ...and give back the severity those detections raised, or a rule that no longer fires
+            # leaves its events reading `critical` for ever.
+            ev.recompute_sev()
     n = len(events)
     if n == 0:
         return {"fired": 0, "attackers": set(), "rules_evaluated": len(RULES)}

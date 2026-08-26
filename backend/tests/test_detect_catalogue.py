@@ -360,3 +360,48 @@ def test_an_unstamped_signin_does_not_kill_the_whole_pass() -> None:
     run_rules(ev, ts)          # must not raise
     assert not any(d.id == "SIGMA-AUTH-0230" for e in ev for d in e.detections), \
         "an event with no timestamp cannot be judged inside or outside business hours"
+
+
+def test_a_rule_that_stops_firing_gives_the_event_its_severity_back() -> None:
+    """`sev` is stored, not derived, so a detection raising it has to be reversible.
+
+    `_tag` did `ev.sev = max_sev(ev.sev, lvl)` and nothing ever put it back, so disabling a rule — or
+    tightening one until it no longer matches — left its events reading `critical` for ever: in
+    search, in `sev:` filters, on the timeline and in the anomaly roll-up. Nothing on screen said the
+    severity came from a rule that is no longer in force.
+    """
+    ev = [_ev(1, "nginx.access", "GET /uploads/shell.php",
+              {"http.path": "/uploads/shell.php", "src_ip": "10.0.0.9"})]
+    base = ev[0].sev
+    ts = np.asarray([1777989600.0], dtype="float64")
+
+    run_rules(ev, ts)
+    fired = {d.id for d in ev[0].detections}
+    assert fired, "the fixture fired nothing, so it cannot test an escalation"
+    assert ev[0].sev != base, "the fixture's rules do not raise severity"
+
+    run_rules(ev, ts, disabled=fired)
+    assert not ev[0].detections
+    assert ev[0].sev == base, f"severity stayed at {ev[0].sev!r} after the rules were disabled"
+
+
+def test_the_base_survives_several_rules_and_partial_removal() -> None:
+    """The base is what the event was with NO detection at all — not what it was before the second
+    one. Removing one of two escalating rules must fall back to the other, not to the base."""
+    from app.models import Detection
+
+    e = _ev(1, "nginx.access", "x", {"http.path": "/x"})
+    assert e.sev == "info"
+    e.add_detection(Detection(name="a", id="A", level="medium"))
+    e.raise_sev("medium")
+    e.add_detection(Detection(name="b", id="B", level="critical"))
+    e.raise_sev("critical")
+    assert e.sev == "critical"
+
+    e.detections = [d for d in e.detections if d.id != "B"]      # the critical one stops firing
+    e.recompute_sev()
+    assert e.sev == "medium", "fell past the rule that is still firing"
+
+    e.detections = []
+    e.recompute_sev()
+    assert e.sev == "info" and e._base_sev is None
