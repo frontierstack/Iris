@@ -160,3 +160,81 @@ def test_deleting_the_source_does_take_its_timeline_entries(client):
     client.delete(f"/api/sources/{sid}")
 
     assert _timeline_lines(client) == []
+
+
+def test_an_orphaned_entry_does_not_rescan_the_pool_on_every_merge(monkeypatch):
+    """One curated line that no longer exists must not make every later merge O(the pool).
+
+    `_reanchor_case_set` treats "the id no longer resolves to the anchored line" as drift to heal by
+    scanning the pool. When the LINE is genuinely gone — a curated CSV header that phase 2 correctly
+    drops, a line edited out of a re-uploaded file — no scan can ever find it, so the entry stayed
+    drifted for ever and every subsequent merge hashed every raw line in the pool, holding the store
+    lock. That is the "the app locks up while logs are ingesting" report: one such entry was enough
+    to make it permanent. (Deleting the SOURCE is not this case: that prunes the curation
+    deliberately, so it can never be the pathological one.)
+
+    Built on its own Store because the shared fixture's pool is a handful of events, and at that size
+    an O(pool) scan and an O(case set) one are indistinguishable — the assertion would pass either way.
+    """
+    from app import store as store_mod
+    from app.models import CaseSetEntry, Event, Source
+
+    st = store_mod.Store()
+    st.pending = False
+    evs = [Event(id=f"e{i:x}", ts="2026-05-01T10:00:00Z", source="syslog", sourceId="s1", file="auth.log",
+                 host="h1", user="u1", msg="m", sev="info", raw=f"2026-05-01T10:00:00Z h1 sshd: line {i}")
+           for i in range(5000)]
+    st.sources["s1"] = Source(id="s1", file="auth.log", parser="syslog", state="READY", size=1,
+                              events=len(evs), origin="library", enrich="enriched")
+    st.source_origin["s1"] = "library"
+    st.events = evs
+    st.event_index = {e.id: i for i, e in enumerate(evs)}
+    st.ts = store_mod._epochs(evs)
+    st.case_set["e10"] = CaseSetEntry(eventId="e10", file="auth.log", rawHash="0" * 16)
+
+    st._reanchor_case_set()          # the first scan is legitimate: it does not know yet
+
+    calls = {"n": 0}
+    real = store_mod.raw_hash
+    monkeypatch.setattr(store_mod, "raw_hash", lambda x: (calls.__setitem__("n", calls["n"] + 1), real(x))[1])
+    st._reanchor_case_set()          # ...and every one after it must not rescan
+
+    assert len(st.events) == 5000
+    assert calls["n"] <= len(st.case_set) + 2, (
+        f"re-anchoring hashed {calls['n']} lines for {len(st.case_set)} curated entry over a "
+        f"{len(st.events)}-event pool — it is rescanning the whole pool on every merge")
+
+
+def test_a_grown_file_is_rescanned_so_a_line_that_arrives_later_still_heals(monkeypatch):
+    """The memo must not become "never look again": the missing line may simply not be ingested yet."""
+    from app import store as store_mod
+    from app.models import CaseSetEntry, Event, Source
+
+    st = store_mod.Store()
+    st.pending = False
+
+    def ev(i: int) -> Event:
+        return Event(id=f"e{i:x}", ts="2026-05-01T10:00:00Z", source="syslog", sourceId="s1", file="auth.log",
+                     host="h1", user="u1", msg="m", sev="info", raw=f"line {i}")
+
+    evs = [ev(i) for i in range(50)]
+    st.sources["s1"] = Source(id="s1", file="auth.log", parser="syslog", state="READY", size=1,
+                              events=len(evs), origin="library", enrich="enriched")
+    st.source_origin["s1"] = "library"
+    st.events = evs
+    st.event_index = {e.id: i for i, e in enumerate(evs)}
+    st.ts = store_mod._epochs(evs)
+    target = ev(999)
+    st.case_set["missing"] = CaseSetEntry(eventId="missing", file="auth.log",
+                                          rawHash=raw_hash(target.raw))
+
+    assert st._reanchor_case_set() == 0        # not there yet: recorded as a miss
+
+    evs = evs + [target]                        # the line arrives in a later batch
+    st.events = evs
+    st.event_index = {e.id: i for i, e in enumerate(evs)}
+    st.ts = store_mod._epochs(evs)
+    st.sources["s1"].events = len(evs)
+
+    assert st._reanchor_case_set() == 1, "the file grew and the anchor was still never looked for again"
+    assert target.id in st.case_set

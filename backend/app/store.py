@@ -356,6 +356,12 @@ class Store:
         # opens the context, so scoping it to that thread changes nothing for them and makes an
         # upload behave exactly like an upload.
         self._bulk_local = threading.local()
+        # (file, rawHash) -> how many events that FILE held when a re-anchor scan last failed to find
+        # it. An anchor whose line is genuinely gone — a curated CSV header that phase 2 correctly
+        # drops, a line edited out of a re-uploaded file — can never be found, and treating it as
+        # drift meant a full O(pool) scan on EVERY merge for ever, holding the store lock. A scan is
+        # only worth repeating once that file has more events than it did when the scan failed.
+        self._anchor_misses: dict[tuple[str, str], int] = {}
         # Events parsed during a bulk load that have not been merged into the pool yet, and the sources
         # they came from. See _append_events: 34 files used to mean 34 sorts + reindexes of the whole,
         # growing pool. They are merged in batches of BULK_FLUSH_EVENTS or at the end of the load.
@@ -937,6 +943,10 @@ class Store:
         self.save_meta()
         return restored
 
+    def _file_event_count(self, file: str) -> int:
+        """Events currently in the pool from `file`. O(sources), never O(events)."""
+        return sum(src.events for src in self.sources.values() if src.file == file)
+
     def _reanchor_case_set(self) -> int:
         """Re-point curated entries at the LINE they were anchored to, whenever their id has drifted.
 
@@ -957,33 +967,63 @@ class Store:
         An entry whose line is genuinely gone (its source was deleted) is LEFT ALONE — the analyst
         curated it, and the screens say "event not in the pool" rather than dropping it.
         """
+        # Deciding WHETHER to scan is cheap (one dict lookup and one hash per curated entry, and a
+        # case set is dozens of entries) and needs the lock. The scan itself is O(the whole pool) and
+        # must not hold it — `self.events` is only ever REPLACED, never mutated in place, so a
+        # snapshot taken here stays coherent while a merge lands underneath.
         with self.lock:
+            live_files = {src.file for src in self.sources.values()}
             drifted = []
             for entry in self.case_set.values():
                 if not entry.rawHash:
                     continue                      # written before anchors existed; nothing to check
                 ev = self.event(entry.eventId)
                 if ev is None or raw_hash(ev.raw) != entry.rawHash:
+                    # An entry whose FILE is no longer in the pool cannot be healed by any amount of
+                    # scanning: the source was deleted and the analyst's curation is deliberately kept
+                    # as "event not in the pool". Counting it as drift is what made this pathological —
+                    # it can never be resolved, so every future merge rescanned the whole pool for it,
+                    # for ever, and every one of those scans held the store lock. That is the "the app
+                    # locks up while logs are ingesting" report: one deleted source with one curated
+                    # line in it was enough.
+                    if entry.file not in live_files:
+                        continue
+                    # ...and an anchor a scan has already failed to find is not worth finding again
+                    # until that file has actually grown. Without this, a curated line that no longer
+                    # exists (a CSV header phase 2 correctly drops) rescanned the whole pool on every
+                    # merge, for ever.
+                    seen_at = self._anchor_misses.get((entry.file, entry.rawHash))
+                    if seen_at is not None and seen_at == self._file_event_count(entry.file):
+                        continue
                     drifted.append(entry)
             if not drifted:
                 return 0
-            wanted = {(e.file, e.rawHash) for e in drifted}
-            files = {e.file for e in drifted}
-            found: dict[tuple[str, str], str] = {}
-            for ev in self.events:
-                if ev.file not in files:
-                    continue
-                key = (ev.file, raw_hash(ev.raw))
-                if key in wanted and key not in found:
-                    found[key] = ev.id
-                    if len(found) == len(wanted):
-                        break
-            if not found:
-                return 0
+            snapshot = self.events
+        wanted = {(e.file, e.rawHash) for e in drifted}
+        files = {e.file for e in drifted}
+        found: dict[tuple[str, str], str] = {}
+        for ev in snapshot:                       # WITHOUT the lock
+            if ev.file not in files:
+                continue
+            key = (ev.file, raw_hash(ev.raw))
+            if key in wanted and key not in found:
+                found[key] = ev.id
+                if len(found) == len(wanted):
+                    break
+        with self.lock:
+            # Remember what could not be found, against the size the file is now, so the next merge
+            # does not pay for the same scan again.
+            for key in wanted:
+                if key not in found:
+                    self._anchor_misses[key] = self._file_event_count(key[0])
+        if not found:
+            return 0
+        drifted_set = {id(e) for e in drifted}
+        with self.lock:
             rebuilt: "OrderedDict[str, CaseSetEntry]" = OrderedDict()
             healed = 0
             for entry in self.case_set.values():
-                new_id = found.get((entry.file, entry.rawHash)) if entry in drifted else None
+                new_id = found.get((entry.file, entry.rawHash)) if id(entry) in drifted_set else None
                 if new_id and new_id != entry.eventId and new_id not in rebuilt:
                     rebuilt[new_id] = entry.model_copy(update={"eventId": new_id})
                     healed += 1
