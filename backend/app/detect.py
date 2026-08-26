@@ -2147,8 +2147,16 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     a230_types = _pl("SIGMA-AUTH-0230", "logonTypes", lower=False)
 
     def _outside_hours(i: int) -> bool:
+        # An event with no parseable timestamp is float('inf') in `ts`: `_iso_to_epoch("")`
+        # returns it deliberately, so an unstamped event sorts last and matches no window. But
+        # `inf` walks straight past a `t <= 0` guard, and `int((inf // 3600) % 24)` is
+        # `int(nan)` -> ValueError, raised out of run_rules, taking the WHOLE catalogue pass with
+        # it. One EVTX 4624 or one successful ConsoleLogin whose timestamp did not parse was
+        # enough to stop the workspace being scanned at all, silently, because the background
+        # refresh has a catch-all. The bound below rejects 0 (unset), inf (unstamped) and nan
+        # (no comparison holds), which is every value that is not a real moment in time.
         t = float(ts[i])
-        if t <= 0:
+        if not 0.0 < t < float("inf"):
             return False
         hour = int((t // 3600) % 24)
         return hour < a230_start or hour > a230_end

@@ -339,3 +339,24 @@ def test_machine_accounts_do_not_drive_the_multi_address_rule() -> None:
     ev = [_ev(i, "windows.evtx", "logon", {"EventID": "4624", "TargetUserName": "WS01$",
                                            "IpAddress": f"10.0.0.{i}"}) for i in range(20)]
     assert "SIGMA-AUTH-0240" not in _run(ev)
+
+
+def test_an_unstamped_signin_does_not_kill_the_whole_pass() -> None:
+    """An event with no parseable timestamp must not stop the catalogue from running.
+
+    `_iso_to_epoch("")` returns `float('inf')` on purpose — an unstamped event sorts last and matches
+    no window (store.py:3713). But `inf` walks straight past the `t <= 0` guard in `_outside_hours`,
+    and `int((inf // 3600) % 24)` is `int(nan)`, which raises ValueError out of `run_rules`. One EVTX
+    4624 or one successful ConsoleLogin whose timestamp did not parse therefore took the WHOLE pass
+    with it — and `_refresh_detections_async` has a catch-all, so the workspace would simply stop
+    being scanned with nothing on screen to say so. The synthetic `ts` arrays every other test in this
+    file builds are always finite, which is why it survived here.
+    """
+    ev = [_ev(1, "windows.evtx", "An account was successfully logged on",
+              {"EventID": "4624", "LogonType": "10", "user": "svc_backup", "host": "WIN-FS01"}, ts=""),
+          _ev(2, "aws.cloudtrail", "ConsoleLogin",
+              {"eventName": "ConsoleLogin", "result": "success", "user": "root"}, ts="")]
+    ts = np.asarray([float("inf")] * len(ev), dtype="float64")
+    run_rules(ev, ts)          # must not raise
+    assert not any(d.id == "SIGMA-AUTH-0230" for e in ev for d in e.detections), \
+        "an event with no timestamp cannot be judged inside or outside business hours"
