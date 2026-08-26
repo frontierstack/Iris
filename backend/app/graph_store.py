@@ -67,6 +67,60 @@ def _unseal(data: bytes) -> Optional[bytes]:
     return sealed.unseal(data, _MAGIC)
 
 
+# What decides which DETECTIONS an event carries, and therefore what BOTH derived caches contain.
+# `search._doc` packs every `d.id` and `d.name` into the indexed text, and the graph carries per-node
+# detection ids, so a catalogue change makes both of them wrong — and neither key covered it. A rule
+# edit left the persisted index in place: the version bump dropped the in-memory copy, the warm loaded
+# the stale one straight back off disk, and an event that had just GAINED a detection was not in the
+# candidate set. `detection:<id>` then returned 0 rows behind a green `vector` badge, which is a
+# silent FALSE NEGATIVE about evidence — the confirm pass can filter a candidate out, it cannot
+# conjure one the packed text never had.
+#
+# CONTENT, and never `RULES_STORE.rev` / `EXCLUSIONS.rev`: those counters live in memory and restart
+# at 0, so keying a PERSISTED cache on them would make every boot miss both — a full re-pack (165 s /
+# 4.1 GB measured) and a full graph rebuild on every single start, which is far worse than the bug.
+#
+# `detect.py` is hashed once per process: the shipped rules are code, code cannot change under a
+# running server, and it has to be in here because a logic fix changes what fires while changing no
+# rule id and no param — SIGMA-APP-0070's `_secret_real` did exactly that, 1,293 hits down to 10. The
+# two JSON files are re-hashed only when their (mtime, size) moves, because the analyst edits those at
+# runtime and this sits on the path every cache check takes.
+_CAT_CODE: Optional[str] = None
+_CAT_FILES: dict[str, tuple[int, int, str]] = {}
+
+
+def _file_digest(path: Path) -> str:
+    try:
+        st = path.stat()
+    except OSError:
+        return "-"          # absent = nothing overridden; a stable, meaningful value, not an error
+    cached = _CAT_FILES.get(str(path))
+    if cached is not None and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
+        return cached[2]
+    try:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    except OSError:
+        return "-"
+    _CAT_FILES[str(path)] = (st.st_mtime_ns, st.st_size, digest)
+    return digest
+
+
+def catalogue_digest() -> str:
+    """A digest of the effective detection catalogue: the shipped rules plus the analyst's edits."""
+    global _CAT_CODE
+    if _CAT_CODE is None:
+        try:
+            _CAT_CODE = hashlib.sha256(
+                (Path(__file__).resolve().parent / "detect.py").read_bytes()).hexdigest()[:16]
+        except OSError:
+            _CAT_CODE = "unknown"
+    h = hashlib.sha256()
+    h.update(_CAT_CODE.encode())
+    h.update(_file_digest(config.RULES_PATH).encode())
+    h.update(_file_digest(Path(config.DATA_DIR) / "exclusions.json").encode())
+    return h.hexdigest()[:16]
+
+
 def signature(store: Any, scope: str) -> str:
     """A digest of what the graph was built FROM. Same digest -> same graph, byte for byte."""
     h = hashlib.sha256()
@@ -86,6 +140,8 @@ def signature(store: Any, scope: str) -> str:
     for row in srcs:
         h.update(repr(row).encode())
     h.update(f";n={n}".encode())
+    # The catalogue, because both caches embed what it produced. See catalogue_digest above.
+    h.update(f";cat={catalogue_digest()}".encode())
     return h.hexdigest()
 
 

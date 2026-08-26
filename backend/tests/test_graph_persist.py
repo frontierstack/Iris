@@ -118,3 +118,54 @@ def test_the_signature_survives_a_restart(client):
         with STORE.lock:
             for sid, src in STORE.sources.items():
                 src.id = originals[sid]
+
+
+# ------------------------------------------------------- the catalogue is part of what was built
+# Both persisted caches EMBED detections: `search._doc` packs every `d.id`/`d.name` into the indexed
+# text, and the graph carries per-node detection ids. Neither key covered the catalogue, so a rule
+# edit left the stale copy on disk: the bump dropped the in-memory index, the warm loaded the old one
+# straight back, and an event that had just gained a detection was not in the candidate set at all.
+# `detection:<id>` returned 0 rows behind a green `vector` badge. The confirm pass can filter a
+# candidate out; it cannot conjure one the packed text never had, so it is a silent false NEGATIVE.
+def test_the_signature_covers_the_detection_catalogue(client):
+    sig = graph_store.signature(STORE, "all")
+
+    # a custom rule is an edit to the catalogue: the same pool must no longer match
+    config.RULES_PATH.write_text('{"rules": [{"id": "CUSTOM-1", "name": "x"}]}', encoding="utf-8")
+    graph_store._CAT_FILES.clear()                     # only (mtime, size) is trusted; force a re-read
+    after_rule = graph_store.signature(STORE, "all")
+    assert after_rule != sig, "a rule change left both persisted caches looking valid"
+
+    excl = config.DATA_DIR / "exclusions.json"
+    excl.write_text('{"exclusions": [{"id": "E1"}]}', encoding="utf-8")
+    graph_store._CAT_FILES.clear()
+    after_excl = graph_store.signature(STORE, "all")
+    assert after_excl != after_rule, "an exclusion change left both persisted caches looking valid"
+
+
+def test_the_catalogue_digest_is_the_same_after_a_restart(client):
+    """The trap this must never fall into.
+
+    Keying on `RULES_STORE.rev` / `EXCLUSIONS.rev` would look right and be catastrophic: those
+    counters live in memory and restart at 0, so every boot would miss BOTH caches — a full re-pack
+    (165 s / 4.1 GB measured) and a full graph rebuild on every single start. The digest is CONTENT,
+    so a process that starts fresh over unchanged files reproduces it exactly.
+    """
+    before = graph_store.catalogue_digest()
+    sig_before = graph_store.signature(STORE, "all")
+
+    graph_store._CAT_CODE = None          # a new process: nothing memoised
+    graph_store._CAT_FILES.clear()
+
+    assert graph_store.catalogue_digest() == before
+    assert graph_store.signature(STORE, "all") == sig_before
+
+
+def test_a_missing_catalogue_file_is_stable_not_random(client):
+    """No rules.json and no exclusions.json is the normal state of a fresh install, not an error."""
+    config.RULES_PATH.unlink(missing_ok=True)
+    (config.DATA_DIR / "exclusions.json").unlink(missing_ok=True)
+    graph_store._CAT_FILES.clear()
+    first = graph_store.catalogue_digest()
+    graph_store._CAT_FILES.clear()
+    assert graph_store.catalogue_digest() == first
