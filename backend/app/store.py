@@ -291,6 +291,8 @@ class Store:
         self.source_parse_errors: dict[str, int] = {}
         self.unmapped_fields = 0
         self.rules_fired = 0
+        self._rule_hits: dict[str, int] = {}      # see rule_hit_counts()
+        self._rule_hits_version = -1
         # background detection refresh after a delete (see _refresh_detections_async)
         self._detect_busy = False
         self._detect_again = False
@@ -1976,6 +1978,9 @@ class Store:
                 src.enrich = "queued"  # type: ignore[assignment]
                 src.enrichError = None
         pool_store.remember_skip(sid, False)   # asking for it back cancels the persisted decision
+        # ...and the request itself outlives the process, for the same reason the skip does: with
+        # autoEnrich off a restart re-parses this file as `raw` and nothing would ever ask again.
+        pool_store.remember_request(sid, True)
         enrich.QUEUE.submit(sid)
         return True
 
@@ -1999,6 +2004,7 @@ class Store:
             # `autoEnrich` queues it straight back, so "skip the rest" — the way out of a blocked
             # Graph screen — would silently undo itself on the next boot.
             pool_store.remember_skip(sid, True)
+            pool_store.remember_request(sid, False)   # the opposite decision, and it is the later one
         return True
 
     def requeue_unenriched(self) -> int:
@@ -2015,9 +2021,19 @@ class Store:
         auto = settings_auto_enrich()
         with self.lock:
             states = ("raw", "queued", "enriching") if auto else ("queued", "enriching")
-            pending = [sid for sid, src in self.sources.items() if src.enrich in states]
+            # `was_requested` is what carries an explicit "interpret this file" across the restart:
+            # the source itself comes back `raw`, so without it the click is silently dropped. A
+            # source that already SETTLED (enriched / skipped / error) is never re-queued by it -
+            # `states` still decides that, and the request is cleared when it settles anyway.
+            pending = [sid for sid, src in self.sources.items()
+                       if src.enrich in states
+                       or (src.enrich == "raw" and pool_store.was_requested(sid))]
             for sid in pending:
                 self.sources[sid].enrich = "queued"  # type: ignore[assignment]
+        # A request that has been honoured (or that names a staged file which is gone) is dropped
+        # here rather than on the worker's completion path: that would be a file read and a write
+        # per source, for a set that is empty on almost every boot.
+        pool_store.reconcile_requests(set(pending))
         for sid in pending:
             enrich.QUEUE.submit(sid)
         return len(pending)
@@ -2906,6 +2922,30 @@ class Store:
                 h = ((h ^ hash(d.level)) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
         return h
 
+    def rule_hit_counts(self) -> dict[str, int]:
+        """Detections currently stamped, per rule id — version-keyed, and never under the lock.
+
+        `RulesStore.with_hits` counted this by walking every event and every detection, inside
+        `with STORE.lock`, on every `GET /api/rules` (the Anomalies screen polls it) and again after
+        every rule mutation. That is an O(pool) pass in the lock on a polled endpoint: measured at
+        11 M events it is seconds, during which every other request queues behind it.
+
+        Keyed on the store version rather than maintained incrementally, deliberately. A tally
+        updated at each mutation site is only correct while every site remembers to update it, and
+        the cost of forgetting one is a wrong number on screen with nothing to reveal it. This way
+        the pool is walked at most once per change, off the lock, and the polls in between are a
+        dict lookup. `self.events` is swapped, never mutated in place, so the walk needs no lock.
+        """
+        v = self.version
+        if self._rule_hits_version == v:
+            return self._rule_hits
+        counts: dict[str, int] = {}
+        for e in self.events:
+            for d in e.detections:
+                counts[d.id] = counts.get(d.id, 0) + 1
+        self._rule_hits, self._rule_hits_version = counts, v
+        return counts
+
     def _run_detections(self, progress: Optional[Callable[[float], None]] = None) -> bool:
         """Built-in Sigma-like rules (minus disabled ones) + enabled custom regex rules.
 
@@ -2966,12 +3006,18 @@ class Store:
                 hits = RULES_STORE.apply_rule(r, self.events)
             elif r is not None and r.builtin:  # built-ins are evaluated together (bursts depend on each other)
                 self._run_detections()
-                hits = sum(1 for e in self.events for d in e.detections if d.id == rule_id)
-            fired = sum(len(e.detections) for e in self.events)
+                hits = -1                      # from the tally below, not a pass of its own
         with self.lock:
-            self.rules_fired = fired
             self.bump()
-            return hits
+        # ONE walk after the bump, not three. This used to count `rule_id`'s hits over the whole
+        # pool and then total every detection over the whole pool, both inside `_detect_lock` and
+        # both on top of the catalogue pass that had just walked it. `rule_hit_counts` is the
+        # version-keyed tally the rules screen reads anyway, so this is a pass the next request
+        # would have paid for regardless.
+        counts = self.rule_hit_counts()
+        with self.lock:
+            self.rules_fired = sum(counts.values())
+        return counts.get(rule_id, 0) if hits < 0 else hits
 
     # ---------------------------------------------------------- multi-case
     def activate(self, case_id: str, save_current: bool = True, force: bool = False) -> None:

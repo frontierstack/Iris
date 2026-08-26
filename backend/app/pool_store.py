@@ -395,6 +395,79 @@ def was_skipped(sid: str) -> bool:
     return bool(sid) and enabled() and sid in _skips()
 
 
+# --------------------------------------------------------------- the enrich request
+# The mirror image of the skip, and it was missing. `ingest.autoEnrich` ships OFF, so on a raw-first
+# workspace phase 2 runs only because someone ASKED. A restart re-parses the staged files and a
+# re-parsed source comes back `raw` (the pool cache only stores FINISHED sources), so a file sitting
+# in the queue when the process stopped came back raw and `requeue_unenriched` left it alone - which
+# is right on its own terms, "a restart is not a request", but the request had been made and nothing
+# on any screen said it had been dropped. The file reads `raw` again, exactly as it did before the
+# click. Both directions are the analyst's decision and both are one line of JSON.
+def _requests_path() -> Path:
+    return _dir() / "enrich-requested.json"
+
+
+def _requests() -> set[str]:
+    import json
+    try:
+        data = json.loads(_requests_path().read_text(encoding="utf-8"))
+        return set(data) if isinstance(data, list) else set()
+    except (OSError, ValueError):
+        return set()
+
+
+def remember_request(sid: str, requested: bool = True) -> None:
+    """Record (or clear) "phase 2 was asked for on this source". Cleared when it settles."""
+    import json
+    if not enabled() or not sid:
+        return
+    cur = _requests()
+    if requested:
+        cur.add(sid)
+    elif sid not in cur:
+        return                      # the common case: nothing to write
+    else:
+        cur.discard(sid)
+    try:
+        _dir().mkdir(parents=True, exist_ok=True)
+        tmp = _requests_path().with_suffix(".tmp")
+        tmp.write_text(json.dumps(sorted(cur)), encoding="utf-8")
+        os.replace(tmp, _requests_path())
+    except OSError:
+        pass
+
+
+def was_requested(sid: str) -> bool:
+    return bool(sid) and enabled() and sid in _requests()
+
+
+def reconcile_requests(still_outstanding: "set[str]") -> None:
+    """Keep only the requests that still have something to do. One write, at startup.
+
+    A request is cleared by the source SETTLING, and doing that per completion would put a file read
+    and a file write on the enrichment worker's hot path for a set that is almost always empty. The
+    only moment staleness can matter is the next boot, so that is where it is reconciled - which
+    also collects requests for staged files that were deleted while the app was down.
+    """
+    import json
+    if not enabled():
+        return
+    cur = _requests()
+    keep = cur & set(still_outstanding)
+    if keep == cur:
+        return
+    try:
+        _dir().mkdir(parents=True, exist_ok=True)
+        if keep:
+            tmp = _requests_path().with_suffix(".tmp")
+            tmp.write_text(json.dumps(sorted(keep)), encoding="utf-8")
+            os.replace(tmp, _requests_path())
+        else:
+            _requests_path().unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def forget(name: str) -> None:
     """Drop a staged file's entries (its bytes are going away, or its events were replaced)."""
     try:
@@ -422,8 +495,13 @@ def prune() -> int:
     except OSError:
         return 0
     removed = 0
+    # The bookkeeping files are not cache entries: they hold the analyst's DECISIONS, they are not
+    # keyed on a staged file name, and deleting one silently undoes a choice. A name check per file
+    # was how the skip was protected; a set, because the next one added is otherwise deleted on the
+    # first prune and the symptom is a decision that quietly stops sticking.
+    reserved = {_skips_path().name, _requests_path().name}
     for f in list(d.glob("*")):
-        if f.name == _skips_path().name:
+        if f.name in reserved:
             continue
         stem = f.name.split(".", 1)[0]
         if stem in live:

@@ -20,8 +20,10 @@ class SuggestBody(BaseModel):
 
 
 def _with_hits(rules: list[Rule]) -> list[Rule]:
-    with STORE.lock:
-        return RULES_STORE.with_hits(rules, STORE.events)
+    # No store lock: `rule_hit_counts` is version-keyed and reads a list that is swapped rather
+    # than mutated. Holding the lock here meant a pass over every event in the workspace before
+    # this endpoint could answer.
+    return RULES_STORE.with_hits(rules, STORE.rule_hit_counts())
 
 
 @router.get("", response_model=list[Rule])

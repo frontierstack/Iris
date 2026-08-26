@@ -1108,11 +1108,10 @@ class RulesStore:
                 e.detections = kept or EMPTY_LIST
                 e.recompute_sev()   # the rule took its severity escalation with it
 
-    def with_hits(self, rules: list[Rule], events: list[Event]) -> list[Rule]:
-        counts: dict[str, int] = {}
-        for e in events:
-            for d in e.detections:
-                counts[d.id] = counts.get(d.id, 0) + 1
+    def with_hits(self, rules: list[Rule], counts: dict[str, int]) -> list[Rule]:
+        """`counts` is `Store.rule_hit_counts()` — a version-keyed tally, not a walk of the pool.
+        It used to take the event list and count here, which put an O(pool) pass inside
+        `with STORE.lock` on an endpoint the Anomalies screen polls."""
         # A GRAPH rule tags no event, so `counts` has nothing to say about it and 0 would be a lie in the
         # loudest possible place: "this rule has never fired". Its hits come from the graph findings
         # roll-up when one has ALREADY been computed — never by building a graph to answer /api/rules —
