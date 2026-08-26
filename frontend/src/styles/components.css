@@ -1852,12 +1852,21 @@
   font-size: var(--fs-xxs); font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted-2);
 }
 .ppick__head span { font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--muted-3); }
+.ppick__row { display: flex; align-items: stretch; gap: 2px; border-radius: var(--radius-sm); }
+.ppick__row:hover, .ppick__row:focus-within { background: var(--panel-2); }
 .ppick__item {
   display: grid; grid-template-columns: 14px 1fr; align-items: start; gap: 8px;
-  width: 100%; padding: 7px 8px; text-align: left;
+  flex: 1 1 auto; min-width: 0; padding: 7px 8px; text-align: left;
   border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text); cursor: pointer;
 }
-.ppick__item:hover, .ppick__item:focus-visible { background: var(--panel-2); outline: none; }
+.ppick__item:focus-visible { outline: none; box-shadow: inset 0 0 0 1px var(--accent-border); }
+.ppick__edit {
+  flex: 0 0 auto; width: 28px; margin: 4px 4px 4px 0; display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid transparent; border-radius: var(--radius-sm); color: var(--muted-2); opacity: .7; cursor: pointer;
+  transition: color var(--t-fast), border-color var(--t-fast), background var(--t-fast), opacity var(--t-fast);
+}
+.ppick__edit svg { width: 12px; height: 12px; }
+.ppick__edit:hover, .ppick__edit:focus-visible { opacity: 1; color: var(--text-bright); border-color: var(--border); background: var(--panel); outline: none; }
 .ppick__item.checked .ppick__name { color: var(--text-bright); }
 .ppick__check { width: 14px; height: 14px; color: var(--accent); margin-top: 1px; display: inline-flex; align-items: center; justify-content: center; }
 .ppick__check svg { width: 12px; height: 12px; }
@@ -1872,11 +1881,29 @@
 .ppick__empty { padding: 8px 10px 6px; font-size: var(--fs-xs); color: var(--muted); line-height: 1.45; }
 .ppick__foot { border-top: 1px solid var(--border-2); margin-top: 4px; padding-top: 4px; }
 .ppick__manage {
-  display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  padding: 7px 8px; border-radius: var(--radius-sm); font-size: var(--fs-sm); color: var(--text-3);
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  padding: 7px 8px; border: 0; background: transparent; border-radius: var(--radius-sm); font-size: var(--fs-sm); color: var(--text-3); cursor: pointer;
 }
 .ppick__manage:hover, .ppick__manage:focus-visible { background: var(--panel-2); color: var(--text-bright); outline: none; }
-.ppick__manage-arrow { width: 11px; height: 11px; transform: rotate(180deg); color: var(--muted-2); }
+.ppick__manage-l { display: inline-flex; align-items: center; gap: 6px; }
+.ppick__manage-l svg { width: 11px; height: 11px; color: var(--muted-2); }
+.ppick__manage-r { margin-left: auto; font-size: var(--fs-xxs); color: var(--muted-3); }
+.ppick__manage-arrow { width: 11px; height: 11px; transform: rotate(180deg); color: var(--muted-2); flex: 0 0 auto; }
+
+/* ── the prompt editor dialog (components/PromptEditorDialog.tsx) ── */
+.modal__box--wide { width: 620px; }
+.pedit__form { display: flex; flex-direction: column; gap: 12px; margin-top: 14px; }
+.pedit__text { min-height: 200px; resize: vertical; font-family: var(--font-mono); font-size: var(--fs-sm); line-height: 1.5; }
+.pedit__confirm {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; padding: 8px 10px;
+  border: 1px solid var(--danger-border); background: var(--danger-bg); border-radius: var(--radius-md);
+  font-size: var(--fs-sm); color: var(--text-2);
+}
+.pedit__confirm b { color: var(--text-bright); font-weight: 500; }
+.pedit__foot { justify-content: flex-start; }
+.pedit__spacer { flex: 1; }
+.pedit__delete { color: var(--muted-2); }
+.pedit__delete:hover:not(:disabled) { color: var(--bad); }
 .chat-jump {
   align-self: center; background: var(--panel-2); border: 1px solid var(--border-strong, var(--border));
   border-radius: var(--radius-md); color: var(--text-3); font-size: var(--fs-xs);

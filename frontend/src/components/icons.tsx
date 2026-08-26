@@ -142,6 +142,10 @@ export const Icon = {
     <svg {...base} {...p}><path d="M8 2.5v8M5 7.5l3 3 3-3M3 10.5v3h10v-3" /></svg>
   ),
   /* Raw log: a sheet with text lines */
+  /* Edit (pen) — the prompt picker's per-row edit control */
+  Edit: (p: P) => (
+    <svg {...base} {...p}><path d="M3 13h10" /><path d="m4.2 10.3 6.3-6.3 1.5 1.5-6.3 6.3H4.2z" /></svg>
+  ),
   Doc: (p: P) => (
     <svg {...base} {...p}><path d="M4.4 2.6h5.2l2.6 2.6v8.2H4.4z" /><path d="M9.6 2.6v2.6h2.6M6.2 8h3.6M6.2 10.4h3.6" /></svg>
   ),

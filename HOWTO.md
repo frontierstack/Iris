@@ -540,7 +540,8 @@ format, what counts as critical in your environment, sources to distrust, the qu
 answer. A saved prompt is always **added to** the built-in prompt. The built-in prompt itself is editable there too
 (*Edit built-in prompt*, with *Restore shipped prompt* to go back) — it carries the rules on searching, citing real
 event ids and stopping, so edit it knowingly; the citation check itself lives in code and stays. Pick one as the **default**; the **Prompt** chip under the
-assistant's composer opens a menu to run a question with a specific saved prompt, or with the built-in prompt alone. *View effective* shows the exact
+assistant's composer opens a menu to run a question with a specific saved prompt, or with the built-in prompt alone — and to edit a
+saved prompt or add a new one right there, without leaving the chat. *View effective* shows the exact
 text the model receives, and the built-in prompt is readable there too. Saved prompts live in
 `ai/system_prompts.json` in the data directory and are kept by *Clear all data*, like rules.
 

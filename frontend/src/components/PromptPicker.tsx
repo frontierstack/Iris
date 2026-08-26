@@ -14,6 +14,7 @@ import { Link } from 'react-router-dom';
 import type { SystemPrompt } from '../api/types';
 import { cx } from '../utils/format';
 import { Icon } from './icons';
+import { PromptEditorDialog } from './PromptEditorDialog';
 
 export interface PromptPickerProps {
   prompts: SystemPrompt[];
@@ -37,6 +38,9 @@ function firstLine(text: string, max = 88): string {
 
 export function PromptPicker({ prompts, defaultId, value, onChange, disabled, builtinEdited, onNavigate }: PromptPickerProps) {
   const [open, setOpen] = useState(false);
+  // a saved prompt being edited, or 'new' — the dialog renders over the panel (modal z-index sits
+  // above a detached window), so the menu closes first and the chip gets focus back afterwards
+  const [editing, setEditing] = useState<SystemPrompt | 'new' | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -89,23 +93,36 @@ export function PromptPicker({ prompts, defaultId, value, onChange, disabled, bu
     close();
   };
 
-  const row = (id: string, name: string, desc: string, extra?: React.ReactNode) => {
+  const openEditor = (target: SystemPrompt | 'new') => {
+    setOpen(false);
+    setEditing(target);
+  };
+
+  // The edit control is a SIBLING of the radio row, never a child: a button inside a button is invalid
+  // HTML and the click would select the row as well. Dimmed, never hover-hidden (touch cannot hover).
+  const row = (id: string, name: string, desc: string, extra?: React.ReactNode, editable?: SystemPrompt) => {
     const checked = effective === id;
     return (
-      <button
-        key={id || '__builtin'}
-        type="button"
-        role="menuitemradio"
-        aria-checked={checked}
-        className={cx('ppick__item', checked && 'checked')}
-        onClick={() => pick(id)}
-      >
-        <span className="ppick__check" aria-hidden>{checked && <Icon.Check />}</span>
-        <span className="ppick__text">
-          <span className="ppick__name">{name}{id === effectiveDefault && <span className="ppick__tag">default</span>}{extra}</span>
-          {desc && <span className="ppick__desc">{desc}</span>}
-        </span>
-      </button>
+      <div key={id || '__builtin'} className={cx('ppick__row', checked && 'checked')}>
+        <button
+          type="button"
+          role="menuitemradio"
+          aria-checked={checked}
+          className={cx('ppick__item', checked && 'checked')}
+          onClick={() => pick(id)}
+        >
+          <span className="ppick__check" aria-hidden>{checked && <Icon.Check />}</span>
+          <span className="ppick__text">
+            <span className="ppick__name">{name}{id === effectiveDefault && <span className="ppick__tag">default</span>}{extra}</span>
+            {desc && <span className="ppick__desc">{desc}</span>}
+          </span>
+        </button>
+        {editable && (
+          <button type="button" className="ppick__edit" onClick={() => openEditor(editable)} title={`Edit "${name}"`} aria-label={`Edit ${name}`}>
+            <Icon.Edit />
+          </button>
+        )}
+      </div>
     );
   };
 
@@ -137,20 +154,35 @@ export function PromptPicker({ prompts, defaultId, value, onChange, disabled, bu
           {prompts.length > 0 ? (
             <div className="ppick__section">
               <div className="ppick__head">Saved prompts <span>added after the built-in prompt</span></div>
-              {prompts.map((p) => row(p.id, p.name, firstLine(p.text)))}
+              {prompts.map((p) => row(p.id, p.name, firstLine(p.text), undefined, p))}
             </div>
           ) : (
             <div className="ppick__empty">
-              No saved prompts yet. A saved prompt adds standing instructions for a kind of investigation — a report format, what counts as critical, sources to distrust.
+              No saved prompts yet. A saved prompt adds standing instructions for a kind of investigation — a report format, what counts as critical, sources to distrust. Add one below.
             </div>
           )}
           <div className="ppick__foot">
+            <button type="button" className="ppick__manage" role="menuitem" onClick={() => openEditor('new')}>
+              <span className="ppick__manage-l"><Icon.Plus />New prompt</span>
+            </button>
             <Link to="/settings#prompts" className="ppick__manage" role="menuitem" onClick={() => { setOpen(false); onNavigate?.(); }}>
-              {prompts.length ? 'Manage prompts' : 'Add a prompt'}
+              <span className="ppick__manage-l">Manage in Settings</span>
+              <span className="ppick__manage-r">default · built-in prompt</span>
               <Icon.ArrowLeft className="ppick__manage-arrow" />
             </Link>
           </div>
         </div>
+      )}
+
+      {editing && (
+        <PromptEditorDialog
+          target={editing}
+          onClose={() => { setEditing(null); btnRef.current?.focus(); }}
+          // what was just written is what the analyst wants to run on — select it (the default row
+          // maps to null, as everywhere else)
+          onSaved={(row) => onChange(row.id === effectiveDefault ? null : row.id)}
+          onDeleted={(id) => { if (value === id) onChange(null); }}
+        />
       )}
     </div>
   );
