@@ -23,6 +23,13 @@ services:
       # address is. That attack is closed by the CORS allowlist and the cross-site guard in
       # backend/app/security.py, not by this line.
       - "${IRIS_BIND_HOST:-127.0.0.1}:8000:8000"
+    # A container log is a file on disk that only ever grows, and this machine has already lost tens
+    # of GB to Docker artefacts. Capped so it cannot become one of them.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       # Bind-mounted to the repo's data dir so the container and a local `uvicorn` run share one case
       # store — settings.json, cases/<id>/case.json and the uploaded files are the same files either way.

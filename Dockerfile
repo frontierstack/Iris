@@ -62,4 +62,9 @@ VOLUME ["/data"]
 EXPOSE 8000
 WORKDIR /app/backend
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s CMD python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health').status==200 else 1)"
-CMD ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --no-access-log: uvicorn prints a line per request and this app POLLS - /api/case, /api/jobs,
+# /api/compute/metrics, the transfer panel - so `docker logs` fills with thousands of 200 OK
+# lines that say nothing, Docker writes every one of them to disk, and they bury the [iris]
+# startup diagnostics that `start.* -Mode logs` exists to show. Errors, warnings and the
+# banner still print. Same flag and same reason as `start.* local`.
+CMD ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
