@@ -250,6 +250,14 @@ class LLMClient:
         self.resolved_base: Optional[str] = None  # candidate that actually answered, cached after the first call
         self.api_key = api_key
         self.timeout = timeout
+        # NO READ TIMEOUT on a generation. `timeout=120.0` set all four httpx timeouts, so a model that
+        # thought for longer than that before its first token — an ordinary thing for a local gateway on
+        # a large prompt, and the whole point of a deep investigation — had its answer cut off and
+        # reported as a transport failure. Nothing about a slow REPLY is a fault to recover from: the
+        # analyst has Stop, and a run has its own wall clock (settings.ai.maxSeconds, which they can
+        # switch off). What stays bounded is everything that indicates a broken PEER rather than a
+        # thinking one: connect, write, and acquiring a pool slot. A dead host still fails in seconds.
+        self.http_timeout = httpx.Timeout(timeout, connect=15.0, write=30.0, pool=15.0, read=None)
         self.verify = resolve_verify(verify_tls, ca_bundle)
 
     @classmethod
@@ -370,7 +378,7 @@ class LLMClient:
         # A 404 means "no chat endpoint here", not "request rejected" — walk the other conventional
         # layouts on this origin before failing, and remember whichever one answers.
         bases = [self.resolved_base] if self.resolved_base else self.candidate_bases()
-        async with httpx.AsyncClient(timeout=self.timeout, verify=self.verify) as client:
+        async with httpx.AsyncClient(timeout=self.http_timeout, verify=self.verify) as client:
             for i, cand in enumerate(bases):
                 url = f"{cand}/chat/completions"
                 async with client.stream("POST", url, headers=self._headers(True), content=orjson.dumps(body)) as resp:
@@ -466,7 +474,7 @@ class LLMClient:
 
     async def _stream_bases(self, body: dict[str, Any], bases: list[str],
                             tools: Optional[list[dict[str, Any]]]) -> AsyncIterator[dict[str, Any]]:
-        async with httpx.AsyncClient(timeout=self.timeout, verify=self.verify) as client:
+        async with httpx.AsyncClient(timeout=self.http_timeout, verify=self.verify) as client:
             for i, cand in enumerate(bases):
                 url = f"{cand}/chat/completions"
                 async with client.stream("POST", url, headers=self._headers(True), content=orjson.dumps(body)) as resp:
@@ -591,7 +599,7 @@ class LLMClient:
         if not self.configured:
             raise AIError("AI provider is not configured (settings.ai.provider = none)")
         bases = [self.resolved_base] if self.resolved_base else self.candidate_bases()
-        async with httpx.AsyncClient(timeout=self.timeout, verify=self.verify) as client:
+        async with httpx.AsyncClient(timeout=self.http_timeout, verify=self.verify) as client:
             resp = None
             url = ""
             for i, cand in enumerate(bases):  # same endpoint walk as stream()

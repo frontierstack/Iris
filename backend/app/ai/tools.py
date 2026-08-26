@@ -67,8 +67,25 @@ def _env_seconds(name: str, default: int, cap: int) -> int:
     return max(1, min(cap, v))
 
 
+def _limits_enforced() -> bool:
+    try:
+        from ..config import get_settings
+        return bool(getattr(get_settings().ai, "enforceLimits", True))
+    except Exception:  # noqa: BLE001 — a settings read may never decide whether a tool runs
+        return True
+
+
 def tool_budget_seconds() -> int:
-    """Wall clock a single tool call gets. `IRIS_AI_TOOL_SECONDS`, capped."""
+    """Wall clock a single tool call gets. `IRIS_AI_TOOL_SECONDS`, capped.
+
+    With the run limits switched off (Settings -> AI assistant) this is the CAP rather than the
+    default: the analyst has said this case is worth the time, and a build that takes four minutes
+    should be waited for rather than refused at ninety seconds. It never becomes unbounded — a call
+    that cannot be interrupted at all is the failure `_watch` exists for, and that reasoning does not
+    change with a setting.
+    """
+    if not _limits_enforced():
+        return _env_seconds("IRIS_AI_TOOL_SECONDS", TOOL_SECONDS_CAP, TOOL_SECONDS_CAP)
     return _env_seconds("IRIS_AI_TOOL_SECONDS", TOOL_SECONDS_DEFAULT, TOOL_SECONDS_CAP)
 
 
@@ -77,8 +94,14 @@ def derived_wait_seconds() -> int:
 
     Deliberately shorter than the tool budget, so the COOPERATIVE refusal (which names what is still
     building, how far along it is and what to call instead) wins the race against the investigator's
-    hard deadline, which can only say "this took too long"."""
-    return _env_seconds("IRIS_AI_DERIVED_WAIT", DERIVED_WAIT_DEFAULT, TOOL_SECONDS_CAP)
+    hard deadline, which can only say "this took too long".
+
+    Scales with the tool budget rather than sitting at a flat 60 s, so switching the run limits off
+    lifts this too — otherwise a deep investigation still gave up on the entity graph after a minute,
+    which is exactly the cut-off the switch exists to remove.
+    """
+    default = max(DERIVED_WAIT_DEFAULT, int(tool_budget_seconds() * 0.7))
+    return _env_seconds("IRIS_AI_DERIVED_WAIT", default, TOOL_SECONDS_CAP)
 
 
 # The grammar the agent is expected to write. Repeated in the tool descriptions AND in the system
