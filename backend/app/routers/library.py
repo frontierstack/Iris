@@ -649,8 +649,9 @@ def delete_unattached(file_name: str) -> dict:
     with STORE.lock:
         sids = [s for s, lib in STORE.source_library.items()
                 if lib == p.name and STORE.source_origin.get(s) == "library"]
-    for sid in sids:
-        STORE.delete_source(sid, delete_file=False)
+    # ONE pass over the pool for the whole container, not one per member: each removal rebuilds the
+    # event list, the id index and the timestamp array, which is O(pool) however few events go.
+    STORE.delete_sources(sids, delete_file=False)
     p.unlink(missing_ok=True)
     forget_staged(p.name)
     STORE.clear_pool_skip(p.name)  # a file that no longer exists is not "missing from search" any more

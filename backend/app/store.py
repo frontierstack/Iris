@@ -3121,7 +3121,16 @@ class Store:
         return tuple(sorted((sid, s.events, s.range) for sid, s in self.sources.items()))
 
     def _remove_events_of(self, sid: str) -> None:
-        """Drop one source's events from the pool. Must be FAST — this is a click, not a job.
+        self._remove_events_of_many({sid})
+
+    def _remove_events_of_many(self, sids: set[str]) -> None:
+        """Drop these sources' events from the pool in ONE pass. Must be FAST — a click, not a job.
+
+        Takes a SET because deleting a staged ARCHIVE deletes every member it expanded to, and one
+        pass per member is one rebuild of the whole pool per member: measured 139 ms each on a
+        200,000-event pool, so a 40-member container took 5.6 s and a 200-member one in a large
+        workspace takes minutes. The work here is proportional to the POOL, not to what is being
+        removed, so it must be paid once however many sources go.
 
         It used to re-run the WHOLE detection catalogue inline, under the store lock: ~15 s at 1.2 M
         events, during which every other request queued behind it, for a delete the analyst expects to
@@ -3146,7 +3155,7 @@ class Store:
             kept: list[Event] = []
             fired = 0
             for e in base:
-                if e.sourceId == sid:
+                if e.sourceId in sids:
                     removed.add(e.id)
                 else:
                     kept.append(e)
@@ -3255,36 +3264,61 @@ class Store:
         threading.Thread(target=run, daemon=True).start()
 
     def delete_source(self, sid: str, delete_file: bool = True) -> bool:
+        return self.delete_sources([sid], delete_file) > 0
+
+    def delete_sources(self, sids: Iterable[str], delete_file: bool = True) -> int:
+        """Remove several sources in ONE pass over the pool. Returns how many were actually there.
+
+        Deleting a staged ARCHIVE means deleting every member it expanded to, and the router used to
+        call `delete_source` per member — each one an O(pool) rebuild of the event list, the id index
+        and the timestamp array. Measured 139 ms per member on a 200,000-event pool: a 40-member
+        container took 5.6 s, and the cost is proportional to the POOL, so on a large workspace a
+        container with a few hundred members is minutes of a request that reads as "delete".
+        """
+        gone: list[str] = []
+        paths: list[Path] = []
         with self.lock:
-            if sid not in self.sources:
-                return False
-            del self.sources[sid]
-            self.source_parsers.pop(sid, None)
-            self.source_origin.pop(sid, None)
-            self.source_library.pop(sid, None)
-            self.source_prefix.pop(sid, None)
-            self.source_order = [s for s in self.source_order if s != sid]
-            self.skews.pop(sid, None)
-            self.source_parse_errors.pop(sid, None)
-            self.source_member.pop(sid, None)
-            path = self.source_paths.pop(sid, None)
+            for sid in sids:
+                if sid not in self.sources:
+                    continue
+                gone.append(sid)
+                del self.sources[sid]
+                self.source_parsers.pop(sid, None)
+                self.source_origin.pop(sid, None)
+                self.source_library.pop(sid, None)
+                self.source_prefix.pop(sid, None)
+                self.skews.pop(sid, None)
+                self.source_parse_errors.pop(sid, None)
+                self.source_member.pop(sid, None)
+                path = self.source_paths.pop(sid, None)
+                if path is not None:
+                    paths.append(path)
+            if gone:
+                dropped = set(gone)
+                self.source_order = [s for s in self.source_order if s not in dropped]
+        if not gone:
+            return 0
         try:
             from .graph_store import PARTS
             PARTS.prune(set(self.sources))
         except Exception:  # noqa: BLE001 — a cache tidy must never fail a delete
             pass
-        with self.lock:
-            # members of one expanded container share a file on disk — never unlink it while a sibling
-            # source still reads from it
-            if path is not None and any(p == path for p in self.source_paths.values()):
-                delete_file = False
-        if path and delete_file:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
-        self._remove_events_of(sid)
-        return True
+        if delete_file:
+            with self.lock:
+                # members of one expanded container share a file on disk — never unlink it while a
+                # sibling source still reads from it. Checked against what SURVIVES, after every
+                # source in this batch has been removed, so deleting a whole container in one call
+                # still unlinks its file exactly once.
+                live = set(self.source_paths.values())
+            for path in dict.fromkeys(paths):
+                if path in live:
+                    continue
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        self._remove_events_of_many(set(gone))
+        return len(gone)
 
     # ------------------------------------------------------------- queries
     def event(self, eid: str) -> Optional[Event]:
