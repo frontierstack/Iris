@@ -37,6 +37,7 @@ import { useToast } from '../hooks/useToast';
 import { cx, errMsg } from '../utils/format';
 import { renderMarkdown } from '../utils/markdown';
 import { FloatingWindow } from './FloatingWindow';
+import { PromptPicker } from './PromptPicker';
 import { Icon } from './icons';
 
 export interface AiTarget { scope: AiScope; id?: string; eventIds?: string[]; label: string }
@@ -1086,10 +1087,6 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
   useEffect(() => {
     if (systemPrompts.data && spChoice && !savedPrompts.some((p) => p.id === spChoice)) pickSystemPrompt(null);
   }, [systemPrompts.data, savedPrompts, spChoice, pickSystemPrompt]);
-  const defaultPromptName = useMemo(() => {
-    const id = settings.data?.ai.systemPromptId;
-    return id ? (savedPrompts.find((p) => p.id === id)?.name ?? '') : '';
-  }, [settings.data?.ai.systemPromptId, savedPrompts]);
   // Typing into an open, finished conversation CONTINUES it. A first turn, or a chat cleared with New,
   // starts a fresh one.
   const continueFrom = run && !live ? run.id : undefined;
@@ -1176,31 +1173,11 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
           {!atBottom && live && (
             <button type="button" className="chat-jump" onClick={jumpToLatest}>Jump to latest</button>
           )}
-          {/* Which prompt the next run uses. Always visible — a control that only appears once something
-              is saved is a control nobody discovers; with nothing saved it says where to add one. */}
-          <div className="chat-prompt-bar" title="The system prompt for the next run: the built-in prompt, plus the additional instructions you pick here. Manage both under Settings → System prompts.">
-            <label className="chat-prompt-bar__label" htmlFor="chat-prompt-pick">Prompt</label>
-            <select
-              id="chat-prompt-pick"
-              className="chat-prompt-bar__select"
-              value={spChoice === null ? '__default' : spChoice}
-              onChange={(e) => pickSystemPrompt(e.target.value === '__default' ? null : e.target.value)}
-              disabled={live}
-              aria-label="System prompt for the next run"
-            >
-              <option value="__default">{defaultPromptName ? `Default · ${defaultPromptName}` : 'Built-in prompt only (default)'}</option>
-              {defaultPromptName && <option value="">Built-in prompt only</option>}
-              {savedPrompts.length > 0 && <optgroup label="Saved prompts — added to the built-in prompt">
-                {savedPrompts.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-              </optgroup>}
-            </select>
-            {systemPrompts.data?.builtinEdited && <span className="pill pill--warn" title="The built-in prompt has been edited under Settings → System prompts">built-in edited</span>}
-            <Link to="/settings#prompts" className="chat-prompt-bar__manage" onClick={onClose}>
-              {savedPrompts.length > 0 ? 'Manage' : 'Add a prompt'}
-            </Link>
-          </div>
+          {/* The composer is one bordered box: the textarea, then a toolbar row with the prompt picker on
+              the left (which prompt the next run uses — always visible, a control that only appears once
+              something is saved is a control nobody discovers) and Send / Stop on the right. */}
           <form
-            className="chat-composer"
+            className={cx('chat-composer', live && 'live')}
             onSubmit={(e) => { e.preventDefault(); send(); }}
           >
             <textarea
@@ -1216,19 +1193,31 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
                 ? 'The assistant is working — stop it to ask something else'
                 : continueFrom
                   ? 'Ask a follow-up. It keeps everything this conversation established.'
-                  : 'Describe the investigation. Enter to send, Shift+Enter for a new line.'}
+                  : 'Describe the investigation — an entity to trace, a question, a case to build.'}
               aria-label="What should the assistant investigate?"
               disabled={live}
             />
-            {live ? (
-              <button type="button" className="btn btn--danger chat-composer__go" onClick={stop} disabled={stopping}>
-                {stopping ? 'Stopping…' : 'Stop'}
-              </button>
-            ) : (
-              <button type="submit" className="btn btn--accent chat-composer__go" disabled={!canSend}>
-                {continueFrom ? 'Send' : 'Investigate'}
-              </button>
-            )}
+            <div className="chat-composer__bar">
+              <PromptPicker
+                prompts={savedPrompts}
+                defaultId={settings.data?.ai.systemPromptId ?? ''}
+                value={spChoice}
+                onChange={pickSystemPrompt}
+                disabled={live}
+                builtinEdited={!!systemPrompts.data?.builtinEdited}
+                onNavigate={onClose}
+              />
+              <span className="chat-composer__kbd" aria-hidden>Enter to send · Shift+Enter for a new line</span>
+              {live ? (
+                <button type="button" className="btn btn--danger btn--sm chat-composer__go" onClick={stop} disabled={stopping}>
+                  {stopping ? 'Stopping…' : 'Stop'}
+                </button>
+              ) : (
+                <button type="submit" className="btn btn--primary btn--sm chat-composer__go" disabled={!canSend}>
+                  {continueFrom ? 'Send' : 'Investigate'}
+                </button>
+              )}
+            </div>
           </form>
           <div className="chat-composer__hint">
             {live

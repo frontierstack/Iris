@@ -1759,33 +1759,6 @@
   color: var(--muted);
   line-height: 1.4;
 }
-/* the prompt picker above the AI panel's composer */
-.chat-prompt-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-.chat-prompt-bar__label {
-  font-size: var(--fs-xs);
-  color: var(--muted);
-  flex: 0 0 auto;
-}
-.chat-prompt-bar__select {
-  flex: 1 1 auto;
-  min-width: 0;
-  font-size: var(--fs-sm);
-  padding: 3px 24px 3px 8px;
-  background-color: var(--panel-2);
-}
-.chat-prompt-bar__manage {
-  flex: 0 0 auto;
-  font-size: var(--fs-xs);
-  color: var(--muted-2);
-}
-.chat-prompt-bar__manage:hover {
-  color: var(--accent);
-}
 .data-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
