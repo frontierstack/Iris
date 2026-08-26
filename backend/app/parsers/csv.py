@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv as _csv
 import io
+import itertools
 from typing import Iterable, Iterator, Optional
 
 from .base import BaseParser, ParsedEvent
@@ -119,5 +120,9 @@ class CsvParser(BaseParser):
             if pending:
                 yield roles.event(pending, pending.split(d))
 
-        yield from rows_from(buffer[start:])
-        yield from rows_from(it)
+        # ONE pass over the sniff buffer AND the rest of the file. Two calls put an artificial
+        # record boundary at line 100: `rows_from` ends by flushing whatever is still `pending`
+        # as a record, so a quoted cell that straddles that line was emitted as a malformed
+        # half-record and the second call then started mid-cell — every record after it in the
+        # file misaligned by a line, in the SINGLE-worker path, with nothing reporting it.
+        yield from rows_from(itertools.chain(buffer[start:], it))

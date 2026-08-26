@@ -275,24 +275,42 @@ def merge_batches(batches: Iterable[Batch]) -> tuple[list[Event], Optional[float
 
 
 # ------------------------------------------------------------------------------------- chunking
-def _head_slice(data: bytes) -> Optional[tuple[int, int]]:
+def _head_slice(data: bytes, quoted: bool = False) -> Optional[tuple[int, int]]:
     """(end offset of the warm-up head, non-blank lines it holds), or None if the file is too short.
 
     The head must contain at least HEAD_LINES non-blank lines within HEAD_MAX_BYTES, otherwise a worker
     in the middle of the file would warm up on less text than the head-only parse did and could resolve
     a different delimiter or header.
+
+    For a `quoted` parser it must ALSO end on an even running quote count. A CSV cell may contain a
+    newline, so counting newlines alone can cut the head INSIDE a quoted cell — and then a worker's
+    `head + chunk` is not "the head's records, then the chunk's": the still-open quote swallows the
+    start of the chunk, the two merge into one record, and discarding `head_records` of them discards
+    real evidence. Silently — the source still reads READY/enriched, just with fewer events, which is
+    the silent-omission failure this project refuses everywhere else. `_chunk_ranges` already tracks
+    this parity for the chunk boundaries; the head was the one cut nobody checked.
+
+    A head that never balances inside the byte budget returns None, which means "parse this file with
+    one worker". Slower and correct beats parallel and wrong.
     """
     lines = 0
     pos = 0
+    quotes = 0
     limit = min(len(data), HEAD_MAX_BYTES)
-    while pos < limit and lines < HEAD_LINES:
+    # `quotes % 2` keeps the loop going past HEAD_LINES until the cell closes; the running count is
+    # carried rather than recomputed, because `data.count(b'"', 0, pos)` per line is quadratic.
+    while pos < limit and (lines < HEAD_LINES or (quoted and quotes % 2)):
         nl = data.find(b"\n", pos)
         if nl < 0:
             return None
+        if quoted:
+            quotes += data.count(b'"', pos, nl + 1)
         if data[pos:nl].strip():
             lines += 1
         pos = nl + 1
-    return (pos, lines) if lines >= HEAD_LINES else None
+    if lines < HEAD_LINES:
+        return None
+    return None if (quoted and quotes % 2) else (pos, lines)
 
 
 def _chunk_ranges(data: bytes, start: int, size: int, quoted: bool) -> list[tuple[int, int]]:
@@ -382,11 +400,12 @@ def prepare(parser: BaseParser, data: bytes) -> Optional[tuple[Plan, list[Parsed
     workers = parallel_workers()
     if workers < 2 or not getattr(parser, "chunkable", False) or len(data) < min_parallel_bytes():
         return None
-    head = _head_slice(data)
+    quoted = bool(getattr(parser, "quoted", False))
+    head = _head_slice(data, quoted)
     if head is None:
         return None
     head_end, _ = head
-    ranges = _chunk_ranges(data, head_end, chunk_bytes(), bool(getattr(parser, "quoted", False)))
+    ranges = _chunk_ranges(data, head_end, chunk_bytes(), quoted)
     if len(ranges) < 2:
         return None
     try:

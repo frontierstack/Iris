@@ -696,3 +696,84 @@ def test_the_publish_cadence_scales_with_the_file() -> None:
     for size in (5 << 20, 50 << 20, 1024 << 20):
         publishes = size // progress_step(size)
         assert 50 <= publishes <= 150, f"{size >> 20} MB would publish {publishes} times"
+
+
+def _csv_multiline(rows: int) -> bytes:
+    """A CSV whose message column carries an embedded newline — an ordinary export shape (any log with
+    a stack trace, a request body or a multi-line message in a column looks like this)."""
+    out = [b"timestamp,host,message\n"]
+    for i in range(rows):
+        out.append(('2026-03-01T00:00:%02d,h%d,"first part\nsecond part %d"\n'
+                    % (i % 60, i % 3, i)).encode())
+    return b"".join(out)
+
+
+def _head_slice_by_lines(data: bytes):
+    """The pre-fix head: newline counting only, quote parity ignored."""
+    lines, pos = 0, 0
+    limit = min(len(data), par.HEAD_MAX_BYTES)
+    while pos < limit and lines < par.HEAD_LINES:
+        nl = data.find(b"\n", pos)
+        if nl < 0:
+            return None
+        if data[pos:nl].strip():
+            lines += 1
+        pos = nl + 1
+    return (pos, lines) if lines >= par.HEAD_LINES else None
+
+
+def _chunked_records(data: bytes, head_slice) -> list[str]:
+    """Every record the CHUNKED path yields, the way `_run_chunk` yields it: each worker parses
+    `head + chunk` from a pristine parser and discards the records the head alone produced."""
+    import copy
+
+    from app.parsers.csv import CsvParser
+
+    parser = CsvParser()
+    head_end, _ = head_slice
+    pristine = copy.deepcopy(parser)
+    par._reset_parser(pristine)
+    head_text = data[:head_end].decode("utf-8", errors="replace")
+    head_parsed = list(parser.parse(head_text.splitlines()))
+    skip = len(head_parsed)
+    out = [pe.raw for pe in head_parsed]
+    for s, e in par._chunk_ranges(data, head_end, par.chunk_bytes(), True):
+        worker = copy.deepcopy(pristine)
+        text = head_text + data[s:e].decode("utf-8", errors="replace")
+        out.extend(pe.raw for i, pe in enumerate(worker.parse(text.splitlines())) if i >= skip)
+    return out
+
+
+def test_the_warm_up_head_never_ends_inside_a_quoted_cell() -> None:
+    """A CSV cell may contain a newline, so counting newlines alone can cut the head mid-cell.
+
+    The first assertion keeps this honest: it proves the fixture really does trip the old behaviour,
+    so a green result means the fix works rather than that nothing was exercised.
+    """
+    data = _csv_multiline(4000)
+    old_end, _ = _head_slice_by_lines(data)
+    new_end, lines = par._head_slice(data, True)
+    assert data.count(b'"', 0, old_end) % 2 == 1, "the fixture no longer cuts inside a quoted cell"
+    assert data.count(b'"', 0, new_end) % 2 == 0, "the head still ends on an open quote"
+    assert new_end > old_end and lines >= par.HEAD_LINES
+
+
+def test_a_head_cut_mid_cell_loses_records_and_the_fix_stops_it(monkeypatch) -> None:
+    """The chunked path must yield exactly what one worker over the whole file yields.
+
+    With the head cut inside an open quote, that quote swallows the first line of every chunk: the
+    head's dangling record and the chunk's first record merge into one, and discarding `head_records`
+    of them discards a real line of evidence per chunk. Silently — the source still reads READY, just
+    with fewer events.
+    """
+    monkeypatch.setenv("IRIS_PARSE_CHUNK_MB", "0.06")
+    from app.parsers.csv import CsvParser
+
+    data = _csv_multiline(4000)
+    whole = [pe.raw for pe in CsvParser().parse(data.decode().splitlines())]
+
+    broken = _chunked_records(data, _head_slice_by_lines(data))
+    fixed = _chunked_records(data, par._head_slice(data, True))
+
+    assert fixed == whole, "the quote-aware head must reproduce the single-worker records exactly"
+    assert broken != whole, "the fixture did not actually exercise the old failure"
