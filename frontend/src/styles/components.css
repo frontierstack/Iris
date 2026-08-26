@@ -7,14 +7,11 @@
 }
 
 .sidebar-slot {
-  /* the rail reserves --rail-w in the flow; the sidebar itself is fixed and expands OVER the content on hover */
-  width: var(--rail-w);
-  flex: 0 0 var(--rail-w);
-  transition: width var(--t-med), flex-basis var(--t-med);
+  width: var(--sidebar-w);
+  flex: 0 0 var(--sidebar-w);
 }
-.sidebar-slot.pinned { width: var(--sidebar-w); flex-basis: var(--sidebar-w); }
 .sidebar {
-  width: var(--rail-w);
+  width: var(--sidebar-w);
   background: var(--bg-sidebar);
   border-right: 1px solid var(--border);
   display: flex;
@@ -25,38 +22,8 @@
   height: 100vh;
   z-index: 40;
   overflow: hidden;
-  transition: width var(--t-med), box-shadow var(--t-med);
   white-space: nowrap;
 }
-.sidebar.expanded { width: var(--sidebar-w); }
-.sidebar.expanded:not(.pinned) { box-shadow: var(--shadow-lg, 0 12px 40px rgba(0,0,0,.45)); }
-.sidebar__brand-text, .nav-group__head, .nav-item__label, .nav-item__tag { transition: opacity var(--t-fast); }
-.sidebar.rail .nav-item__label, .sidebar.rail .nav-item__tag { display: none; }
-/* The brand row used to carry a logo mark; with that gone the wordmark itself has to hold
-   the rail, so keep it visible there and drop only the tagline. The negative margin eats
-   the trailing letter-space so IRIS optically centres in the 60px rail. */
-.sidebar.rail .sidebar__tag { display: none; }
-.sidebar.rail .sidebar__logo { font-size: 12px; letter-spacing: 0.18em; margin-right: -0.18em; }
-.sidebar.rail .sidebar__case, .sidebar.rail .sidebar__hints, .sidebar.rail .sidebar__ver { display: none; }
-.sidebar.rail .nav-group__head { height: 10px; padding: 0; overflow: hidden; color: transparent; border-top: 1px solid var(--border-2); margin: 4px 10px 6px; }
-.sidebar.rail .nav-group__head .nav-group__caret { display: none; }
-.sidebar.rail .nav-item { justify-content: center; padding: 9px 0; gap: 0; width: 100%; }
-.sidebar.rail .nav-item::before { display: none; }
-.sidebar.rail .nav-item.active { background: color-mix(in srgb, var(--accent) 12%, transparent); }
-.sidebar.rail .sidebar__nav { padding: 8px 8px; }
-.sidebar.rail .nav-item__icon { width: 16px; height: 16px; flex-basis: 16px; }
-.sidebar.rail .sidebar__brand { padding: 14px 0 12px; }
-.sidebar.rail .sidebar__brand-row { justify-content: center; gap: 0; }
-.sidebar.rail .sidebar__foot { padding: 10px 0; align-items: center; }
-.sidebar__pin {
-  align-self: flex-end;
-  width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center;
-  border: 1px solid transparent; border-radius: var(--radius-sm); color: var(--muted-2); background: transparent; cursor: pointer;
-  transition: color var(--t-fast), border-color var(--t-fast), background var(--t-fast);
-}
-.sidebar.rail .sidebar__pin { align-self: center; }
-.sidebar__pin:hover { color: var(--text-bright); border-color: var(--border); }
-.sidebar__pin.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
 .sidebar__brand {
   padding: 16px 16px 14px;
   border-bottom: 1px solid var(--border);
@@ -137,10 +104,11 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 8px 4px;
-  font-family: var(--font-mono);
+  padding: 8px 8px 4px 12px;
+  font-family: var(--font-ui);
   font-size: var(--fs-xxs);
-  letter-spacing: 0.16em;
+  font-weight: 600;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--muted-3);
   cursor: pointer;
@@ -164,8 +132,8 @@
 .nav-item {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 7px 8px 7px 10px;
+  gap: 8px;
+  padding: 6px 8px 6px 12px;
   cursor: pointer;
   background: transparent;
   color: var(--text-4);
@@ -201,21 +169,11 @@
   opacity: 1;
   transform: scaleY(1);
 }
-.nav-item__icon {
-  width: 14px;
-  height: 14px;
-  flex: 0 0 14px;
-  color: var(--muted-2);
-  transition: color var(--t-fast);
-}
-.nav-item:hover .nav-item__icon,
-.nav-item.active .nav-item__icon {
-  color: var(--accent);
-}
 .nav-item__label {
   font-size: var(--fs-lg);
   font-weight: 500;
   flex: 1;
+  letter-spacing: 0.005em;
 }
 .nav-item__tag {
   font-family: var(--font-mono);
@@ -264,9 +222,6 @@
 .nav-group__reset:hover {
   color: var(--text-4);
 }
-.sidebar.rail .nav-group__reset {
-  display: none;
-}
 .nav-item__grip {
   width: 10px;
   height: 10px;
@@ -288,10 +243,6 @@
 .nav-item.dragging .nav-item__grip {
   opacity: 1;
   cursor: grabbing;
-}
-/* the rail has no room for a handle — the whole tile stays draggable */
-.sidebar.rail .nav-item__grip {
-  display: none;
 }
 .sidebar__foot {
   margin-top: auto;
@@ -377,6 +328,7 @@
 .header__title {
   font-size: var(--fs-xl);
   font-weight: 600;
+  letter-spacing: -0.005em;
   color: var(--text-bright);
   white-space: nowrap;
 }
@@ -439,7 +391,7 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 8px;
+  padding: 2px 8px;
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
   background: var(--panel);
@@ -482,7 +434,8 @@
 }
 .eyebrow {
   font-size: var(--fs-xxs);
-  letter-spacing: 0.16em;
+  font-weight: 600;
+  letter-spacing: 0.1em;
   color: var(--muted);
   text-transform: uppercase;
 }
@@ -545,34 +498,36 @@
   white-space: nowrap;
 }
 
-/* ───────── Buttons ───────── */
+/* ───────── Buttons ─────────
+   Slim and flat: 28px tall at the default size, 24px small, weight 500 everywhere (a 700 primary read
+   as a banner next to 500 text), no inset highlight, one radius. Emphasis comes from colour, not mass. */
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
-  padding: 7px 14px;
+  gap: 6px;
+  height: 28px;
+  padding: 0 11px;
   font-size: var(--fs-base);
   font-weight: 500;
+  letter-spacing: 0.005em;
   border: 1px solid var(--border-strong);
   color: var(--text-2);
   background: transparent;
   cursor: pointer;
   white-space: nowrap;
-  transition: background var(--t-fast), border-color var(--t-fast), color var(--t-fast), transform var(--t-fast), box-shadow var(--t-fast);
-  line-height: 1.2;
+  transition: background var(--t-fast), border-color var(--t-fast), color var(--t-fast), box-shadow var(--t-fast);
+  line-height: 1;
   user-select: none;
   border-radius: var(--radius-md);
 }
 .btn:hover:not(:disabled) {
   background: var(--hover);
-}
-.btn:hover:not(:disabled) {
   border-color: var(--border-hover);
   color: var(--text-bright);
 }
 .btn:active:not(:disabled) {
-  transform: translateY(1px);
+  background: var(--panel-inset);
 }
 .btn:disabled {
   opacity: 0.45;
@@ -582,10 +537,7 @@
   background: var(--accent);
   color: var(--on-accent);
   border-color: var(--accent);
-  font-weight: 700;
-}
-.btn--primary {
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.08) inset, var(--shadow-sm);
+  font-weight: 600;
 }
 .btn--primary:hover:not(:disabled) {
   background: var(--accent-hover);
@@ -596,7 +548,6 @@
   background: var(--accent-bg);
   border-color: var(--accent-border);
   color: var(--accent);
-  font-weight: 600;
 }
 .btn--accent:hover:not(:disabled) {
   background: var(--accent-bg-hover);
@@ -617,25 +568,33 @@
   color: var(--text-4);
 }
 .btn--ghost:hover:not(:disabled) {
-  border-color: var(--border-strong);
+  border-color: transparent;
+  background: var(--hover);
 }
 .btn--sm {
-  padding: 5px 10px;
+  height: 24px;
+  padding: 0 9px;
   font-size: var(--fs-md);
+  gap: 5px;
 }
 .btn--lg {
-  padding: 9px 16px;
+  height: 32px;
+  padding: 0 14px;
   font-size: var(--fs-lg);
 }
 .btn--icon {
-  padding: 6px 8px;
+  padding: 0;
+  width: 28px;
   font-family: var(--font-mono);
-  min-width: 28px;
+}
+.btn--sm.btn--icon {
+  width: 24px;
 }
 .btn svg {
-  width: 13px;
-  height: 13px;
-  flex: 0 0 13px;
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
+  opacity: 0.9;
 }
 .btn__spinner {
   width: 10px;
@@ -648,7 +607,7 @@
 
 /* ───────── Chips ───────── */
 .chip {
-  padding: 4px 10px;
+  padding: 3px 9px;
   font-size: var(--fs-md);
   cursor: pointer;
   border: 1px solid var(--tag-border);
@@ -681,7 +640,7 @@
 .chip--mono {
   font-family: var(--font-mono);
   font-size: var(--fs-sm);
-  padding: 4px 8px;
+  padding: 3px 8px;
   background: var(--chip-bg);
   border-color: var(--chip-border);
 }
@@ -1381,14 +1340,15 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-family: var(--font-mono);
+  font-family: var(--font-ui);
   font-size: var(--fs-xs);
-  padding: 3px 8px;
+  font-weight: 500;
+  padding: 2px 8px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-pill);
   color: var(--text-3);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  letter-spacing: 0.01em;
+  line-height: 1.4;
 }
 .badge--ok {
   border-color: var(--accent-border);
@@ -1525,21 +1485,23 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-family: var(--font-mono);
-  font-size: var(--fs-xxs);
-  letter-spacing: 0.08em;
-  padding: 2px 8px;
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  padding: 1px 8px;
   border-radius: var(--radius-pill);
   border: 1px solid var(--border-strong);
   color: var(--text-3);
   white-space: nowrap;
-  text-transform: uppercase;
+  line-height: 1.5;
 }
 .pill--ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); background: color-mix(in srgb, var(--ok) 10%, transparent); }
 .pill--warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); background: color-mix(in srgb, var(--warn) 10%, transparent); }
 .pill--bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, transparent); background: color-mix(in srgb, var(--bad) 10%, transparent); }
 .pill--high { color: var(--sev-high); border-color: color-mix(in srgb, var(--sev-high) 40%, transparent); background: color-mix(in srgb, var(--sev-high) 10%, transparent); }
 .pill--muted { color: var(--muted-2); }
+.pill--state { text-transform: lowercase; }   /* the enum value is READY; the chip beside it says 'enriched' */
 .pill--accent { color: var(--accent); border-color: var(--accent-border); background: var(--accent-bg); }
 .pill .spinner {
   width: 9px;
@@ -1837,13 +1799,13 @@
 .chat-composer { display: flex; align-items: flex-end; gap: 8px; }
 .chat-composer__input {
   flex: 1 1 auto; min-width: 0; resize: none; overflow-y: auto; max-height: 200px;
-  font: inherit; font-size: var(--fs-base); line-height: 1.5; padding: 10px 12px;
+  font: inherit; font-size: var(--fs-base); line-height: 1.5; padding: 8px 12px;
   background: var(--panel-2); color: var(--text-bright);
   border: 1px solid var(--border); border-radius: var(--radius-md); outline: none;
 }
 .chat-composer__input:focus { border-color: color-mix(in srgb, var(--accent) 60%, var(--border)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent); }
 .chat-composer__input:disabled { opacity: .6; cursor: not-allowed; }
-.chat-composer__go { flex: 0 0 auto; height: 44px; }   /* matches the composer's collapsed height */
+.chat-composer__go { flex: 0 0 auto; height: 36px; }   /* matches the composer's collapsed height */
 .chat-composer__hint { font-size: var(--fs-xs); color: var(--muted); line-height: 1.45; text-wrap: pretty; }
 .chat-jump {
   align-self: center; background: var(--panel-2); border: 1px solid var(--border-strong, var(--border));

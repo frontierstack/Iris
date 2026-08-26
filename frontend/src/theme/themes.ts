@@ -25,8 +25,8 @@ export const THEMES: ThemeMeta[] = [
  *  screen the analyst actually has. */
 export interface FontMeta { id: FontName; name: string; desc: string; stack: string }
 export const UI_FONTS: FontMeta[] = [
-  { id: 'space-grotesk', name: 'Space Grotesk', desc: 'Default · geometric, slightly technical', stack: "'Space Grotesk', sans-serif" },
-  { id: 'inter', name: 'Inter', desc: 'Neutral · designed for screen UI at small sizes', stack: "'Inter', sans-serif" },
+  { id: 'inter', name: 'Inter', desc: 'Default · designed for screen UI at small sizes', stack: "'Inter', sans-serif" },
+  { id: 'space-grotesk', name: 'Space Grotesk', desc: 'Geometric, slightly technical', stack: "'Space Grotesk', sans-serif" },
   { id: 'ibm-plex-sans', name: 'IBM Plex Sans', desc: 'Corporate-neutral · pairs with Plex Mono', stack: "'IBM Plex Sans', sans-serif" },
   { id: 'source-sans', name: 'Source Sans 3', desc: 'Humanist · easy over long reading', stack: "'Source Sans 3', sans-serif" },
   { id: 'system', name: 'System', desc: 'Whatever this OS uses · no webfont at all', stack: 'system-ui, sans-serif' },
@@ -40,7 +40,7 @@ export const MONO_FONTS: MonoMeta[] = [
   { id: 'system', name: 'System', desc: 'Whatever this OS uses · no webfont at all', stack: 'ui-monospace, monospace' },
 ];
 
-export const DEFAULT_FONT: FontName = 'space-grotesk';
+export const DEFAULT_FONT: FontName = 'inter';
 export const DEFAULT_MONO: MonoName = 'jetbrains-mono';
 export const isFontName = (v: unknown): v is FontName => UI_FONTS.some((f) => f.id === v);
 export const isMonoName = (v: unknown): v is MonoName => MONO_FONTS.some((f) => f.id === v);

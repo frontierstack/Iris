@@ -367,7 +367,7 @@ into `.wslconfig` from the machine's real hardware; `setup.ps1` prints both side
 
 # Using the app
 
-The left sidebar is a slim icon rail — hover to expand, pin it with the button at the bottom.
+The left sidebar is a fixed text nav (no icons); groups collapse, and items within a group can be dragged into your own order.
 
 **A case is optional.** Search, detections, the entity graph and event detail read the whole ingested pool and work
 with no case at all. A case adds curation: a timeline, notes, indicators, accepted graph links and the report.

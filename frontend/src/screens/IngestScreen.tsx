@@ -417,7 +417,7 @@ function MappingDrawer({ source, onClose, onViewRaw }: { source: Source | null; 
                 percentage, rate and ETA here as it does in the table it was opened from. */}
             {source.state === 'PARSING'
               ? <ParsingCell source={source} />
-              : <span className={cx('pill', STATE_PILL[source.state])}>{source.state}</span>}
+              : <span className={cx('pill', 'pill--state', STATE_PILL[source.state])}>{source.state}</span>}
             {/* The other half of the file's status: has it been interpreted at all (phase 2)? */}
             <EnrichChip source={source} />
             <EnrichActions source={source} />
@@ -1222,7 +1222,7 @@ export function IngestScreen() {
               </div>
               <div>
                 {s.state === 'PARSING' ? <ParsingCell source={s} /> : (
-                  <span className={cx('pill', STATE_PILL[s.state], s.error && 'tip')} data-tip={s.error || undefined}>
+                  <span className={cx('pill', 'pill--state', STATE_PILL[s.state], s.error && 'tip')} data-tip={s.error || undefined}>
                     {s.state === 'ERROR' && <Icon.Warn width={10} height={10} />}
                     {s.state}
                   </span>

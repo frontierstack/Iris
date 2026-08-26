@@ -11,7 +11,7 @@ import { EnrichBanner } from './Enrichment';
 import { Icon } from './icons';
 import { Toasts } from './ui';
 
-interface NavDef { to: string; label: string; tag: string; icon: (p: React.SVGProps<SVGSVGElement>) => JSX.Element }
+interface NavDef { to: string; label: string; tag: string }
 interface NavGroup { id: string; label: string; items: NavDef[] }
 
 function useScreenMeta(): { crumb: string; title: string; sub: string } {
@@ -76,20 +76,20 @@ export function Sidebar() {
         id: 'workbench',
         label: 'Workbench',
         items: [
-          { to: '/cases', label: 'Cases', tag: cases.data ? String(cases.data.length) : '', icon: Icon.Cases },
-          { to: '/ingest', label: 'Sources', tag: d ? String(d.sources.length + d.librarySources.length) : '', icon: Icon.Sources },
-          { to: '/search', label: 'Search', tag: d ? fmtCompact(d.poolEventCount) : '', icon: Icon.Search },
-          { to: '/anomalies', label: 'Anomalies', tag: anomalies.data === undefined ? '' : String(anomalies.data), icon: Icon.Anomalies },
+          { to: '/cases', label: 'Cases', tag: cases.data ? String(cases.data.length) : '' },
+          { to: '/ingest', label: 'Sources', tag: d ? String(d.sources.length + d.librarySources.length) : '' },
+          { to: '/search', label: 'Search', tag: d ? fmtCompact(d.poolEventCount) : '' },
+          { to: '/anomalies', label: 'Anomalies', tag: anomalies.data === undefined ? '' : String(anomalies.data) },
           // No Timeline entry: the timeline is a property of a CASE (the curated events, in order), not a
           // global screen — it lives on the case detail page.
           // No graph request from the sidebar. `useGraph` here made EVERY page start a full entity
           // extraction after every store bump — during a 300 MB library load that was a six-worker
           // build every few seconds, each thrown away on the next bump, and on a memory-tight WSL2 VM it
           // helped push the process into a segfault. A nav badge is not worth a 100-second build.
-          { to: '/graph', label: 'Entity graph', tag: '', icon: Icon.Graph },
+          { to: '/graph', label: 'Entity graph', tag: '' },
         ],
       },
-      { id: 'system', label: 'System', items: [{ to: '/settings', label: 'Settings', tag: '', icon: Icon.Settings }] },
+      { id: 'system', label: 'System', items: [{ to: '/settings', label: 'Settings', tag: '' }] },
     ];
   }, [c.data, cases.data, anomalies.data]);
 
@@ -131,16 +131,9 @@ export function Sidebar() {
   };
 
   const online = !health.isError;
-  const [pinned, setPinned] = useState<boolean>(() => { try { return localStorage.getItem('iris.sidebar.pinned') === '1'; } catch { return false; } });
-  const [hover, setHover] = useState(false);
-  const hoverTimer = useRef<number | null>(null);
-  const expanded = pinned || hover;
-  const togglePinned = () => setPinned((p) => { const v = !p; try { localStorage.setItem('iris.sidebar.pinned', v ? '1' : '0'); } catch { /* ignore */ } return v; });
-  const onEnter = () => { if (hoverTimer.current) window.clearTimeout(hoverTimer.current); hoverTimer.current = window.setTimeout(() => setHover(true), 90); };
-  const onLeave = () => { if (hoverTimer.current) window.clearTimeout(hoverTimer.current); hoverTimer.current = window.setTimeout(() => setHover(false), 160); };
   return (
-    <div className={cx('sidebar-slot', pinned && 'pinned')}>
-    <aside className={cx('sidebar', expanded ? 'expanded' : 'rail', pinned && 'pinned')} onMouseEnter={onEnter} onMouseLeave={onLeave} onFocusCapture={() => setHover(true)} onBlurCapture={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setHover(false); }}>
+    <div className="sidebar-slot">
+    <aside className="sidebar">
       <div className="sidebar__brand">
         <div className="sidebar__brand-row">
           <div className="sidebar__brand-text">
@@ -178,7 +171,6 @@ export function Sidebar() {
                     key={n.to}
                     to={n.to}
                     className={({ isActive }) => cx('nav-item', isActive && 'active', dragging === n.to && 'dragging')}
-                    title={expanded ? undefined : n.label}
                     draggable={reorderable}
                     onDragStart={reorderable ? onItemDragStart(grp.id, n.to) : undefined}
                     onDragOver={reorderable ? onItemDragOver(grp.id, n.to) : undefined}
@@ -186,7 +178,6 @@ export function Sidebar() {
                     onDragEnd={reorderable ? endDrag : undefined}
                   >
                     {reorderable && <Icon.Grip className="nav-item__grip" aria-hidden />}
-                    <n.icon className="nav-item__icon" />
                     <span className="nav-item__label">{n.label}</span>
                     <span className="nav-item__tag">{n.tag}</span>
                   </NavLink>
@@ -205,9 +196,6 @@ export function Sidebar() {
           <span>Iris {health.data ? `v${health.data.version}` : ''}</span>
           <span>{online ? 'API online' : 'offline'}</span>
         </div>
-        <button className={cx('sidebar__pin', pinned && 'on')} onClick={togglePinned} title={pinned ? 'Unpin sidebar (collapse when not hovered)' : 'Pin sidebar open'} aria-pressed={pinned} aria-label="Pin sidebar">
-          <Icon.PanelLeft />
-        </button>
       </div>
     </aside>
     </div>

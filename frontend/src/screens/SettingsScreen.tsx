@@ -21,14 +21,14 @@ const COMPUTE_MODES: { id: ComputeMode; title: string; desc: string }[] = [
   { id: 'cpu', title: 'CPU only', desc: 'Never touch the GPU. Slower on very large files but fully deterministic.' },
 ];
 
-const NAV: { id: string; label: string; icon: (p: React.SVGProps<SVGSVGElement>) => JSX.Element }[] = [
-  { id: 'appearance', label: 'Appearance', icon: Icon.Sliders },
-  { id: 'compute', label: 'Compute', icon: Icon.Cpu },
-  { id: 'ai', label: 'AI assistant', icon: Icon.Sparkle },
-  { id: 'prompts', label: 'System prompts', icon: Icon.Doc },
-  { id: 'mcp', label: 'MCP server', icon: Icon.Plug },
-  { id: 'security', label: 'Security', icon: Icon.Lock },
-  { id: 'data', label: 'Data', icon: Icon.Trash },
+const NAV: { id: string; label: string }[] = [
+  { id: 'appearance', label: 'Appearance' },
+  { id: 'compute', label: 'Compute' },
+  { id: 'ai', label: 'AI assistant' },
+  { id: 'prompts', label: 'System prompts' },
+  { id: 'mcp', label: 'MCP server' },
+  { id: 'security', label: 'Security' },
+  { id: 'data', label: 'Data' },
 ];
 
 const COLLAPSE_KEY = 'iris.settings.collapsed';
@@ -1108,7 +1108,6 @@ export function SettingsScreen() {
       <nav className="settings__nav" aria-label="Settings sections">
         {NAV.map((n) => (
           <a key={n.id} href={`#${n.id}`} className={cx('settings__nav-item', active === n.id && 'active')} onClick={() => setActive(n.id)}>
-            <n.icon className="nav-item__icon" />
             {n.label}
           </a>
         ))}
