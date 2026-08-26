@@ -4,6 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+
+from app.routers import events as events_router
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -167,3 +169,86 @@ def test_download_sets_content_disposition(client):
     assert r.content == (FIX / "fw-edge-2.pipe.log").read_bytes()
     assert client.get("/api/sources/nope/download").status_code == 404
     assert client.get("/api/sources/nope/raw").status_code == 404
+
+
+# --------------------------------------------------------------- the facet tally is C-driven now
+def _facets_reference(rows):
+    """The straightforward per-event loop the endpoint used to run, kept as the oracle.
+
+    It was 400,000 Python calls at the 20,000-event scan cap and measured 211 ms, which made
+    /api/events/fields the only slow endpoint in the app. `_facets` counts (key, value) pairs in C
+    instead — 53 ms on the same input — and this pins that the answer did not change with it.
+    """
+    counts, value_counts, samples = {}, {}, {}
+
+    def bump(name, value):
+        counts[name] = counts.get(name, 0) + 1
+        if not value:
+            return
+        vc = value_counts.setdefault(name, {})
+        vc[value] = vc.get(value, 0) + 1
+        s = samples.get(name)
+        if s is None:
+            samples[name] = [value]
+        elif len(s) < 5 and value not in s:
+            s.append(value)
+
+    for e in rows:
+        if e.host:
+            bump("host", e.host)
+        if e.user:
+            bump("user", e.user)
+        bump("source", e.source)
+        bump("file", e.file)
+        bump("sev", e.sev)
+        for k, v in e.fields.items():
+            if k in events_router._FIXED_COLUMNS:
+                continue
+            bump(k, v if isinstance(v, str) else str(v))
+    return counts, value_counts, samples
+
+
+def _mixed_rows():
+    """Every shape the tally has to survive: repeated values, a unique-per-event column, empty
+    values, a missing host/user, a non-string value, and a parser field named like a fixed column."""
+    from app.models import Event
+
+    out = []
+    for i in range(120):
+        f = {
+            "action": "allow" if i % 2 else "deny",        # repeats hard
+            "url": f"https://example.test/{i}",            # unique per event
+            "note": "" if i % 3 else "seen",               # empty values must still count the field
+            "sev": "critical",                             # named like a fixed column: must fold away
+            "port": 443 if i % 5 else "443",               # a non-str value must be str()'d
+        }
+        out.append(Event(id=f"e{i:x}", ts="2026-05-01T10:00:00Z", source="delimited.csv", sourceId="s1",
+                         file="f.csv", host="" if i % 4 else f"h{i % 3}", user="" if i % 7 else "u1",
+                         msg="m", sev="info" if i % 2 else "", raw="r", fields=f))
+    return out
+
+
+def test_the_fast_facet_tally_matches_the_loop_it_replaced():
+    rows = _mixed_rows()
+    got_counts, got_values, got_samples = events_router._facets(rows)
+    want_counts, want_values, want_samples = _facets_reference(rows)
+    assert got_counts == want_counts
+    assert got_values == want_values
+    assert got_samples == want_samples, "sample ORDER is part of the answer: first-seen, max 5"
+    # and the fixture really does exercise the awkward cases
+    assert "sev" in got_counts and got_counts["sev"] == len(rows)      # the parser field folded in
+    assert got_counts["note"] == len(rows)                             # empty values still count
+    assert "443" in got_values["port"] and 443 not in got_values["port"]
+    assert got_counts["host"] < len(rows) and got_counts["user"] < len(rows)
+
+
+def test_an_unhashable_field_value_falls_back_instead_of_dropping_the_field():
+    """`Event.fields` is declared dict[str, str] but Event is not pydantic, so nothing enforces it.
+    A list in there cannot be counted in C — the tally must fall back, not lose the column."""
+    from app.models import Event
+
+    rows = [Event(id="e1", ts="", source="s", sourceId="s1", file="f", host="", user="", msg="m",
+                  sev="info", raw="r", fields={"tags": ["a", "b"], "ok": "yes"})]
+    counts, values, _ = events_router._facets(rows)
+    assert counts["ok"] == 1 and counts["tags"] == 1
+    assert values["tags"] == {"['a', 'b']": 1}
