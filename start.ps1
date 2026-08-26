@@ -8,7 +8,7 @@
    .\start.ps1 -Mode stop      # stop the container
    .\start.ps1 -Mode logs      # follow the container logs
    .\start.ps1 -Mode status    # is it up, what is it doing, and how big is the pool
-   .\start.ps1 -NoBrowser      # don't open http://localhost:8000
+   .\start.ps1 -NoBrowser      # don't open http://127.0.0.1:8000
    .\start.ps1 -SkipWslCheck   # don't look at .wslconfig (see wsl.ps1)
 
  One container serves EVERYTHING: the FastAPI API under /api and the built React SPA at /. There is no
@@ -28,7 +28,16 @@ param(
 )
 $ErrorActionPreference = 'Continue'
 Set-Location $PSScriptRoot
-$Url = "http://localhost:$Port"
+# NOT `localhost`. It resolves to ::1 first, nothing is published there (compose binds the port on
+# IRIS_BIND_HOST, 127.0.0.1 by default), and the connection is not REFUSED — it hangs until it times
+# out, so every caller waits for the IPv6 attempt to lose. Measured on this machine, the same request:
+# http://localhost:8000/api/health = 2,084 ms, http://127.0.0.1:8000/api/health = 5 ms. Every health
+# poll below paid it (which is why "waiting for the API" always reported ~2.1 s however fast the
+# container came up), and so did the browser we open. Always address the app by its literal.
+$BindHost = if ($env:IRIS_BIND_HOST) { $env:IRIS_BIND_HOST } else { '127.0.0.1' }
+if ($BindHost -in @('0.0.0.0', '::', '*')) { $BindHost = '127.0.0.1' }
+if ($BindHost.Contains(':') -and -not $BindHost.StartsWith('[')) { $BindHost = "[$BindHost]" }
+$Url = "http://${BindHost}:$Port"
 $script:StepNo = 0
 $script:Started = Get-Date
 # Animate only for a human: redirected output gets periodic lines instead (see Spin).

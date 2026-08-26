@@ -2660,8 +2660,37 @@ class Store:
                       params=RULES_STORE.detection_params(), exclude=excl, progress=tick)
             RULES_STORE.apply_all(ordered, excl)
 
-    def _run_detections(self, progress: Optional[Callable[[float], None]] = None) -> None:
-        """Built-in Sigma-like rules (minus disabled ones) + enabled custom regex rules."""
+    def _detections_fingerprint(self) -> int:
+        """A summary of what the catalogue currently has stamped on the pool.
+
+        `run_rules` CLEARS every event's detections and re-stamps from scratch, so the only way to know
+        whether a pass changed anything is to compare the outcome against what was there before it ran.
+        Hashing (position, rule id, level) catches a rule that started or stopped firing, one that moved
+        to different events, and an analyst severity override. It costs one attribute read for an event
+        with no detections — which is the overwhelming majority — so it is a few percent of a pass that
+        takes minutes. FNV-1a over machine ints; `hash()` is process-local, which is all this needs
+        because both sides of the comparison are computed in this process, moments apart.
+        """
+        h = 0xCBF29CE484222325
+        for i, e in enumerate(self.events):
+            ds = e.detections
+            if not ds:
+                continue
+            h = ((h ^ i) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+            for d in ds:
+                h = ((h ^ hash(d.id)) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+                h = ((h ^ hash(d.level)) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+        return h
+
+    def _run_detections(self, progress: Optional[Callable[[float], None]] = None) -> bool:
+        """Built-in Sigma-like rules (minus disabled ones) + enabled custom regex rules.
+
+        Returns whether the pass actually CHANGED what is stamped on the pool, so a caller whose job is
+        to CORRECT the catalogue can stay silent when it corrected nothing — see
+        `_refresh_detections_async`. Callers that follow a deliberate change (a rule edit, a restore)
+        bump regardless and ignore this.
+        """
+        before = self._detections_fingerprint()
         RULES_STORE.load()
         # ONE compiled exclusion set for the whole pass, built here rather than per rule: it is the same
         # set for every rule and compiling a regex condition sixty times over would be the same mistake
@@ -2675,6 +2704,7 @@ class Store:
         custom = RULES_STORE.apply_all(self.events, excl)
         EXCLUSIONS.record(excl.counts())
         self.rules_fired = int(info["fired"]) + custom  # type: ignore[arg-type]
+        return self._detections_fingerprint() != before
 
     def reapply_all_rules(self) -> int:
         """Re-run the whole catalogue from scratch. Used after a bulk change (clear all / restore defaults)
@@ -2853,6 +2883,16 @@ class Store:
         window), so this is a correction, not the answer — the pool is already usable and correct for
         every non-burst rule the moment `_remove_events_of` returns. A second delete while one of these
         is running just sets the flag again rather than starting a second full pass.
+
+        It bumps ONLY when the pass actually changed a detection. It is a correction, and most of the
+        time it corrects nothing: after a restart the pool comes back from the parsed-pool cache
+        carrying the detections it was saved with, and this pass re-stamps them identically. `bump()`
+        drops the search index, the entity graph, the correlation analysis and the anomaly roll-up —
+        the first two then re-read themselves off disk, the last two rebuild from nothing. Measured on
+        a 281,805-event pool, that unconditional bump made the index cache and the graph cache each
+        load TWICE within 40 s of an idle start, from the same file, for a pass that changed not one
+        detection. At 11 M events it is a 4.1 GB re-read plus a full analysis and anomaly rebuild for
+        nothing at all. `tests/test_detection_refresh_bump.py` pins both directions.
         """
         with self.lock:
             if getattr(self, "_detect_busy", False):
@@ -2869,15 +2909,23 @@ class Store:
                 while True:
                     self._detect_pct = 0.0
                     with self._detect_lock:
-                        self._run_detections(progress=tick)
+                        changed = self._run_detections(progress=tick)
                     with self.lock:
-                        self.bump()
+                        if changed:
+                            self.bump()
                         if not self._detect_again:
                             self._detect_busy = False
                             return
                         self._detect_again = False
                         self._detect_started = time.time()
-            except Exception:  # noqa: BLE001 — a failed refresh must not take the store down
+            except Exception as exc:  # noqa: BLE001 — a failed refresh must not take the store down
+                # ...but it must not be SILENT either. A pass that raises here means the catalogue
+                # was not corrected, and nothing else in the app says so: the flag clears, the UI
+                # stops showing "refreshing", and the analyst reads burst counts that were never
+                # recomputed. Three test doubles in tests/test_source_delete.py raised TypeError on
+                # every call for long enough that two of those tests went red and a third went
+                # green for the wrong reason, and this catch-all is why none of it surfaced.
+                print(f"[iris] detection refresh failed ({type(exc).__name__}: {exc})")
                 with self.lock:
                     self._detect_busy = False
 

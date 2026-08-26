@@ -47,10 +47,14 @@ def test_delete_does_not_wait_for_a_rule_pass(client, monkeypatch):
     from app import store as store_mod
     real = store_mod.Store._run_detections
 
-    def slow_detections(self) -> None:          # class-level patch: an instance patch leaves a shadow behind
+    # The signature must track the real one (`progress=`, and it reports whether it CHANGED anything):
+    # a double that does not is called with an argument it has no parameter for, and the TypeError is
+    # swallowed by the refresh thread's catch-all — the pass silently never runs and the test is green
+    # for the wrong reason. That is exactly what had happened to all three doubles in this file.
+    def slow_detections(self, progress=None) -> bool:   # class-level patch: an instance patch leaves a shadow behind
         slow["calls"] += 1
         time.sleep(2.0)
-        real(self)
+        return real(self, progress)
 
     monkeypatch.setattr(store_mod.Store, "_run_detections", slow_detections)
 
@@ -118,9 +122,9 @@ def test_rules_fired_is_recounted_without_re_running_the_rules(client, monkeypat
     from app import store as store_mod
     real = store_mod.Store._run_detections
 
-    def counted(self) -> None:
+    def counted(self, progress=None) -> bool:
         calls["n"] += 1
-        real(self)
+        return real(self, progress)
 
     monkeypatch.setattr(store_mod.Store, "_run_detections", counted)
     client.delete(f"/api/sources/{sid}")
@@ -140,10 +144,10 @@ def test_deleting_several_sources_coalesces_the_refresh(client, monkeypatch):
     from app import store as store_mod
     real = store_mod.Store._run_detections
 
-    def counted(self) -> None:
+    def counted(self, progress=None) -> bool:
         calls["n"] += 1
         time.sleep(0.3)
-        real(self)
+        return real(self, progress)
 
     monkeypatch.setattr(store_mod.Store, "_run_detections", counted)
     for sid in sids:

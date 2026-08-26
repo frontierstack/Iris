@@ -33,7 +33,7 @@ schema, runs detections, correlates events into incident clusters and an entity 
 | Stop / logs | `./setup.sh down` · `./setup.sh logs` |
 | Uninstall | `./uninstall.sh` · `.\uninstall.ps1` — add `local`/`all`; your evidence is kept unless you pass `--purge-data` |
 
-Then open http://localhost:8000 and drop your first files onto the **Sources** screen.
+Then open http://127.0.0.1:8000 and drop your first files onto the **Sources** screen.
 
 **Starting from a bare machine is fine.** Setup does not assume Python, Node, Docker or tesseract are
 installed — anything missing is fetched through the system package manager (`apt`/`dnf`/`pacman`/`brew`,

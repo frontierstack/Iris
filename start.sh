@@ -8,7 +8,7 @@
 #   ./start.sh stop           # stop the container
 #   ./start.sh logs           # follow the container logs
 #   ./start.sh status         # is it up, what is it doing, and how big is the pool
-#   ./start.sh --no-browser   # don't open http://localhost:8000
+#   ./start.sh --no-browser   # don't open http://127.0.0.1:8000
 #
 # One container serves EVERYTHING: the FastAPI API under /api and the built React SPA at /. First-time
 # setup (GPU wheel resolution, Docker checks) lives in setup.sh — this script starts what is already set
@@ -35,7 +35,14 @@ for arg in "$@"; do
   esac
 done
 
-URL="http://localhost:${PORT}"
+# NOT `localhost`. It resolves to ::1 first, nothing is published there (compose binds the port on
+# IRIS_BIND_HOST, 127.0.0.1 by default), and the connection is not REFUSED — it hangs until it times
+# out, so every caller waits for the IPv6 attempt to lose. Measured, the same request: localhost
+# 2,084 ms vs 127.0.0.1 5 ms. Every health poll below paid it, and so did the browser we open.
+BIND_HOST="${IRIS_BIND_HOST:-127.0.0.1}"
+case "$BIND_HOST" in 0.0.0.0|::|"*"|"") BIND_HOST="127.0.0.1" ;; esac
+case "$BIND_HOST" in *:*) [ "${BIND_HOST#\[}" = "$BIND_HOST" ] && BIND_HOST="[$BIND_HOST]" ;; esac
+URL="http://${BIND_HOST}:${PORT}"
 START_TS=$(date +%s)
 STEP=0
 

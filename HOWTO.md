@@ -3,11 +3,16 @@
 ## Access
 | What | Where |
 |---|---|
-| App (UI) | http://localhost:8000 |
-| API base | http://localhost:8000/api |
-| Health check | http://localhost:8000/api/health |
-| Interactive API docs (Swagger) | http://localhost:8000/docs |
-| MCP endpoint | http://localhost:8000/api/mcp (off by default) |
+| App (UI) | http://127.0.0.1:8000 |
+| API base | http://127.0.0.1:8000/api |
+| Health check | http://127.0.0.1:8000/api/health |
+| Interactive API docs (Swagger) | http://127.0.0.1:8000/docs |
+| MCP endpoint | http://127.0.0.1:8000/api/mcp (off by default) |
+
+> Use `127.0.0.1`, not `localhost`. The port is published on the IPv4 loopback only, and a connection to
+> the IPv6 one (`::1`) is not refused — it hangs until it times out, so anything that says `localhost`
+> waits for that attempt to lose first. Measured here on the same request: **2,084 ms via `localhost`
+> against 5 ms via `127.0.0.1`**. `start.sh` / `start.ps1` open the literal for you.
 | From another machine on your LAN | **not by default** — see [Security](#security) |
 
 **Iris listens on loopback only.** The published port is `127.0.0.1:8000`, so the app is reachable from the
@@ -559,7 +564,7 @@ jobs and AI conversations; rules and settings are kept, and the panel says so).
 
 # Let Cursor / Claude Code use Iris (MCP)
 Settings → **MCP server** (collapsible, off by default) turns Iris into an MCP server at
-`http://localhost:8000/api/mcp`, offering the same tools the built-in assistant uses. Paste the config it shows
+`http://127.0.0.1:8000/api/mcp`, offering the same tools the built-in assistant uses. Paste the config it shows
 into `~/.cursor/mcp.json` (or `.cursor/mcp.json` in a project), or run the `claude mcp add` command it prints.
 Writes are a separate switch and an optional bearer token gates the endpoint — the generated token is shown in the
 clear exactly once. Full guide, including the stdio bridge for clients without HTTP transport: **`docs/MCP.md`**.
@@ -574,29 +579,29 @@ Tests: `cd backend && python -m pytest -q` · Frontend build/type-check: `cd fro
 
 # Handy API calls (curl)
 ```bash
-curl localhost:8000/api/health
-curl -F "files=@/path/to/access.log" -F "files=@/path/to/x.evtx" localhost:8000/api/sources
-curl "localhost:8000/api/events?q=user:svc_deploy&sev=critical,high&limit=50"
-curl "localhost:8000/api/graph?limit=200&minCount=3&minDegree=2"      # link strength + how connected
-curl "localhost:8000/api/graph?limit=200&q=10.0.0.1"                  # searches the WHOLE graph
-curl localhost:8000/api/anomalies
-curl localhost:8000/api/timeline
-curl localhost:8000/api/library                                        # every staged file: parser, state, events
-curl localhost:8000/api/report
-curl -o report.md "localhost:8000/api/report/export?format=md"        # md | json | stix | pdf
-curl localhost:8000/api/compute
-curl -X POST localhost:8000/api/compute/recheck
-curl "localhost:8000/api/compute/metrics?window=150"                  # live GPU/process/throughput samples (2 s)
-curl localhost:8000/api/parsers                                        # supported file types + availability (OCR etc.)
-curl -X POST localhost:8000/api/sources/<id>/mapping/suggest          # AI/heuristic field-mapping suggestion
-curl -X POST -H 'content-type: application/json' -d '{"resetSettings":false}' localhost:8000/api/admin/clear-all
+curl 127.0.0.1:8000/api/health
+curl -F "files=@/path/to/access.log" -F "files=@/path/to/x.evtx" 127.0.0.1:8000/api/sources
+curl "127.0.0.1:8000/api/events?q=user:svc_deploy&sev=critical,high&limit=50"
+curl "127.0.0.1:8000/api/graph?limit=200&minCount=3&minDegree=2"      # link strength + how connected
+curl "127.0.0.1:8000/api/graph?limit=200&q=10.0.0.1"                  # searches the WHOLE graph
+curl 127.0.0.1:8000/api/anomalies
+curl 127.0.0.1:8000/api/timeline
+curl 127.0.0.1:8000/api/library                                        # every staged file: parser, state, events
+curl 127.0.0.1:8000/api/report
+curl -o report.md "127.0.0.1:8000/api/report/export?format=md"        # md | json | stix | pdf
+curl 127.0.0.1:8000/api/compute
+curl -X POST 127.0.0.1:8000/api/compute/recheck
+curl "127.0.0.1:8000/api/compute/metrics?window=150"                  # live GPU/process/throughput samples (2 s)
+curl 127.0.0.1:8000/api/parsers                                        # supported file types + availability (OCR etc.)
+curl -X POST 127.0.0.1:8000/api/sources/<id>/mapping/suggest          # AI/heuristic field-mapping suggestion
+curl -X POST -H 'content-type: application/json' -d '{"resetSettings":false}' 127.0.0.1:8000/api/admin/clear-all
 ```
 ```bash
 # two-phase ingest: enrich one source now / decline it, and see what is outstanding
-curl -X POST localhost:8000/api/sources/<sid>/enrich
-curl -X POST localhost:8000/api/sources/<sid>/enrich/skip
-curl -s localhost:8000/api/case | python -c "import json,sys; print(json.load(sys.stdin)['enrichment'])"
-curl -X PUT -H 'content-type: application/json' -d '{"ingest":{"autoEnrich":false}}' localhost:8000/api/settings
+curl -X POST 127.0.0.1:8000/api/sources/<sid>/enrich
+curl -X POST 127.0.0.1:8000/api/sources/<sid>/enrich/skip
+curl -s 127.0.0.1:8000/api/case | python -c "import json,sys; print(json.load(sys.stdin)['enrichment'])"
+curl -X PUT -H 'content-type: application/json' -d '{"ingest":{"autoEnrich":false}}' 127.0.0.1:8000/api/settings
 ```
 Full contract: `docs/API_CONTRACT.md`.
 
@@ -609,7 +614,7 @@ Full contract: `docs/API_CONTRACT.md`.
   once: **Ctrl+Shift+R** (Windows/Linux) or **Cmd+Shift+R** (macOS). Iris now serves `index.html` with
   `Cache-Control: no-store` and its hashed assets as immutable, so this should only ever be needed once,
   for a copy your browser cached before that header existed. To check what the server is actually
-  sending: `curl -s -D- -o /dev/null http://localhost:8000/ | grep -i cache` (use `-D-`, not `-I` — the
+  sending: `curl -s -D- -o /dev/null http://127.0.0.1:8000/ | grep -i cache` (use `-D-`, not `-I` — the
   page route answers HEAD with 405).
 - **The app is slow right after starting** — it is re-parsing the library into the pool, and the entity graph is
   restored or rebuilt after that. `./start.sh status` (or the Sources page) says how many files are left. Derived
@@ -658,7 +663,7 @@ Full contract: `docs/API_CONTRACT.md`.
   Container Toolkit, `sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker`. Then
   re-run setup in `gpu` mode — the CPU image never has cupy installed.
 - **Port 8000 in use** — `.\start.ps1 -Port 8080` / `./start.sh --port=8080`, or change the left side of
-  `ports: "8000:8000"` in `docker-compose.yml`. On Windows, `localhost:8000` can also be squatted by another WSL
+  `ports: "8000:8000"` in `docker-compose.yml`. On Windows, `127.0.0.1:8000` can also be squatted by another WSL
   relay while `127.0.0.1:8000` works — try the explicit IP before assuming Iris is down.
 - **Docker not running** — the setup scripts start Docker Desktop for you; otherwise start it and re-run.
 - **Container keeps restarting / segfaults during a big load (Windows)** — run `.\wsl.ps1`, apply the settings, and
