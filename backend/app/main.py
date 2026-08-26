@@ -178,9 +178,20 @@ app.add_middleware(CORSMiddleware, allow_origins=security.cors_origins(), allow_
 # to compress precisely because those files are CONTENT-HASHED and served `immutable`: the name changes
 # when the bytes do, so a cached compressed copy can never be the wrong copy. The fonts that share the
 # directory are excluded by INCOMPRESSIBLE_SUFFIXES and Range requests by `_ranged` — see both above.
+#
+# `/api/compute` is here for ONE endpoint under it: `/api/compute/metrics` hands back the WHOLE sample
+# ring on every 2 s poll of the Settings -> Compute panel, to redraw a chart that gained one ~380-byte
+# sample. Measured on this instance: 41,580 B at the panel's default 5-minute window with the ring
+# part-full, 345,465 B (337 KiB, i.e. 10.4 MB/min) once the 30-minute ring is. It is one repeated
+# object shape full of small integers, which is the best case gzip has — 8.4x with every field
+# jittering, 13.3x on the real idle ring — so this line is worth more than the incremental `?since=`
+# protocol it replaces the need for. `/api/compute` itself (the status object, ~750 B) is under
+# minimum_size and stays uncompressed, so the prefix costs nothing on the sibling that is polled
+# alongside it. `/api/compute/recheck` is a POST and is excluded by the method guard, like every SSE
+# route here — see tests/test_metrics_payload_gzip.py.
 app.add_middleware(SelectiveGZip, paths=("/api/graph", "/api/events", "/api/timeline", "/api/anomalies",
                                          "/api/library", "/api/case", "/api/jobs", "/api/ai/runs",
-                                         "/assets"),
+                                         "/api/compute", "/assets"),
                    minimum_size=2048)
 
 # Added last, so it is the OUTERMOST layer: it must refuse a cross-site write before CORSMiddleware can

@@ -87,6 +87,7 @@ def _stem(name: str) -> str:
 
 
 _PIPELINE: Optional[str] = None
+_PIPELINE_UNUSABLE: Optional[str] = None
 # Files whose CONTENT decides what a parsed event looks like. A digest of them is part of every cache
 # key, so changing a parser, the normalizer or the Event shape invalidates the cache automatically —
 # `POOL_FORMAT` is a manual bump and the failure mode of forgetting it is serving events that no code
@@ -128,12 +129,49 @@ def pipeline_digest() -> str:
         for name in _PIPELINE_CLASSES:
             h.update(name.encode("utf-8"))
             h.update(inspect.getsource(getattr(_models, name)).encode("utf-8"))
-    except (OSError, TypeError, AttributeError):
-        # A digest nobody can reproduce means every entry misses, which is the safe direction: a
-        # cache that cannot prove what produced it must not be served.
-        return "unknown"
+    except (OSError, TypeError, AttributeError) as exc:
+        return _unusable_digest(exc)
     _PIPELINE = h.hexdigest()[:16]
     return _PIPELINE
+
+
+def _unusable_digest(exc: BaseException) -> str:
+    """The pipeline could not be hashed. Answer with something nothing on disk can ever match.
+
+    It used to answer with the CONSTANT "unknown", under a comment claiming that made every entry
+    miss. It did the opposite. The digest is one field of `signature()`, and a constant is a value
+    two DIFFERENT builds both produce: an entry written by a build that could not read its own
+    sources is a HIT for any other build that also cannot read them, because the rest of the key —
+    `POOL_FORMAT`, the staged file's size and its mtime — describes the EVIDENCE, which does not
+    change between builds. Nothing in the key is left saying what parsed it.
+
+    That is not a freak coincidence, it is the steady state of the machine it happens on. Every
+    reachable cause is install-wide and survives a restart: a bytecode-only or frozen deployment
+    where `parsers/*.py` and `normalize.py` are not on disk and `inspect.getsource` raises
+    `OSError: could not get source code`, or an install hardened until the app cannot read its own
+    package. Such a machine fails the digest on every boot, so every boot writes and reads under
+    the same constant — and an upgrade changes the parsers underneath it while the key says
+    nothing happened. The result is this module's own definition of the unsafe outcome: fields,
+    timestamps, severities and detections produced by a different version of the parsing code,
+    restored silently as this build's parse.
+
+    A per-process random token is what the old comment thought it was writing. Reads and writes
+    inside ONE process agree, so a process that cannot hash itself still caches for its own
+    lifetime; nothing another process wrote can match it, and nothing it writes can be matched
+    later. It is kept apart from `_PIPELINE` so that a digest which becomes computable again is
+    still preferred — the token degrades this run, it does not condemn the process.
+
+    And it is said out loud, once. A cache that quietly stops working is only slow, which is the
+    trade being made here on purpose — but "the library re-parses on every restart" with nothing
+    in the log is a mystery with no thread to pull, and the fix (put the sources back, or the read
+    permission) is named by the exception.
+    """
+    global _PIPELINE_UNUSABLE
+    if _PIPELINE_UNUSABLE is None:
+        _PIPELINE_UNUSABLE = "unusable-" + os.urandom(8).hex()
+        _log(f"cannot hash the parsing pipeline ({type(exc).__name__}: {exc}); nothing cached by "
+             "another run will be restored, and what this run caches will be re-parsed next time")
+    return _PIPELINE_UNUSABLE
 
 
 def signature(name: str) -> str:

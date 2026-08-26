@@ -391,6 +391,12 @@ against the **network**, not against a web page: a browser on this machine reach
      private-IP blocklist is deliberately NOT applied — analysts run real gateways on `10.x`, and a
      control that refuses the working setup gets switched off.
 - `GET  /api/compute` → ComputeStatus;  `POST /api/compute/recheck` → ComputeStatus (forces a re-probe)
+- `GET  /api/compute/metrics?window=N` → `{ intervalSec:number; samples:MetricSample[]; current:MetricSample|null }`
+  — the live 2 s sampler ring (GPU util/mem/temp/power, process CPU/RSS, parse throughput), newest last,
+  `window` capped at the 900-sample / 30-minute ring. It returns the WHOLE window on every poll, so the
+  response is gzip-encoded when the client accepts it: measured 310,319 → 33,751 B at `window=900`.
+  There is deliberately no incremental `?since=` cursor — compression takes the poll to ~6 KB at the
+  panel's default `window=150`, and a cursor that silently skipped a sample would be a hole in a chart.
 - **MCP server** — Iris as a tool PROVIDER for outside agents. The tool surface is `app/ai/tools.REGISTRY`
   itself (never a second declaration), so an external client and the built-in investigator see one case.
   - `POST /api/mcp` — Streamable-HTTP MCP endpoint, JSON-RPC 2.0. Methods: `initialize`, `ping`,

@@ -34,21 +34,53 @@ def _key(scope: str) -> str:
     # The graph, the RULE catalogue and the EXCLUSION list all decide what the findings are, so all
     # three are in the key. Adding an exclusion for a public resolver has to remove its finding on the
     # very next read, and relying on a call site to invalidate is how that silently stops happening.
+    #
+    # Every component is MONOTONIC — `Store.version`, `case_set_rev`, `RULES_STORE.rev` and
+    # `EXCLUSIONS.rev` are only ever incremented — so a key never returns to a value it has already
+    # had. That is what makes `_evaluate`'s "is the key I started with still the current one?" test a
+    # proof that NOTHING moved in between, rather than a check that could be fooled by a value that
+    # changed and changed back.
     from .exclusions import EXCLUSIONS
     from .rules import RULES_STORE
     from .store import STORE
+    # Both stores are loaded, not merely read: each bumps its `rev` on its FIRST load, and `evaluate()`
+    # loads the rule catalogue itself (graph_rules._overrides). Reading `rev` off an unloaded store
+    # would therefore hand back a key that the evaluation is about to invalidate — the key would move
+    # underneath every first call in a process, for no reason but the order the stores woke up in.
+    # `EXCLUSIONS.load()` was already here for exactly this reason; `RULES_STORE` was not.
     EXCLUSIONS.load()
+    RULES_STORE.load()
     return f"{scope}:{STORE._derived_key(scope)}:{RULES_STORE.rev}:{EXCLUSIONS.rev}"
 
 
-def _evaluate(scope: str, builder: Any) -> list[GraphFinding]:
+def _evaluate(scope: str, key: str, builder: Any) -> tuple[list[GraphFinding], int]:
+    """Run the rules over `builder`, and PUBLISH ONLY IF `key` is still the current one.
+
+    The key is captured by the caller BEFORE the builder is fetched and re-read here after the work.
+    Stamping the memo with a key recomputed afterwards publishes THIS graph's findings under the NEXT
+    one's key: `evaluate()` takes ~40 ms on an 18k-node graph and nothing is locked across it, so an
+    ingest, a rule edit or an exclusion landing in that window would be answered — with
+    `state: 'ready'`, and for as long as the new key stands — out of the run that predates it.
+
+    That is the worst of the three answers this module can give. Its whole contract is that `None`
+    means "we have not looked" and `[]` means "the rules ran and nothing matched"; a confidently wrong
+    list says neither. It matters most for exactly the case the module docstring promises: adding an
+    exclusion for a public resolver has to drop its finding on the very next read, and an exclusion
+    write bumps `EXCLUSIONS.rev` (and re-runs the catalogue, so `STORE.version` too) — precisely the
+    mutation this window swallows.
+
+    A skipped publish costs one re-evaluation on the next read, which is the cheap half of this module.
+    The rows are still returned to the caller that paid for them: they are what the graph said when the
+    request started, which is what this request could ever have answered.
+    """
     global _KEY, _VALUE, _MS
     t0 = time.perf_counter()
     rows = evaluate(builder)
     ms = int((time.perf_counter() - t0) * 1000)
-    with _LOCK:
-        _KEY, _VALUE, _MS = _key(scope), rows, ms
-    return rows
+    if _key(scope) == key:              # nothing moved under us — this result is the current one
+        with _LOCK:
+            _KEY, _VALUE, _MS = key, rows, ms
+    return rows, ms
 
 
 def ready(scope: str = "all") -> tuple[Optional[list[GraphFinding]], dict[str, Any]]:
@@ -68,9 +100,10 @@ def ready(scope: str = "all") -> tuple[Optional[list[GraphFinding]], dict[str, A
     if builder is None:
         from .graph import GRAPH_CACHE
         return None, GRAPH_CACHE.status(scope, STORE._derived_key(scope))
-    rows = _evaluate(scope, builder)
-    with _LOCK:
-        return list(rows), {"state": "ready", "buildMs": _MS}
+    rows, ms = _evaluate(scope, key, builder)
+    # `ms` is THIS evaluation's, not `_MS` re-read: the publish above may have been declined, and
+    # another scope's or another thread's build time is not an answer to this request.
+    return list(rows), {"state": "ready", "buildMs": ms}
 
 
 def get(scope: str = "all") -> list[GraphFinding]:
@@ -81,7 +114,11 @@ def get(scope: str = "all") -> list[GraphFinding]:
     with _LOCK:
         if key == _KEY:
             return list(_VALUE)
-    return _evaluate(scope, STORE.graph_v2(scope))
+    # Same discipline as `ready`: the key was captured BEFORE the build, and `_evaluate` publishes only
+    # if it is still current afterwards. `graph_v2` BLOCKS on the build, so on a busy pool that check
+    # will often decline — which is the right answer, not a missed optimisation: a pool that moved
+    # during the build is a pool whose findings are already history.
+    return _evaluate(scope, key, STORE.graph_v2(scope))[0]
 
 
 def peek_counts() -> dict[str, Optional[int]]:

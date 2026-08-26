@@ -96,9 +96,42 @@ for _vname, _names in _VOCABS.items():
 
 # ------------------------------------------------------------------ text regexes (fallback when fields are missing)
 HASH_RE = re.compile(r"\b([a-fA-F0-9]{64}|[a-fA-F0-9]{40}|[a-fA-F0-9]{32})\b")
-DOMAIN_RE = re.compile(r"\b((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|co|uk|de|ru|cn|info|biz|xyz|top|"
-                       r"onion|edu|gov|mil|dev|app|cloud|ai|me|tv|us|ca|fr|jp|kr|nl|se|no|au|br|in|it|es|pl|ch|at|be|"
-                       r"cz|dk|fi|gr|hu|ie|il|mx|nz|pt|ro|sg|tr|ua|za|local|internal|corp|lan))\b", re.I)
+# ONE list of TLDs, and both the pattern and its gate are DERIVED FROM IT so they cannot drift apart.
+# `DOMAIN_RE` is the most expensive regex in `extract()` — measured 15.2 us/event over a 30k-line
+# nginx + sshd + DNS-JSON corpus, 13 % of the whole extraction pass, ahead of IPV4_RE (7.7) — and it was
+# gated on `has_dot`, which every log line satisfies: a timestamp, an IP address or a version number is
+# a dot. `_TLD_GATE` is a NECESSARY condition of a DOMAIN_RE match — every match ends "." + one of these
+# TLDs + a word boundary — so a line it rejects cannot contain a domain. Same idiom as `_USER_TEXT_GATE`
+# and the `"hk" in ltext` test; measured 0.9 us/line against DOMAIN_RE's 19.5, and ~20 % off the whole
+# DOMAIN_RE bill on that corpus (3.1 us/event).
+#
+# THE GATE MUST STAY NECESSARY, NEVER MERELY LIKELY: `graph_store.signature()` does not hash this file,
+# so a gate that skipped a line holding a real domain would leave a silently wrong graph in the
+# persisted cache with nothing to rebuild it. Two things make it necessary and BOTH are load-bearing:
+#
+#   * it is matched against `head_lower` — the same 2000 characters `DOMAIN_RE` is given, lower-cased —
+#     so it needs no `re.I` (3.5x cheaper again). Not `ltext`: `DOMAIN_RE`'s trailing `\b` is satisfied
+#     by the END of `head2k`, and in the longer string the next character can be a word character, so
+#     the gate would miss a domain sitting exactly on the 2000-byte cut.
+#   * `str.lower()` and `re.I` do NOT agree on three characters in the whole of Unicode — U+0130 and
+#     U+0131 (Turkish dotted/dotless I) fold onto 'i' under `re.I`, and U+017F (long s) onto 's', while
+#     `.lower()` leaves them alone. `Y.fı` is therefore a DOMAIN_RE match that a lower-cased
+#     alternation cannot see (the fuzz in tests/test_domain_gate.py found exactly that). A line with
+#     any non-ASCII byte in it is never gated at all; `str.isascii()` reads a flag on the string object,
+#     so that guard is free.
+_DOMAIN_TLDS = (r"com|net|org|io|co|uk|de|ru|cn|info|biz|xyz|top|"
+                r"onion|edu|gov|mil|dev|app|cloud|ai|me|tv|us|ca|fr|jp|kr|nl|se|no|au|br|in|it|es|pl|ch|at|be|"
+                r"cz|dk|fi|gr|hu|ie|il|mx|nz|pt|ro|sg|tr|ua|za|local|internal|corp|lan")
+DOMAIN_RE = re.compile(r"\b((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:" + _DOMAIN_TLDS + r"))\b", re.I)
+_TLD_GATE = re.compile(r"\.(?:" + _DOMAIN_TLDS + r")\b")   # case-sensitive on purpose: see above
+
+
+def _may_hold_domain(head_lower: str) -> bool:
+    """A NECESSARY condition of `DOMAIN_RE.findall(head2k)` returning anything, given the LOWER-CASED
+    copy of that same slice. See `_TLD_GATE` above for why both halves are required."""
+    return not head_lower.isascii() or _TLD_GATE.search(head_lower) is not None
+
+
 URL_RE = re.compile(r"\b(https?://[^\s\"'<>()\]]{4,300})", re.I)
 EMAIL_RE = re.compile(r"\b([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\b")
 WIN_PATH_RE = re.compile(r"(?<![\w\\])([A-Za-z]:\\(?:[^\\/:*?\"<>|\r\n]+\\)*[^\\/:*?\"<>|\r\n]+)")
@@ -468,7 +501,10 @@ def extract(e: Event) -> _Ex:
     reg_n = [x for x in reg_n if x]
 
     # -- domains / urls / emails ---------------------------------------------------------
-    raw_domains = _all(b, "domain") + (DOMAIN_RE.findall(head2k) if has_dot else [])
+    # `has_dot` is true of essentially every log line, so it gated nothing. `_may_hold_domain` is a
+    # NECESSARY condition of a DOMAIN_RE match and ~20x cheaper — see `_TLD_GATE` for the measurements
+    # and for the two ways this could be got subtly, silently wrong.
+    raw_domains = _all(b, "domain") + (DOMAIN_RE.findall(head2k) if _may_hold_domain(ltext[:2000]) else [])
     urls = _all(b, "url_only") + (URL_RE.findall(head2k) if "http" in ltext else [])
     # a URL contributes its HOST as a domain node (and the URL as a fact) - 12k distinct URLs as nodes is a hairball
     raw_domains += [url_host(u) for u in urls]

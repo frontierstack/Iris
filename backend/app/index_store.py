@@ -59,6 +59,20 @@ def _path() -> Path:
     return _dir() / "search-index.iris"
 
 
+_CODE_UNUSABLE: "Optional[str]" = None
+
+
+def _unusable_code_digest(exc: BaseException) -> str:
+    """A digest nothing on disk can ever match, memoised so one process agrees with itself."""
+    global _CODE_UNUSABLE
+    if _CODE_UNUSABLE is None:
+        _CODE_UNUSABLE = "unusable-" + os.urandom(8).hex()
+        _log(f"cannot hash the packing code ({type(exc).__name__}: {exc}); "
+             f"the index cache is disabled for this process rather than risk serving "
+             f"a buffer packed by different code")
+    return _CODE_UNUSABLE
+
+
 def _code_digest() -> str:
     """The code that decides what the packed buffer CONTAINS — not the code that searches it.
 
@@ -76,8 +90,17 @@ def _code_digest() -> str:
         for fn in (search._doc, search.build_index):
             h.update(inspect.getsource(fn).encode("utf-8"))
         h.update(str(search._SEP + search._FSEP + search._END).encode("utf-8"))
-    except (OSError, TypeError, AttributeError):
-        return "unknown"
+    except (OSError, TypeError, AttributeError) as exc:
+        # The SAME bug `pool_store._unusable_digest` documents, one level up, and worse here: this
+        # digest is what says WHICH `_doc()` packed the buffer, and the artefact is the 4.1 GB
+        # search index. A CONSTANT is a value two different builds both produce, so an index packed
+        # by a build that could not read its own sources is a HIT for any other build that also
+        # cannot (a .pyc-only or frozen deploy fails `inspect.getsource` on every boot, so it writes
+        # and reads under the same constant forever). The answer would then be a query resolved
+        # against text packed by a different `_doc` — wrong rows, no error, a green `vector` badge.
+        # A per-process token degrades this run instead: nothing on disk can match it, so the index
+        # is rebuilt and re-saved rather than served wrongly.
+        return _unusable_code_digest(exc)
     h.update(pool_store.pipeline_digest().encode("utf-8"))
     return h.hexdigest()[:16]
 
