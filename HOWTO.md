@@ -577,7 +577,7 @@ cd backend  && pip install -r requirements.txt && uvicorn app.main:app --reload 
 cd frontend && npm install --ignore-scripts && npm run dev   # UI at http://localhost:5173 (proxies /api → :8000)
 # optional GPU: pip install -r backend/requirements-gpu.txt   (needs a CUDA 12.x driver)
 ```
-Tests: `cd backend && python -m pytest -q` · Frontend build/type-check: `cd frontend && npm run build`
+Frontend build/type-check: `cd frontend && npm run build`
 
 # Handy API calls (curl)
 ```bash

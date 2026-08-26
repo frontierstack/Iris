@@ -131,3 +131,7 @@ wsl-crashes/
 
 # scratch scripts from an interactive session — never part of the app
 _*.py
+
+# The pytest suite and its fixtures stay on disk and out of the repo, on request. They are still
+# run (cd backend && python -m pytest -q) - this only stops them being published.
+backend/tests/
