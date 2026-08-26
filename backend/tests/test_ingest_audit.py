@@ -55,6 +55,15 @@ def auto_enrich():
     config.update_settings({"ingest": {"autoEnrich": before}})
 
 
+@pytest.fixture()
+def raw_only():
+    """The suite turns phase 2 on for everyone (see conftest); a test about the RAW state turns it off."""
+    before = config.get_settings().ingest.autoEnrich
+    config.update_settings({"ingest": {"autoEnrich": False}})
+    yield
+    config.update_settings({"ingest": {"autoEnrich": before}})
+
+
 def _zip(*members: tuple[str, bytes]) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
@@ -233,3 +242,38 @@ def test_an_unreadable_container_reports_could_not_be_read(monkeypatch) -> None:
         assert out.errors and "could not be read" in out.errors[0] and "unreadable.log.gz" in out.errors[0]
     finally:
         p.unlink(missing_ok=True)
+
+
+# ------------------------------------------------- #12 phase 2 re-pointing cited ids at other lines
+def test_phase_two_keeps_every_cited_id_on_its_own_line(c, raw_only) -> None:
+    """Phase 2 reuses the phase-1 ids. It must give each one back to the SAME line.
+
+    `enrich_source` collected them as `[e.id for e in self.events if e.sourceId == sid]` — the pool,
+    which is sorted by TIMESTAMP — and zipped that against the parser's output, which is in RECORD
+    order. For any file whose lines are not chronological (a merged or multi-host syslog, anything
+    with clock skew, a stack trace whose continuation lines carry no time at all) the two orders
+    differ and every id lands on a different line. Reproduced on the three lines below: e1 e2 e3 came
+    back pointing at each other's lines, with nothing anywhere reporting it.
+
+    That is the failure this project already calls its worst: a citation that resolves cleanly to the
+    WRONG evidence. Case-set entries survive it (they carry a file+rawHash anchor and are re-anchored),
+    but an id quoted in a note, an indicator, an exported report or an AI answer does not.
+    """
+    log = (b"2026-05-01T10:00:03Z host1 sshd[1]: THIRD line, latest time\n"
+           b"2026-05-01T10:00:01Z host1 sshd[2]: FIRST line, earliest time\n"
+           b"2026-05-01T10:00:02Z host1 sshd[3]: SECOND line, middle time\n")
+    rows = _stage(c, "out-of-order.log", log)
+    sid = rows[0]["id"]
+    # The whole point is the raw -> enriched transition. If staging already enriched it this test
+    # proves nothing, which is exactly how the doubles in test_source_delete stayed green for years.
+    assert STORE.sources[sid].enrich == "raw", STORE.sources[sid].enrich
+    before = {e.id: e.raw for e in STORE.events if e.sourceId == sid}
+    assert len(before) == 3, before
+
+    STORE.enrich_source(sid)
+    assert STORE.sources[sid].enrich == "enriched", STORE.sources[sid].enrich
+
+    after = {e.id: e.raw for e in STORE.events if e.sourceId == sid}
+    assert set(after) == set(before), "phase 2 changed which ids exist, not just what they point at"
+    moved = {i: (before[i], after[i]) for i in before if before[i] != after[i]}
+    assert not moved, f"phase 2 moved {len(moved)} cited id(s) onto a different log line: {moved}"

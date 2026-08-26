@@ -1984,6 +1984,37 @@ class Store:
                 src.state, src.error = "ERROR", msg  # type: ignore[assignment]
         self.bump()
 
+    def _raw_ids_in_record_order(self, sid: str) -> list[str]:
+        """This source's phase-1 event ids, in the order its RECORDS were read.
+
+        Phase 2 reuses these ids so that anything already citing one keeps pointing at the same line.
+        Taking them straight off `self.events` does the opposite: the pool is sorted by TIMESTAMP and
+        the parser returns records in FILE order, so for any log whose lines are not chronological —
+        a merged or multi-host syslog, anything with clock skew, a stack trace whose continuation
+        lines carry no timestamp at all and therefore sort last — zipping the two together moved every
+        cited id onto a different line. Reproduced on three ordinary syslog lines: e1 e2 e3 came back
+        pointing at each other's evidence, silently, with the source reading `enriched` and nothing
+        anywhere reporting it. That is the failure this project already calls its worst — a citation
+        that resolves cleanly to the WRONG line is worse than one that resolves to nothing.
+
+        `enrich._raw_events` assigns ids strictly in record order (it increments once per record it
+        appends), so the id's own hex suffix IS the record index: sorting on it restores the order the
+        parser will use. An id that does not parse keeps a deterministic place rather than a random
+        one — if any of them are malformed the pairing is unsafe anyway, and `one_to_one` is the guard
+        that matters there.
+        """
+        prefix = self.source_prefix.get(sid, "") or "e"
+
+        def seq(eid: str) -> tuple[int, str]:
+            if eid.startswith(prefix):
+                try:
+                    return (int(eid[len(prefix):], 16), eid)
+                except ValueError:
+                    pass
+            return (-1, eid)
+
+        return sorted((e.id for e in self.events if e.sourceId == sid), key=seq)
+
     def enrich_source(self, sid: str, batches: Optional[list] = None) -> "enrich.EnrichResult":
         """Phase 2: parse and normalize a source that is currently in the pool as raw lines.
 
@@ -2022,7 +2053,9 @@ class Store:
                     src.state, src.error = "ERROR", msg  # type: ignore[assignment]
                 return enrich.EnrichResult(sid=sid, ok=False, error=msg)
 
-        old_ids = [e.id for e in self.events if e.sourceId == sid]
+        # RECORD order, NOT pool order - see _raw_ids_in_record_order. `self.events` is sorted by
+        # TIMESTAMP, and these ids are about to be handed back to the parser's output one for one.
+        old_ids = self._raw_ids_in_record_order(sid)
         try:
             # `batches` already parsed in a worker process (EnrichQueue._parse_small_parallel) skips
             # straight to the commit — the parent never read the file.
