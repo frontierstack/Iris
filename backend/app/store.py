@@ -369,6 +369,11 @@ class Store:
         # open batch of finished phase-2 parses waiting for one shared merge (enrich_batch)
         self._enrich_batch: Optional[list[dict]] = None
         self._pending_lock = threading.Lock()
+        # Set by `_merge_into_pool` when a merge left the already-indexed positions untouched, and
+        # consumed ONCE by `bump()`. None means "invalidate the search index", which is what every
+        # other mutation gets by default — see search.note_append for why that default is the safe
+        # one and this hint is the exception.
+        self._append_hint: Optional[int] = None
         # background pool load progress — surfaced as Case.poolLoading / poolPending / poolLoaded so the
         # analysis screens can say "still loading" instead of showing zero hits and looking like data loss
         self.pool_loading = False
@@ -539,6 +544,10 @@ class Store:
             self.source_library = {k: v for k, v in self.source_library.items() if k in keep}
             self.source_prefix = {k: v for k, v in self.source_prefix.items() if k in keep}
             self.source_order = [s for s in self.source_order if s in keep]
+            # Not an append: these positions are not the ones the search index describes. Clearing
+            # the hint routes `bump` to invalidate(), which is the default for everything but a
+            # rolling merge - see search.note_append.
+            self._append_hint = None
             self.events = [e for e in self.events if e.sourceId in keep] if keep else []
             self.event_index = {}
             self.ts = np.zeros(0, dtype=np.float64)
@@ -676,7 +685,14 @@ class Store:
             return
         try:
             from . import search as _search  # local import to avoid a cycle
-            _search.invalidate()
+            # A merge that only APPENDED leaves the indexed positions untouched, so the packed
+            # buffer still describes them and a query can walk the short tail itself. Everything
+            # else - a reorder, a delete, a phase-2 swap, a re-stamped detection - leaves the hint
+            # unset and lands on invalidate(), exactly as before.
+            hint, self._append_hint = self._append_hint, None
+            if hint is None or not _search.note_append(self.version - 1, self.version,
+                                                       hint, len(self.events)):
+                _search.invalidate()
             self.warm_search_async()
         except Exception:
             pass
@@ -2488,6 +2504,10 @@ class Store:
                         enrich.MERGE.finish()
                         return lost
                     continue          # rebuild off the lock without the dead source's events
+                # Not an append: these positions are not the ones the search index describes. Clearing
+                # the hint routes `bump` to invalidate(), which is the default for everything but a
+                # rolling merge - see search.note_append.
+                self._append_hint = None
                 self.events = merged
                 self.event_index = index
                 self.ts = ts
@@ -2801,8 +2821,13 @@ class Store:
             if sid:
                 self._tail(sid, "merging", 80)
             ts = _epochs(merged) if merged else np.zeros(0, dtype=np.float64)
+            pure = _is_tail_append(base, events)
             with self.lock:
                 if self.events is base:
+                    # Stamped in the same critical section as the swap, so it always describes the
+                    # list that is now live. `bump()` consumes it; anything else that reaches
+                    # `bump` finds None and invalidates the index as before.
+                    self._append_hint = len(base) if pure else None
                     self.events = merged
                     self.event_index = index
                     self.ts = ts
@@ -2810,6 +2835,10 @@ class Store:
 
     def _reindex(self) -> None:
         if any(self.events[i].ts > self.events[i + 1].ts for i in range(len(self.events) - 1)):
+            # Not an append: these positions are not the ones the search index describes. Clearing
+            # the hint routes `bump` to invalidate(), which is the default for everything but a
+            # rolling merge - see search.note_append.
+            self._append_hint = None
             self.events = _sort_events(self.events)
         self.event_index = {e.id: i for i, e in enumerate(self.events)}
         self.ts = _epochs(self.events) if self.events else np.zeros(0, dtype=np.float64)
@@ -2885,6 +2914,11 @@ class Store:
         `_refresh_detections_async`. Callers that follow a deliberate change (a rule edit, a restore)
         bump regardless and ignore this.
         """
+        # A pass over the pool re-stamps `Event.detections`, and `search._doc` packs each event's
+        # detection ids and names - so the index no longer describes the events it covers. Clearing
+        # the hint here (before anything is touched, and whatever thread this is on) means a merge
+        # that raced this pass cannot leave `bump` thinking the prefix is still intact.
+        self._append_hint = None
         before = self._detections_fingerprint()
         RULES_STORE.load()
         # ONE compiled exclusion set for the whole pass, built here rather than per rule: it is the same
@@ -3042,6 +3076,10 @@ class Store:
             with self.lock:
                 if self.events is not base:
                     continue                      # lost the race — redo on the new list
+                # Not an append: these positions are not the ones the search index describes. Clearing
+                # the hint routes `bump` to invalidate(), which is the default for everything but a
+                # rolling merge - see search.note_append.
+                self._append_hint = None
                 self.events = kept
                 self.event_index = index
                 self.ts = ts
@@ -3827,6 +3865,27 @@ def _sort_events(events: list) -> list:
     stamped.sort(key=_TS_GETTER)
     stamped.extend(blank)
     return stamped
+
+
+def _is_tail_append(base: list, new: list) -> bool:
+    """Would `_sort_events(base + new)` leave every event of `base` exactly where it is?
+
+    `base` is already in pool order: stamped events by `ts` string, unstamped ones last. A stable
+    sort therefore keeps the whole of `base` in place whenever nothing in `new` sorts before its
+    last element - so this is the same question as "is every new event at or after the end", and it
+    costs one pass over `new` rather than a comparison against the whole pool.
+
+    Two cases, and the second is the one that is easy to get wrong: if `base` ends with an UNSTAMPED
+    event then `base` has unstamped events at its tail, and any stamped newcomer sorts in FRONT of
+    them - only more unstamped events can be appended. `new` may itself be reordered (its stamped
+    events sort before its own blanks); that is fine, this is a claim about `base`.
+    """
+    if not base:
+        return True
+    last = base[-1].ts
+    if not last:
+        return not any(e.ts for e in new)
+    return all(e.ts >= last for e in new if e.ts)
 
 
 _TS_GETTER = operator.attrgetter("ts")

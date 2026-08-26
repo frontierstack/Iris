@@ -68,6 +68,16 @@ _FIND_MIN_CAP = 200_000
 # total. Enough that the hit count is useful ("10,000+") and small enough that a cold query answers in
 # about a second rather than three minutes.
 _SCAN_COUNT_AHEAD = 10_000
+# How many events the index may be SHORT by before it is thrown away instead of kept. Every merge
+# bumps the store version, so a single small file landing mid-ingest used to invalidate the whole
+# packed buffer and drop every query onto the scan path - measured on a 400,000-event pool, three
+# queries went 113 ms to 853 ms the instant a 5,000-event file landed, and the count degraded to a
+# `_SCAN_COUNT_AHEAD` floor at the same moment. A merge whose new events all sort at or after the
+# last event already in the pool leaves the indexed positions exactly where they were, so the index
+# is not WRONG, only short: `note_append` records that and a search walks the uncovered tail with
+# the same exact predicate that confirms index candidates anyway. This is the cap on that walk,
+# which is Python per event (~2 us): past it, invalidating and rebuilding is the better trade.
+_TAIL_MAX = 50_000
 # Share of FREE device memory the index plus its working room may claim. Not 1.0: the driver, the
 # graph's device arrays and cupy's own pools live there too, and an OOM mid-query is answered by
 # falling back to a path that takes 40x longer.
@@ -633,11 +643,20 @@ def index_status() -> dict[str, Any]:
             "gpuNow": compute.xp() is not np}
 
 
-def index_ready(events: list[Event], ts: np.ndarray, version: int) -> Optional[SearchIndex]:
-    """The CURRENT index, or None. Never builds — building is the request path's job to avoid, not to do."""
+def index_ready(events: list[Event], ts: np.ndarray, version: int,
+                exact_n: bool = False) -> Optional[SearchIndex]:
+    """The CURRENT index, or None. Never builds — building is the request path's job to avoid, not to do.
+
+    `idx.n < len(events)` is a legitimate state, not staleness: the pool grew by a pure tail append
+    and `note_append` kept the index for the prefix it still describes (see `_TAIL_MAX`). Callers
+    that are deciding whether to BUILD pass `exact_n=True` — a short index is exactly what the
+    background warm exists to absorb, so treating it as a hit would freeze the tail forever.
+    """
     with _lock:
         idx = _index
-    if idx is None or idx.version != version or idx.n != len(events):
+    if idx is None or idx.version != version:
+        return None
+    if idx.n > len(events) or (exact_n and idx.n != len(events)):
         return None
     # the compute backend flipped since the build (GPU came or went): let a background warm redo it
     if (compute.xp() is not np) != idx.gpu_backend:
@@ -654,7 +673,7 @@ def get_index(events: list[Event], ts: np.ndarray, version: int, sig: str = "") 
     """
     global _index
     with _build_lock:
-        hit = index_ready(events, ts, version)
+        hit = index_ready(events, ts, version, exact_n=True)
         if hit is not None:
             return hit
         sig = _signature(sig)
@@ -664,6 +683,30 @@ def get_index(events: list[Event], ts: np.ndarray, version: int, sig: str = "") 
         with _lock:
             _index = idx
         return idx
+
+
+def note_append(prev_version: int, version: int, n_before: int, n_after: int) -> bool:
+    """The pool grew by a PURE TAIL APPEND: keep the index instead of throwing it away.
+
+    Returns False when the index cannot honestly be kept — it was built against a different version,
+    it already describes more events than the pool had before the merge (a reorder or a removal, not
+    an append), or the uncovered tail would grow past `_TAIL_MAX`. The caller invalidates on False,
+    which is the behaviour this whole path replaces, so refusing is always safe.
+
+    Only `Store.bump` calls this, and only immediately after a merge that left the indexed positions
+    untouched. Anything that can change what `_doc` would pack for an event ALREADY in the index —
+    a re-stamped detection, a phase-2 swap, a delete — clears the store's hint, so those bumps reach
+    `invalidate()` as before. That is the load-bearing half: a short index is safe, a WRONG one is a
+    silent evidence bug.
+    """
+    with _lock:
+        idx = _index
+        if idx is None or idx.version != prev_version:
+            return False
+        if idx.n > n_before or n_after - idx.n > _TAIL_MAX:
+            return False
+        idx.version = version
+        return True
 
 
 def invalidate() -> None:
@@ -700,9 +743,15 @@ def search(events: list[Event], ts: np.ndarray, version: int, q: str, lo: int, h
     # NEVER build the index here. On a 2.5 M-event pool the build takes minutes and it used to happen on
     # whichever request arrived first, under the index lock — the query simply never came back. If the
     # index is not ready this request scans (slower, but it answers) and a background warm is kicked off.
-    idx = index_ready(events, ts, version) if n >= _MIN_VECTOR else None
+    # `exact_n` for a SUBSET call: a short index describes POOL positions, and a scope=case list is
+    # a different list that merely happens to be shorter. Requiring the exact count there keeps the
+    # subset path byte-for-byte what it was before the short index existed.
+    idx = index_ready(events, ts, version, exact_n=not whole_pool) if n >= _MIN_VECTOR else None
     if n >= _MIN_VECTOR and idx is None and whole_pool:
         warm_async(lambda: (events, ts, version), delay=0.0)
+    # Positions the index covers. A rolling append KEPT it (see note_append), so it describes
+    # [0, m) exactly and the pool is longer; without one, m == n and nothing below does anything.
+    m = idx.n if idx is not None else n
     if idx is not None:
         eng = _Engine(idx)
         ap = eng.ap
@@ -712,9 +761,9 @@ def search(events: list[Event], ts: np.ndarray, version: int, q: str, lo: int, h
                 mask &= eng.sev_mask(sev_set)
             if src_set:
                 mask &= eng.source_mask_exact(src_set)
-            if lo > 0 or hi < n:
-                rng = ap.zeros(n, dtype=bool)
-                rng[lo:hi] = True
+            if lo > 0 or hi < m:
+                rng = ap.zeros(m, dtype=bool)
+                rng[lo:min(hi, m)] = True
                 mask &= rng
             cand = ap.flatnonzero(mask)
             cand_idx = compute.asnumpy(cand) if idx.on_gpu else np.asarray(cand)
@@ -724,6 +773,24 @@ def search(events: list[Event], ts: np.ndarray, version: int, q: str, lo: int, h
             cand_idx, exact = None, False
     else:
         exact = False
+
+    # The uncovered tail, resolved by the SAME exact predicate that confirms index candidates - so
+    # these positions arrive already confirmed and the `exact` fast path below stays exact. They are
+    # all >= m, i.e. after every index candidate, so appending them keeps `cand_idx` ascending and
+    # paging and newest-first need no special case. It is a Python walk per event, which is what
+    # `_TAIL_MAX` bounds.
+    if cand_idx is not None and hi > m:
+        tail: list[int] = []
+        for i in range(max(lo, m), hi):
+            e = events[i]
+            if src_set and e.source not in src_set and e.sourceId not in src_set and e.file not in src_set:
+                continue
+            if sev_set and e.sev not in sev_set:
+                continue
+            if pred(e):
+                tail.append(i)
+        if tail:
+            cand_idx = np.concatenate([cand_idx, np.asarray(tail, dtype=cand_idx.dtype)])
 
     rows: list[Event] = []
     total = 0
