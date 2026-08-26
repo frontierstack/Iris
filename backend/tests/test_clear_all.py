@@ -109,8 +109,12 @@ def test_clear_all_leaves_nothing_on_disk(c) -> None:
     assert not [p for p in left if p.startswith("library/")], left
     assert not [p for p in left if p.startswith(".trash/")], left
     assert "jobs.json" not in left, left
-    # a transcript can quote a log line verbatim, so history.json is evidence and may not survive
-    assert not [p for p in left if p.startswith("ai/")], left
+    # A transcript can quote a log line verbatim, so ai/history.json is evidence and may not survive.
+    # ai/system_prompts.json is the analyst's own standing instructions for the assistant:
+    # CONFIGURATION, kept exactly like rules.json and exclusions.json (app/ai/system_prompts.py).
+    # An allowlist, not `startswith("ai/")` - the blanket form quietly meant "that feature may not
+    # exist", and it is the sort of assertion a new config file trips a release later.
+    assert not [p for p in left if p.startswith("ai/") and p != "ai/system_prompts.json"], left
     assert not any("45.66.13.201" in p for p in left), left
     assert not config.LIBRARY_DIR.exists() and not config.TRASH_DIR.exists()
     assert cases.case_ids() == []

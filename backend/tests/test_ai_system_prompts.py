@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from app import config
 from app.ai import investigator, runs
 from app.ai.prompts import INVESTIGATOR_SYSTEM
+from app.ai.history import HISTORY
 from app.ai.system_prompts import PROMPTS, compose
 from app.main import app
 from app.store import STORE
@@ -38,15 +39,20 @@ async def _run(fake, **kw):
 
 @pytest.fixture(autouse=True)
 def _clean():
-    for row in PROMPTS.list():
-        PROMPTS.delete(row["id"])
-    config.update_settings({"ai": {"systemPromptId": ""}})
-    PROMPTS.reset_builtin()
+    # These tests drive real runs through `investigator.investigate`, so they write to the SHARED
+    # conversation store. Left behind, those runs leak into every later test file - and one of them
+    # (`test_clear_all._seeded`) asserts an exact run count, so the whole of test_clear_all failed
+    # when it happened to run after this file. A test that starts runs has to clear them.
+    def reset() -> None:
+        HISTORY.clear_all()
+        PROMPTS.reset_builtin()
+        for row in PROMPTS.list():
+            PROMPTS.delete(row["id"])
+        config.update_settings({"ai": {"systemPromptId": ""}})
+
+    reset()
     yield
-    PROMPTS.reset_builtin()
-    for row in PROMPTS.list():
-        PROMPTS.delete(row["id"])
-    config.update_settings({"ai": {"systemPromptId": ""}})
+    reset()
 
 
 def test_crud_over_the_api(client):

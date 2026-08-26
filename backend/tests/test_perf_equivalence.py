@@ -198,10 +198,15 @@ def test_the_batch_commit_does_not_run_the_whole_catalogue_on_the_worker(monkeyp
     full_calls = {"n": 0}
     real = st._run_detections
 
-    def slow_full():
+    # The signature must track the real one (`progress=`, and it reports whether it CHANGED
+    # anything). A double that does not is called with an argument it has no parameter for, and the
+    # TypeError is swallowed by the refresh thread's catch-all: the pass silently never runs, and the
+    # test that asserts it DID run fails without saying why. Four doubles in this suite had rotted
+    # that way; the catch-all prints now, which is how this one surfaced.
+    def slow_full(progress=None):
         full_calls["n"] += 1
         time.sleep(1.5)
-        real()
+        return real(progress)
 
     monkeypatch.setattr(st, "_run_detections", slow_full)
     st._enrich_batch = [{"sid": sid, "events": [_secret(0, ts)], "remap": {}, "skew": None,
