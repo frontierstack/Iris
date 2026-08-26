@@ -251,7 +251,11 @@ if ($Mode -eq 'local') {
   # page: a browser on this machine reaches localhost whatever the bind address is. That attack is
   # closed by backend/app/security.py.
   $bindHost = if ($env:IRIS_BIND_HOST) { $env:IRIS_BIND_HOST } else { '127.0.0.1' }
-  & $pyExe -m uvicorn app.main:app --host $bindHost --port $Port
+  # --no-access-log: uvicorn prints a line per request, and this app POLLS — /api/case, /api/jobs,
+  # /api/compute/metrics, the transfer panel — so a console left open fills with thousands of 200 OK
+  # lines that say nothing and cost real time and memory to render and retain. Errors, warnings and
+  # the startup banner still print; that is what the console is for.
+  & $pyExe -m uvicorn app.main:app --host $bindHost --port $Port --no-access-log
   Pop-Location
   exit $LASTEXITCODE
 }

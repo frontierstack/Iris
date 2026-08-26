@@ -267,3 +267,30 @@ def test_tar_gz_upload(c):
     r = c.post("/api/sources", files=[("files", ("evidence.tar.gz", data, "application/gzip"))])
     assert r.status_code == 200, r.text
     assert [s["file"] for s in r.json()] == ["evidence.tar.gz!logs/auth.log"]
+
+
+def test_expansion_is_uncapped_by_default() -> None:
+    """No entry count or size limit unless an operator asks for one.
+
+    The caps were a zip-bomb defence, and the trade was wrong for this app: a bomb is hypothetical
+    while an archive of evidence Iris refuses to open is the everyday case, and the refusal handed
+    the analyst the very chore Iris exists to do. The mechanism still works (the tests above set the
+    caps and watch them trip) — it is simply off. DEPTH stays, because with the size caps gone it is
+    all that stands between the expander and a self-referential archive, and that is a hang, not a
+    trade-off.
+    """
+    assert archives.MAX_ENTRIES == 0, "an entry cap was reintroduced as the default"
+    assert archives.MAX_TOTAL_BYTES == 0, "a total-size cap was reintroduced as the default"
+    assert archives.MAX_MEMBER_BYTES == 0, "a per-member cap was reintroduced as the default"
+    assert archives.MAX_DEPTH >= 3, "nesting depth is the one guard that must stay"
+
+    # an archive with more members than the old 5,000-entry cap expands in full
+    import io as _io
+    import zipfile
+    buf = _io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for i in range(6000):
+            z.writestr(f"logs/app-{i}.log", b"2026-05-01T10:00:00Z host app: line\n")
+    result = archives.expand("many.zip", buf.getvalue())
+    assert len(result.members) == 6000, f"expanded only {len(result.members)} of 6000"
+    assert not result.errors, result.errors

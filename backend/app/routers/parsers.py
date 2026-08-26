@@ -104,9 +104,14 @@ def list_parsers() -> list[dict]:
                                        ".7z", ".rar"],
                "Expanded on upload; each member is fingerprinted separately and keeps its provenance as "
                "'archive.zip!path/inside.log' (Office documents are not treated as archives). Nested archives are "
-               f"expanded {_archives.MAX_DEPTH} levels deep; path traversal (zip-slip) is refused and zip bombs are "
-               f"capped at {_archives.MAX_ENTRIES:,} entries / "
-               f"{_archives.MAX_TOTAL_BYTES // (1024 * 1024)} MB. Password-protected archives are reported, never "
+               f"expanded {_archives.MAX_DEPTH} levels deep; path traversal (zip-slip) is refused. "
+               + ("There is no limit on entry count or expanded size. "
+                  if not (_archives.MAX_ENTRIES or _archives.MAX_TOTAL_BYTES) else
+                  f"Expansion is capped at "
+                  f"{('%s entries' % f'{_archives.MAX_ENTRIES:,}') if _archives.MAX_ENTRIES else 'any number of entries'}"
+                  f" / "
+                  f"{('%d MB' % (_archives.MAX_TOTAL_BYTES // (1024 * 1024))) if _archives.MAX_TOTAL_BYTES else 'any size'}. ")
+               + "Password-protected archives are reported, never "
                "silently skipped. 7z/RAR need the optional py7zr / rarfile packages.",
                available=True,
                note=None if (_sevenz_ok and _rar_ok) else

@@ -11,7 +11,7 @@ be traced back to the archive it came from.
 
 Guards:
   * zip-slip  - absolute paths, drive letters and any `..` component are refused, per member.
-  * zip bomb  - total uncompressed bytes, per-member bytes and entry count are capped; tripping a cap stops
+  * zip bomb  - UNCAPPED by default (see MAX_ENTRIES); set the IRIS_ARCHIVE_MAX_* env vars to cap. Tripping a cap stops
                 the expansion and reports it rather than eating the machine's RAM.
   * nesting   - archives inside archives are expanded to MAX_DEPTH levels, then reported as too deep.
 
@@ -31,10 +31,28 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Optional
 
-MAX_DEPTH = 3                            # outer archive = depth 0
-MAX_ENTRIES = 5_000                      # members across the whole expansion
-MAX_TOTAL_BYTES = 512 * 1024 * 1024      # uncompressed bytes across the whole expansion
-MAX_MEMBER_BYTES = 256 * 1024 * 1024     # uncompressed bytes for one member
+def _cap(name: str, default: int) -> int:
+    """An expansion cap from the environment. 0 means NO LIMIT."""
+    import os
+    try:
+        return max(0, int(os.environ.get(name, "") or default))
+    except ValueError:
+        return default
+
+
+# NO SIZE OR COUNT LIMIT by default, on the analyst's instruction: "remove the archive expansion
+# limit". These were a zip-bomb defence, and the trade they made is wrong for this app — a bomb is a
+# hypothetical, while an archive of evidence that Iris refuses to open is the everyday case, and the
+# refusal ("extract it yourself and upload the files you need") hands the analyst a chore Iris exists
+# to do. An operator who wants the guard back sets the env vars; 0 is no limit.
+#
+# DEPTH is the exception and stays, raised to 8. With the count and byte caps gone it is the only
+# thing standing between the expander and a self-referential archive — a zip quine expands forever,
+# and "forever" is not a trade-off, it is a hang.
+MAX_DEPTH = _cap("IRIS_ARCHIVE_MAX_DEPTH", 8)                        # outer archive = depth 0
+MAX_ENTRIES = _cap("IRIS_ARCHIVE_MAX_ENTRIES", 0)                    # members across the expansion
+MAX_TOTAL_BYTES = _cap("IRIS_ARCHIVE_MAX_TOTAL_MB", 0) * 1024 * 1024  # uncompressed, whole expansion
+MAX_MEMBER_BYTES = _cap("IRIS_ARCHIVE_MAX_MEMBER_MB", 0) * 1024 * 1024  # uncompressed, one member
 
 ZIP_MAGIC = b"PK\x03\x04"
 GZIP_MAGIC = b"\x1f\x8b"
@@ -177,12 +195,12 @@ class _Budget:
     def take(self, size: int) -> bool:
         if self.tripped:
             return False
-        if self.entries >= MAX_ENTRIES:
+        if MAX_ENTRIES and self.entries >= MAX_ENTRIES:
             self.tripped = (f"archive stopped after {MAX_ENTRIES:,} files - it holds more entries than Iris will "
                             "expand in one upload (possible zip bomb). Extract it yourself and upload the files "
                             "you need.")
             return False
-        if self.total + size > MAX_TOTAL_BYTES:
+        if MAX_TOTAL_BYTES and self.total + size > MAX_TOTAL_BYTES:
             self.tripped = (f"archive stopped at the {MAX_TOTAL_BYTES // (1024 * 1024)} MB uncompressed limit "
                             "(possible zip bomb). Extract it yourself and upload the files you need.")
             return False
@@ -433,13 +451,13 @@ def _decompress_single(data: bytes) -> bytes:
     if data.startswith(XZ_MAGIC):
         return lzma.decompress(data)
     import zstandard  # guarded at expansion time; a stream that expanded once has the module
-    return zstandard.ZstdDecompressor().decompress(data, max_output_size=MAX_MEMBER_BYTES)
+    return zstandard.ZstdDecompressor().decompress(data, max_output_size=MAX_MEMBER_BYTES or (1 << 62))
 
 
 # ------------------------------------------------------------------------ internals
 def _emit(out: Expanded, budget: _Budget, name: str, blob: bytes, depth: int) -> None:
     """Add a member, recursing when it is itself an archive."""
-    if len(blob) > MAX_MEMBER_BYTES:
+    if MAX_MEMBER_BYTES and len(blob) > MAX_MEMBER_BYTES:
         out.errors.append(f"{name}: member is larger than the "
                           f"{MAX_MEMBER_BYTES // (1024 * 1024)} MB per-file limit and was skipped.")
         return
@@ -559,7 +577,7 @@ def _expand_zip(out: Expanded, budget: _Budget, filename: str, data: Optional[by
             if info.flag_bits & 0x1:
                 encrypted.append(safe)
                 continue
-            if info.file_size > MAX_MEMBER_BYTES:
+            if MAX_MEMBER_BYTES and info.file_size > MAX_MEMBER_BYTES:
                 out.errors.append(f"{_join(filename, safe)}: member is larger than the "
                                   f"{MAX_MEMBER_BYTES // (1024 * 1024)} MB per-file limit and was skipped.")
                 continue
@@ -618,7 +636,7 @@ def _expand_tar(out: Expanded, budget: _Budget, filename: str, data: Optional[by
             if safe is None:
                 traversal.append(member.name)
                 continue
-            if member.size > MAX_MEMBER_BYTES:
+            if MAX_MEMBER_BYTES and member.size > MAX_MEMBER_BYTES:
                 out.errors.append(f"{_join(filename, safe)}: member is larger than the "
                                   f"{MAX_MEMBER_BYTES // (1024 * 1024)} MB per-file limit and was skipped.")
                 continue
@@ -685,13 +703,13 @@ def _expand_7z(out: Expanded, budget: _Budget, filename: str, data: bytes, depth
             if safe is None:
                 traversal.append(str(inner))
                 continue
-            if size > MAX_MEMBER_BYTES:
+            if MAX_MEMBER_BYTES and size > MAX_MEMBER_BYTES:
                 out.errors.append(f"{_join(filename, safe)}: member is larger than the "
                                   f"{MAX_MEMBER_BYTES // (1024 * 1024)} MB per-file limit and was skipped.")
                 continue
             if PurePosixPath(safe).name.startswith("."):
                 continue
-            if running + size > MAX_TOTAL_BYTES:
+            if MAX_TOTAL_BYTES and running + size > MAX_TOTAL_BYTES:
                 overflow = max(overflow, size)
                 continue
             planned.append((inner, safe))
@@ -761,7 +779,7 @@ def _sevenz_read(archive, names: list[str]) -> dict[str, bytes]:
             pass
     from py7zr.io import BytesIOFactory  # py7zr >= 1.0
 
-    factory = BytesIOFactory(MAX_MEMBER_BYTES)
+    factory = BytesIOFactory(MAX_MEMBER_BYTES or (1 << 62))
     archive.extract(targets=list(names), factory=factory)
     out = {}
     for name in names:
@@ -841,7 +859,7 @@ def _expand_zstd(out: Expanded, budget: _Budget, filename: str, data: bytes, dep
         out.members.append((filename, data))
         return
     try:
-        blob = zstandard.ZstdDecompressor().decompress(data, max_output_size=MAX_MEMBER_BYTES)
+        blob = zstandard.ZstdDecompressor().decompress(data, max_output_size=MAX_MEMBER_BYTES or (1 << 62))
     except Exception as exc:
         out.errors.append(f"{filename}: zstd stream could not be decompressed "
                           f"({type(exc).__name__}: {exc}).")

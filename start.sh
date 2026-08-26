@@ -216,7 +216,11 @@ if [ "$MODE" = "local" ]; then
   # every destructive endpoint to the network. IRIS_BIND_HOST=0.0.0.0 exposes it deliberately — set
   # IRIS_AUTH_TOKEN too (HOWTO -> Security). This does NOT stop a malicious web page: a browser on
   # this machine reaches localhost whatever the bind address is; that is what app/security.py is for.
-  exec "$PY" -m uvicorn app.main:app --host "${IRIS_BIND_HOST:-127.0.0.1}" --port "$PORT"
+  # --no-access-log: uvicorn prints a line per request, and this app POLLS — /api/case, /api/jobs,
+  # /api/compute/metrics, the transfer panel — so a console left open fills with thousands of 200 OK
+  # lines that say nothing and cost real time and memory to render and retain. Errors, warnings and
+  # the startup banner still print; that is what the console is for.
+  exec "$PY" -m uvicorn app.main:app --host "${IRIS_BIND_HOST:-127.0.0.1}" --port "$PORT" --no-access-log
 fi
 
 # ── docker plumbing ──────────────────────────────────────────────────────────
