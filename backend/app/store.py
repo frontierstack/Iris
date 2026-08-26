@@ -2493,9 +2493,28 @@ class Store:
                 self.ts = ts
                 self.rules_fired = fired
                 if self.case_set:
-                    # which source a lost citation belonged to, so each one is reported to the source
-                    # whose enrichment dropped it rather than to whichever was first in the batch
-                    owner = {e.id: e.sourceId for e in base if e.sourceId in sids}
+                    # Which source a lost citation belonged to, so each one is reported to the source
+                    # whose enrichment dropped it rather than to whichever was first in the batch.
+                    #
+                    # This was a dict comprehension over `base` — the WHOLE pool — built HERE, inside
+                    # the store lock, on every phase-2 merge of a workspace that has any curation at
+                    # all. Everything else in this method is deliberately computed off the lock
+                    # (filter, sort, index, timestamps) precisely so the critical section is a few
+                    # assignments; this one line put an O(pool) walk back inside it, and at 11 M
+                    # events that is seconds during which no request is served.
+                    #
+                    # It is needed for at most `len(case_set)` ids, and the OLD index answers each in
+                    # O(1): `self.event_index` still describes `base` here, because the retry above
+                    # has just confirmed `self.events is base` under this same lock.
+                    old_index = self.event_index
+
+                    def _owner_of(eid: str) -> Optional[str]:
+                        pos = old_index.get(eid)
+                        if pos is None or pos >= len(base):
+                            return None
+                        sid_of = base[pos].sourceId
+                        return sid_of if sid_of in sids else None
+
                     moved = OrderedDict()
                     changed = False
                     for k, v in self.case_set.items():
@@ -2504,9 +2523,9 @@ class Store:
                         elif k in remap:
                             moved[remap[k]] = v
                             changed = True
-                        elif k in owner:
+                        elif (owner_sid := _owner_of(k)) is not None:
                             # only a citation of a source in THIS batch can go missing here
-                            lost[owner[k]].append(k)
+                            lost[owner_sid].append(k)
                             # KEEP the entry. It used to be dropped here — the analyst's timeline entry
                             # deleted because a re-parse produced a different id for its line — and the
                             # next save_meta() persisted the deletion. It stays, unresolved and

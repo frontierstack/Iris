@@ -333,61 +333,71 @@ export function EnrichBanner() {
   return (
     <div className="enrich-banner enrich-banner--slim" role="status" aria-live="polite">
       <div className="enrich-banner__body">
-        <div className="enrich-banner__line">
-          <b>{fmtInt(done)} of {fmtInt(total)} source{total === 1 ? '' : 's'} interpreted</b>
-          <span className="muted"> — every source is searchable with its timestamps either way;
-            interpreting one adds parsed fields, entities and detections.</span>
-        </div>
+        {/* ONE strip, and progress is the thing you see. It was four lines of prose — the count, a
+            sentence explaining that raw is still searchable, the current file, and a paragraph about
+            the windowed-rule pass — stacked above the Sources table on every ingest. All of it was
+            TRUE and none of it was scannable; an analyst watching an ingest wants "how far along",
+            and the explanations belong where someone can ask for them, not in the way. The prose is
+            on the rows as `title`, so nothing is lost, and the numbers carry themselves. */}
+        <div className="enrich-strip"
+             title={`Every source is searchable with its timestamps either way. Interpreting one adds `
+                    + `parsed fields, entities and detections.`}>
+          <span className="enrich-strip__bar" aria-hidden>
+            <i style={{ width: `${total ? Math.round((done / total) * 100) : 0}%` }} />
+          </span>
+          <b>{fmtInt(done)}<span className="muted">/{fmtInt(total)}</span></b>
+          <span className="enrich-strip__label">interpreted</span>
 
-        {/* WHAT is happening, from the server, with how long it has been happening. This replaced
-            three hand-rolled branches that could only say "Interpreting <file>" or "N queued" — and a
-            merge, which is the longest thing phase 2 does and belongs to no file, rendered as the
-            second one. `activity.detail` is a full sentence written where the facts are. */}
-        {activity && activity.kind !== 'idle' ? (
-          <div className="enrich-banner__line">
-            <span className="spinner" />
-            <span>{activity.detail}</span>
-            {activity.kind === 'merging' && activity.stageCount > 0 && (
-              <span className="muted"> (step {activity.stageIndex} of {activity.stageCount})</span>
-            )}
-            {activity.elapsedSec >= 5 && <span className="muted"> · {fmtDur(activity.elapsedSec)}</span>}
-            {typeof activity.etaSec === 'number' && activity.etaSec > 0 &&
-              <span className="muted"> · ~{fmtDur(activity.etaSec)} left</span>}
-            {queued > 0 && activity.kind !== 'noWorker' &&
-              <span className="muted"> · {fmtInt(queued)} waiting</span>}
-          </div>
-        ) : activity && queued > 0 ? (
-          <div className="enrich-banner__line">
-            <span className="spinner" />{activity.detail || `${fmtInt(queued)} queued to interpret`}
-          </div>
-        ) : running ? (
-          // Fallback for a server that does not send `activity` yet.
-          <div className="enrich-banner__line">
-            <span className="spinner" />
-            Interpreting <span className="mono">{detail.file || running}</span>
-            {typeof pct === 'number' ? ` — ${pct.toFixed(0)}%` : ''}
-            {typeof eta === 'number' && eta > 0 ? ` · ~${eta < 60 ? `${eta}s` : `${Math.round(eta / 60)}m`} left` : ''}
-            {queued > 0 ? ` · ${fmtInt(queued)} waiting` : ''}
-          </div>
-        ) : committing ? (
-          <div className="enrich-banner__line">
-            <span className="spinner" />Merging interpreted sources into the pool
-            {queued > 0 ? ` · ${fmtInt(queued)} waiting` : ''}
-          </div>
-        ) : queued > 0 ? (
-          <div className="enrich-banner__line"><span className="spinner" />{fmtInt(queued)} queued to interpret</div>
-        ) : null}
+          {activity && activity.kind !== 'idle' ? (
+            <span className="enrich-strip__now">
+              <span className="spinner" />
+              <span className="ellipsis">{activity.detail}</span>
+              {activity.kind === 'merging' && activity.stageCount > 0 &&
+                <span className="muted">step {activity.stageIndex}/{activity.stageCount}</span>}
+              {activity.elapsedSec >= 5 && <span className="muted">{fmtDur(activity.elapsedSec)}</span>}
+              {typeof activity.etaSec === 'number' && activity.etaSec > 0 &&
+                <span className="muted">~{fmtDur(activity.etaSec)} left</span>}
+              {queued > 0 && activity.kind !== 'noWorker' && <span className="muted">{fmtInt(queued)} waiting</span>}
+            </span>
+          ) : activity && queued > 0 ? (
+            <span className="enrich-strip__now">
+              <span className="spinner" />
+              <span className="ellipsis">{activity.detail || `${fmtInt(queued)} queued`}</span>
+            </span>
+          ) : running ? (
+            <span className="enrich-strip__now">
+              <span className="spinner" />
+              <span className="mono ellipsis">{detail.file || running}</span>
+              {typeof pct === 'number' && <span className="muted">{pct.toFixed(0)}%</span>}
+              {typeof eta === 'number' && eta > 0 &&
+                <span className="muted">~{eta < 60 ? `${eta}s` : `${Math.round(eta / 60)}m`} left</span>}
+              {queued > 0 && <span className="muted">{fmtInt(queued)} waiting</span>}
+            </span>
+          ) : committing ? (
+            <span className="enrich-strip__now">
+              <span className="spinner" /><span>merging into the pool</span>
+              {queued > 0 && <span className="muted">{fmtInt(queued)} waiting</span>}
+            </span>
+          ) : queued > 0 ? (
+            <span className="enrich-strip__now"><span className="spinner" />{fmtInt(queued)} queued</span>
+          ) : null}
+        </div>
 
         {detectionsRefreshing && (
           // The per-event rules are already on the new events; this is the windowed-rule pass over the
-          // whole pool, in the background. Everything is searchable meanwhile — say so, or a spinner
-          // with nothing queued reads as one more thing being waited on.
-          <div className="enrich-banner__line">
-            <span className="spinner" />
-            <span>Re-checking windowed detection rules over the whole pool in the background
-              {typeof detectionsRefreshPct === 'number' ? ` — ${Math.round(detectionsRefreshPct)}%` : ''} — search,
-              the timeline and the graph are not waiting on it.</span>
-            {detectionsRefreshSec >= 5 && <span className="muted"> · {fmtDur(detectionsRefreshSec)}</span>}
+          // whole pool, in the background. Nothing is waiting on it — which is the whole point of the
+          // sentence, so it stays, as the row's title rather than as a paragraph in the way.
+          <div className="enrich-strip enrich-strip--sub"
+               title="Windowed detection rules are being re-checked over the whole pool in the background. Search, the timeline and the graph are not waiting on it.">
+            <span className="enrich-strip__bar" aria-hidden>
+              <i style={{ width: `${typeof detectionsRefreshPct === 'number' ? Math.round(detectionsRefreshPct) : 0}%` }} />
+            </span>
+            <span className="enrich-strip__label">
+              detection rules
+              {typeof detectionsRefreshPct === 'number' && <b> {Math.round(detectionsRefreshPct)}%</b>}
+            </span>
+            <span className="muted">background</span>
+            {detectionsRefreshSec >= 5 && <span className="muted">{fmtDur(detectionsRefreshSec)}</span>}
           </div>
         )}
         {(raw.length > 0 && idle) || failed > 0 ? (

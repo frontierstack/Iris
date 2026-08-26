@@ -2043,6 +2043,44 @@
 
 /* The Sources readiness strip (components/Enrichment.EnrichBanner). Stacked lines, not a paragraph:
    "how much is ready", "what is happening now", "what needs me" are three different questions. */
+/* The ingest progress strip: one row, the bar first, everything else muted and on one line.
+   Replaces four stacked sentences that were true, unscannable, and in the way of the table. */
+.enrich-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: var(--fs-md);
+  line-height: 1.6;
+}
+.enrich-strip + .enrich-strip { margin-top: 4px; }
+.enrich-strip__bar {
+  flex: 0 0 96px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+.enrich-strip__bar > i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.4s linear;   /* a measurement, not an animation: no pulse, no glow */
+}
+.enrich-strip b { color: var(--text-bright); font-weight: 600; }
+.enrich-strip__label { color: var(--text-3); }
+.enrich-strip__now {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-3);
+}
+/* every muted fact after the first is separated by a dot, so the row reads without punctuation in the markup */
+.enrich-strip__now .muted::before,
+.enrich-strip > .muted::before { content: '·'; margin-right: 8px; color: var(--muted-3); }
+.enrich-strip--sub { font-size: var(--fs-sm); }
+.enrich-strip--sub .enrich-strip__bar { flex-basis: 64px; height: 3px; }
 .enrich-banner--slim { align-items: flex-start; }
 .enrich-banner__line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; line-height: 1.5; }
 .enrich-banner__line + .enrich-banner__line { margin-top: 4px; }
