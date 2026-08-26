@@ -1176,6 +1176,29 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
           {!atBottom && live && (
             <button type="button" className="chat-jump" onClick={jumpToLatest}>Jump to latest</button>
           )}
+          {/* Which prompt the next run uses. Always visible — a control that only appears once something
+              is saved is a control nobody discovers; with nothing saved it says where to add one. */}
+          <div className="chat-prompt-bar" title="The system prompt for the next run: the built-in prompt, plus the additional instructions you pick here. Manage both under Settings → System prompts.">
+            <label className="chat-prompt-bar__label" htmlFor="chat-prompt-pick">Prompt</label>
+            <select
+              id="chat-prompt-pick"
+              className="chat-prompt-bar__select"
+              value={spChoice === null ? '__default' : spChoice}
+              onChange={(e) => pickSystemPrompt(e.target.value === '__default' ? null : e.target.value)}
+              disabled={live}
+              aria-label="System prompt for the next run"
+            >
+              <option value="__default">{defaultPromptName ? `Default · ${defaultPromptName}` : 'Built-in prompt only (default)'}</option>
+              {defaultPromptName && <option value="">Built-in prompt only</option>}
+              {savedPrompts.length > 0 && <optgroup label="Saved prompts — added to the built-in prompt">
+                {savedPrompts.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </optgroup>}
+            </select>
+            {systemPrompts.data?.builtinEdited && <span className="pill pill--warn" title="The built-in prompt has been edited under Settings → System prompts">built-in edited</span>}
+            <Link to="/settings#prompts" className="chat-prompt-bar__manage" onClick={onClose}>
+              {savedPrompts.length > 0 ? 'Manage' : 'Add a prompt'}
+            </Link>
+          </div>
           <form
             className="chat-composer"
             onSubmit={(e) => { e.preventDefault(); send(); }}
@@ -1207,29 +1230,12 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
               </button>
             )}
           </form>
-          <div className="chat-composer__hint chat-composer__hint--row">
-            <span>
-              {live
-                ? 'Stop halts the run on the server at its next checkpoint — anything already written stays and can be reverted.'
-                : continueFrom
-                  ? 'This continues the conversation above — the assistant keeps what it already found and does not start over. New begins a fresh one.'
-                  : 'Everything is kept in History and survives a refresh. You can keep asking follow-ups in the same chat.'}
-            </span>
-            {savedPrompts.length > 0 && (
-              <label className="chat-prompt-pick" title="Additional instructions for the next run, added to the built-in prompt — manage them under Settings → System prompts">
-                <span>Instructions</span>
-                <select
-                  value={spChoice === null ? '__default' : spChoice}
-                  onChange={(e) => pickSystemPrompt(e.target.value === '__default' ? null : e.target.value)}
-                  disabled={live}
-                  aria-label="System prompt for the next run"
-                >
-                  <option value="__default">Default{defaultPromptName ? ` · ${defaultPromptName}` : ' · none'}</option>
-                  <option value="">None — built-in only</option>
-                  {savedPrompts.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-                </select>
-              </label>
-            )}
+          <div className="chat-composer__hint">
+            {live
+              ? 'Stop halts the run on the server at its next checkpoint — anything already written stays and can be reverted.'
+              : continueFrom
+                ? 'This continues the conversation above — the assistant keeps what it already found and does not start over. New begins a fresh one.'
+                : 'Everything is kept in History and survives a refresh. You can keep asking follow-ups in the same chat.'}
           </div>
         </div>
       )}
