@@ -80,7 +80,8 @@ from .argrepair import repair_arguments
 from .client import (AIError, BadToolArguments, ContextTooLong, LLMClient, ProviderUnavailable,
                      absorb_text_calls, has_tool_call_syntax, parse_text_tool_calls)
 from .history import HISTORY
-from .prompts import (ARG_TOO_BIG, BUDGET_NOTICE, CHECK_IN, DOCUMENT_CHECK, INVESTIGATOR_SYSTEM, NO_CASE_LINE,
+from .system_prompts import PROMPTS
+from .prompts import (ARG_TOO_BIG, BUDGET_NOTICE, CHECK_IN, DOCUMENT_CHECK, NO_CASE_LINE,
                       RECORD_NUDGE, SUMMARY_CHECK, WRAP_UP, investigator_user_prompt)
 from .tools import (REGISTRY, RunContext, ToolError, tool_budget_seconds, tool_schemas,
                     unverified_citations)
@@ -637,7 +638,7 @@ def _case_line(store: Any) -> str:
 async def investigate(store: Any, objective: str, run_id: str,
                       max_steps: Optional[int] = None, max_seconds: Optional[int] = None,
                       client: Optional[LLMClient] = None, focus: str = "",
-                      continue_from: str = "") -> AsyncIterator[dict[str, Any]]:
+                      continue_from: str = "", system_prompt_id: Optional[str] = None) -> AsyncIterator[dict[str, Any]]:
     """Async generator of SSE-ready dicts — see docs/API_CONTRACT.md → "AI investigator".
 
     `continue_from` is the previous run of the SAME conversation. The turn is still its own run —
@@ -682,10 +683,23 @@ async def investigate(store: Any, objective: str, run_id: str,
         return
 
     tools = tool_schemas()
+    # The system prompt: the built-in one, or a saved one the analyst wrote (ai/system_prompts.py) —
+    # `system_prompt_id` None = the settings default, '' = built-in, an id = that prompt. A missing id
+    # is REPORTED and the built-in prompt runs; it is never swapped for some other saved prompt.
+    system_text, sp = PROMPTS.resolve(system_prompt_id)
+    if sp["missing"]:
+        msg = (f"saved system prompt {sp['missing']!r} no longer exists — running on the built-in prompt. "
+               f"Pick another under Settings → System prompts.")
+        HISTORY.append(run_id, {"kind": "warning", "text": msg})
+        yield {"type": "warning", "message": msg, "ids": []}
+    if sp["id"]:
+        note = f"system prompt: {sp['name']} ({sp['mode']})"
+        HISTORY.append(run_id, {"kind": "status", "text": note})
+        yield {"type": "status", "text": note, "systemPrompt": {"id": sp["id"], "name": sp["name"], "mode": sp["mode"]}}
     # the focus note is context for the MODEL only — the transcript stores the analyst's words verbatim
     asked = objective + (f"\n\n(The analyst opened this from: {focus})" if focus else "")
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": INVESTIGATOR_SYSTEM},
+        {"role": "system", "content": system_text},
         {"role": "user", "content": investigator_user_prompt(asked, build_context(store), prior_brief)},
     ]
     started = time.monotonic()

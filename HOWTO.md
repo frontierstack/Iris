@@ -535,12 +535,22 @@ read the evidence it is citing while it works, instead of opening and closing a 
 page underneath stays clickable and <kbd>Esc</kbd> no longer closes it (that would throw away a half-written
 objective); use the × on the title bar.
 
+**System prompts.** Settings → **System prompts** holds standing instructions for the assistant — a report format,
+what counts as critical in your environment, sources to distrust, a language. Each saved prompt either **extends**
+the built-in prompt (it is appended as an "Analyst instructions" section; the built-in rules on searching, citing
+real event ids and stopping stay in force) or **replaces** it (sent instead of it, verbatim — the assistant then
+only knows what you tell it). Pick one as the **default**; the assistant panel's composer has a **Prompt** picker
+to run a single question on another one, or on the built-in prompt alone. *View effective* shows the exact text
+the model receives, and the built-in prompt is readable there too. Saved prompts live in
+`ai/system_prompts.json` in the data directory and are kept by *Clear all data*, like rules.
+
 ### 7. Settings
 **Appearance** (5 themes + density) · **Compute** (GPU list, live utilization / VRAM / temp / power / CPU / RSS /
 parse throughput sampled every 2 s with 2–30 min charts, mode auto / CUDA / CPU, *Re-check now*, and
 **Two-phase ingest** — the auto-enrich toggle, which schedules *when* the expensive parse runs, not whether
 it runs) · **AI assistant**
-(enable, model, key, *Test connection*; Advanced → base URL, TLS verification, custom CA bundle) · **MCP server**
+(enable, model, key, *Test connection*; Advanced → base URL, TLS verification, custom CA bundle) · **System prompts**
+(save / edit standing instructions for the assistant, pick the default — see §6) · **MCP server**
 (below) · **Data** (**Clear all data**, behind a type-the-phrase confirm — it wipes cases, trash, library, the pool,
 jobs and AI conversations; rules and settings are kept, and the panel says so).
 

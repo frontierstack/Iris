@@ -668,6 +668,9 @@ class AISettings(BaseModel):
     agents: int = Field(default=3, ge=1, le=4)
     verifyTls: bool = True      # False = skip certificate verification (corporate TLS-inspection proxies)
     caBundle: str = ""          # optional path to a PEM CA bundle; blank = auto ($IRIS_CA_BUNDLE, /data/ca.pem, certifi)
+    # The saved system prompt the investigator uses by default (ai/system_prompts.py); '' = the
+    # built-in prompt alone. A run may name another one per request.
+    systemPromptId: str = ""
 
 
 class McpSettings(BaseModel):

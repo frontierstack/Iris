@@ -271,7 +271,16 @@ export type MonoName = 'jetbrains-mono' | 'ibm-plex-mono' | 'source-code-pro' | 
 export type ComputeMode = 'auto' | 'cuda' | 'cpu';
 export type AiProvider = 'none' | 'openai';
 
-export interface AiSettings { provider: AiProvider; model: string; baseUrl: string; apiKey: string; agents: number; verifyTls: boolean; caBundle: string }
+/** `systemPromptId` names the saved system prompt the investigator uses by default; '' = the built-in prompt alone. */
+export interface AiSettings { provider: AiProvider; model: string; baseUrl: string; apiKey: string; agents: number; verifyTls: boolean; caBundle: string; systemPromptId: string }
+/**
+ * A saved system prompt for the investigator (Settings → System prompts). `extend` is appended to the
+ * built-in prompt as an ANALYST INSTRUCTIONS section — the tool discipline and citation rules stay;
+ * `replace` is sent INSTEAD of the built-in prompt, verbatim.
+ */
+export type SystemPromptMode = 'extend' | 'replace';
+export interface SystemPrompt { id: string; name: string; text: string; mode: SystemPromptMode; createdAt: string; updatedAt: string }
+export interface SystemPromptsResponse { prompts: SystemPrompt[]; activeId: string; builtin: string; modes: SystemPromptMode[] }
 /** The MCP server Iris exposes to outside agents. `token` is masked on read, like ai.apiKey. */
 export interface McpSettings { enabled: boolean; allowWrites: boolean; token: string }
 /** Ingest behaviour. `autoEnrich` false means phase 2 never runs unless it is asked for, per source. */
@@ -428,6 +437,8 @@ export interface AiInvestigateRequest {
    * scratch. An unknown or deleted id degrades to a fresh conversation rather than failing.
    */
   continueFrom?: string;
+  /** Which saved system prompt to run on. Omitted = the settings default; '' = the built-in prompt alone. */
+  systemPromptId?: string;
 }
 /** One change a run made to the workspace, and how to take it back. */
 export interface AiAction { id: string; runId: string; tool: string; at: string; summary: string; undo: Record<string, unknown>; undone: boolean }

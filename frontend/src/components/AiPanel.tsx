@@ -28,11 +28,11 @@
  * `AiTranscriptEntry[]`, so there is one renderer, not two.
  */
 import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { api } from '../api/client';
 import type { AiAction, AiInvestigateRequest, AiRun, AiRunEvent, AiScope, AiTranscriptEntry } from '../api/types';
-import { useSettings } from '../hooks/queries';
+import { qk, useSettings } from '../hooks/queries';
 import { useToast } from '../hooks/useToast';
 import { cx, errMsg } from '../utils/format';
 import { renderMarkdown } from '../utils/markdown';
@@ -86,6 +86,7 @@ const STREAM_FLUSH_MS = 90;
  * geometry survives a close and a reload — re-arranging the window on every open is its own annoyance.
  */
 const AI_DETACHED_KEY = 'iris.ai.detached';
+const SP_KEY = 'iris.ai.systemPrompt';   // the composer's system-prompt choice; absent = the settings default
 
 /**
  * Which tools change the case. The PERSISTED transcript carries `writes` on every tool entry, but the
@@ -673,6 +674,17 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
 
   const [view, setView] = useState<'chat' | 'history'>('history');
   const [prompt, setPrompt] = useState('');
+  // Which SAVED SYSTEM PROMPT the next run uses (Settings → System prompts). `null` = whatever the
+  // settings default is, '' = the built-in prompt alone, an id = that prompt. Remembered per browser,
+  // because an analyst who picked a prompt for a case is going to want it on the next question too.
+  const systemPrompts = useQuery({ queryKey: qk.aiSystemPrompts, queryFn: api.aiSystemPrompts, staleTime: 60_000 });
+  const [spChoice, setSpChoice] = useState<string | null>(() => {
+    try { const v = localStorage.getItem(SP_KEY); return v === null ? null : v; } catch { return null; }
+  });
+  const pickSystemPrompt = useCallback((v: string | null) => {
+    setSpChoice(v);
+    try { if (v === null) localStorage.removeItem(SP_KEY); else localStorage.setItem(SP_KEY, v); } catch { /* ignore */ }
+  }, []);
   const [run, setRun] = useState<AiRun | null>(null);
   // The FINISHED earlier turns of the open conversation, oldest first. `run` is always the latest one.
   const [thread, setThread] = useState<AiRun[]>([]);
@@ -835,6 +847,10 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
     const body: AiInvestigateRequest = { prompt: text, runId: rid };
     if (focus) body.focus = focus;
     if (continueFrom) body.continueFrom = continueFrom;
+    // A remembered choice that names a prompt since deleted is dropped here rather than sent: the
+    // server would warn and run on the built-in prompt, but the picker should not keep offering it.
+    const spKnown = spChoice === null || spChoice === '' || !!systemPrompts.data?.prompts.some((p) => p.id === spChoice);
+    if (spChoice !== null && spKnown) body.systemPromptId = spChoice;
 
     // Prose arrives one TOKEN at a time. A `setEntries` per token is a re-render, a markdown re-parse
     // and a scroll-to-bottom per token — the report visibly stuttered as it was written. Tokens are
@@ -952,7 +968,7 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
           .catch(() => { /* offline: keep what the stream already showed */ })
           .finally(() => { setStreamingId(null); void loadHistory(); });
       });
-  }, [target, settings.data?.ai.model, refreshWorkspace, loadHistory]);
+  }, [target, settings.data?.ai.model, refreshWorkspace, loadHistory, spChoice, systemPrompts.data]);
 
   /** Stop the run SERVER-side. Aborting the fetch alone would leave the agent writing to the case. */
   const stop = useCallback(() => {
@@ -1065,6 +1081,15 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
   const scopeNote = focusOf(target);
   const threadCount = useMemo(() => new Set(runs.map((r) => r.threadId || r.id)).size, [runs]);
   const canSend = !!prompt.trim() && !live;
+  const savedPrompts = useMemo(() => systemPrompts.data?.prompts ?? [], [systemPrompts.data]);
+  // a remembered id that no longer exists is not offered; the select falls back to the default row
+  useEffect(() => {
+    if (systemPrompts.data && spChoice && !savedPrompts.some((p) => p.id === spChoice)) pickSystemPrompt(null);
+  }, [systemPrompts.data, savedPrompts, spChoice, pickSystemPrompt]);
+  const defaultPromptName = useMemo(() => {
+    const id = settings.data?.ai.systemPromptId;
+    return id ? (savedPrompts.find((p) => p.id === id)?.name ?? '') : '';
+  }, [settings.data?.ai.systemPromptId, savedPrompts]);
   // Typing into an open, finished conversation CONTINUES it. A first turn, or a chat cleared with New,
   // starts a fresh one.
   const continueFrom = run && !live ? run.id : undefined;
@@ -1182,12 +1207,29 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
               </button>
             )}
           </form>
-          <div className="chat-composer__hint">
-            {live
-              ? 'Stop halts the run on the server at its next checkpoint — anything already written stays and can be reverted.'
-              : continueFrom
-                ? 'This continues the conversation above — the assistant keeps what it already found and does not start over. New begins a fresh one.'
-                : 'Everything is kept in History and survives a refresh. You can keep asking follow-ups in the same chat.'}
+          <div className="chat-composer__hint chat-composer__hint--row">
+            <span>
+              {live
+                ? 'Stop halts the run on the server at its next checkpoint — anything already written stays and can be reverted.'
+                : continueFrom
+                  ? 'This continues the conversation above — the assistant keeps what it already found and does not start over. New begins a fresh one.'
+                  : 'Everything is kept in History and survives a refresh. You can keep asking follow-ups in the same chat.'}
+            </span>
+            {savedPrompts.length > 0 && (
+              <label className="chat-prompt-pick" title="Which saved system prompt the next run uses — manage them under Settings → System prompts">
+                <span>Prompt</span>
+                <select
+                  value={spChoice === null ? '__default' : spChoice}
+                  onChange={(e) => pickSystemPrompt(e.target.value === '__default' ? null : e.target.value)}
+                  disabled={live}
+                  aria-label="System prompt for the next run"
+                >
+                  <option value="__default">Default{defaultPromptName ? ` · ${defaultPromptName}` : ' · built-in'}</option>
+                  <option value="">Built-in only</option>
+                  {savedPrompts.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+              </label>
+            )}
           </div>
         </div>
       )}

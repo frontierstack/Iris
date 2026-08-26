@@ -5,6 +5,7 @@ import type {
 } from './types';
 import type { FieldFacetsQuery, FieldFacetsResponse, JobsResponse, RawLogPage, UploadJob } from './types';
 import type { AiInvestigateRequest, AiRun, AiRunEvent, AiThread, AiToolsResponse, AiUndoResult, IocMarkers } from './types';
+import type { SystemPrompt, SystemPromptMode, SystemPromptsResponse } from './types';
 import type { AuthStatus, Exclusion, ExclusionInput, ExclusionsResponse, GraphFindingsResponse, McpStatus, RulePreviewResult } from './types';
 
 export class ApiError extends Error {
@@ -517,6 +518,17 @@ export const api = {
   /** Reverse every change one run made — the other half of "writes apply immediately". */
   aiUndoRun: (runId: string) => request<AiUndoResult>(`/api/ai/runs/${encodeURIComponent(runId)}/undo`, json('POST')),
   aiTools: () => request<AiToolsResponse>('/api/ai/tools'),
+  // Saved system prompts for the investigator (Settings → System prompts)
+  aiSystemPrompts: () => request<SystemPromptsResponse>('/api/ai/system-prompts'),
+  aiCreateSystemPrompt: (body: { name: string; text: string; mode: SystemPromptMode }) =>
+    request<SystemPrompt>('/api/ai/system-prompts', json('POST', body)),
+  aiUpdateSystemPrompt: (id: string, body: Partial<{ name: string; text: string; mode: SystemPromptMode }>) =>
+    request<SystemPrompt>(`/api/ai/system-prompts/${encodeURIComponent(id)}`, json('PUT', body)),
+  aiDeleteSystemPrompt: (id: string) =>
+    request<{ ok: boolean; id: string; defaultReset: boolean }>(`/api/ai/system-prompts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  /** The exact text the model receives with this prompt selected (what `extend` actually produces). */
+  aiEffectiveSystemPrompt: (id: string) =>
+    request<{ id: string; name: string; mode: SystemPromptMode; text: string }>(`/api/ai/system-prompts/${encodeURIComponent(id)}/effective`),
 
   // Search field facets — same filters as `events`, so the sidebar reflects the current result set
   eventFields: (q: FieldFacetsQuery) => {

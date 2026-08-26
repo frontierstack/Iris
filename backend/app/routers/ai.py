@@ -31,8 +31,10 @@ from ..ai import runs as ai_runs
 from ..ai.agents import analyze_stream
 from ..ai.client import LLMClient
 from ..ai.investigator import investigate, limits
+from ..ai.prompts import INVESTIGATOR_SYSTEM
+from ..ai.system_prompts import MODES, PROMPTS, PromptError, compose
 from ..ai.tools import REGISTRY
-from ..config import SettingsError, get_settings, is_masked, migrate_provider, validate_base_url
+from ..config import SettingsError, get_settings, is_masked, migrate_provider, update_settings, validate_base_url
 from ..models import AiRun
 from ..store import STORE
 
@@ -79,6 +81,9 @@ class InvestigateBody(BaseModel):
     # the new run joins that thread and starts from what the earlier turns established, instead of
     # re-investigating from scratch. Unknown or deleted ids degrade to a fresh conversation.
     continueFrom: Optional[str] = None
+    # Which saved system prompt this run uses (see /ai/system-prompts). Omitted = the default chosen in
+    # settings (`ai.systemPromptId`); '' = the built-in prompt alone; an id = that saved prompt.
+    systemPromptId: Optional[str] = None
 
 
 @router.post("/investigate")
@@ -100,7 +105,8 @@ async def investigate_stream(body: InvestigateBody) -> StreamingResponse:
     async def drive() -> None:
         try:
             async for item in investigate(STORE, objective, run_id, body.maxSteps, body.maxSeconds,
-                                          focus=focus, continue_from=continue_from):
+                                          focus=focus, continue_from=continue_from,
+                                          system_prompt_id=body.systemPromptId):
                 try:
                     queue.put_nowait(item)
                 except asyncio.QueueFull:
@@ -136,6 +142,69 @@ def stop_run(run_id: str) -> dict:
     """Ask a live run to stop. It halts at the next checkpoint — before the next step, or right after the
     tool call in flight — so a long sequence can be interrupted without losing what it already wrote."""
     return {"ok": ai_runs.request_stop(run_id), "runId": run_id}
+
+
+# ------------------------------------------------------------------ saved system prompts
+class SystemPromptBody(BaseModel):
+    name: Optional[str] = None
+    text: Optional[str] = None
+    mode: Optional[Literal["extend", "replace"]] = None
+
+
+def _prompt_or_404(prompt_id: str) -> dict:
+    row = PROMPTS.get(prompt_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="no saved system prompt with that id")
+    return row
+
+
+@router.get("/system-prompts")
+def list_system_prompts() -> dict:
+    """Every saved system prompt, the built-in one they extend, and which one runs by default.
+    `activeId` is `settings.ai.systemPromptId` — '' means the built-in prompt alone."""
+    return {"prompts": PROMPTS.list(), "activeId": get_settings().ai.systemPromptId or "",
+            "builtin": INVESTIGATOR_SYSTEM, "modes": list(MODES)}
+
+
+@router.post("/system-prompts", status_code=201)
+def create_system_prompt(body: SystemPromptBody) -> dict:
+    try:
+        return PROMPTS.create(body.name or "", body.text or "", body.mode or "extend")
+    except PromptError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/system-prompts/{prompt_id}/effective")
+def effective_system_prompt(prompt_id: str) -> dict:
+    """The EXACT text the model would receive with this prompt selected — an author has to be able to
+    read what 'extend' produces, not guess at it."""
+    row = _prompt_or_404(prompt_id)
+    return {"id": row["id"], "name": row["name"], "mode": row["mode"], "text": compose(row)}
+
+
+@router.put("/system-prompts/{prompt_id}")
+def update_system_prompt(prompt_id: str, body: SystemPromptBody) -> dict:
+    _prompt_or_404(prompt_id)
+    try:
+        row = PROMPTS.update(prompt_id, name=body.name, text=body.text, mode=body.mode)
+    except PromptError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail="no saved system prompt with that id")
+    return row
+
+
+@router.delete("/system-prompts/{prompt_id}")
+def delete_system_prompt(prompt_id: str) -> dict:
+    """Deleting the DEFAULT prompt resets the default to the built-in one — a settings value naming a
+    prompt that no longer exists would make every run start with a warning."""
+    if not PROMPTS.delete(prompt_id):
+        raise HTTPException(status_code=404, detail="no saved system prompt with that id")
+    reset = False
+    if get_settings().ai.systemPromptId == prompt_id:
+        update_settings({"ai": {"systemPromptId": ""}})
+        reset = True
+    return {"ok": True, "id": prompt_id, "defaultReset": reset}
 
 
 @router.get("/tools")

@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
-import type { AiTestResult, ComputeMode, ComputeStatus, Settings, ThemeName } from '../api/types';
+import type { AiTestResult, ComputeMode, ComputeStatus, Settings, SystemPrompt, SystemPromptMode, ThemeName } from '../api/types';
 import { Icon } from '../components/icons';
 import { useAuthStatus } from '../components/LoginGate';
 import { Bar, ConfirmDialog, ErrorState, Loading, Toggle } from '../components/ui';
@@ -25,6 +25,7 @@ const NAV: { id: string; label: string; icon: (p: React.SVGProps<SVGSVGElement>)
   { id: 'appearance', label: 'Appearance', icon: Icon.Sliders },
   { id: 'compute', label: 'Compute', icon: Icon.Cpu },
   { id: 'ai', label: 'AI assistant', icon: Icon.Sparkle },
+  { id: 'prompts', label: 'System prompts', icon: Icon.Doc },
   { id: 'mcp', label: 'MCP server', icon: Icon.Plug },
   { id: 'security', label: 'Security', icon: Icon.Lock },
   { id: 'data', label: 'Data', icon: Icon.Trash },
@@ -439,6 +440,180 @@ function AiAssistant({ settings }: { settings: Settings }) {
           </div>
         </>
       )}
+    </Section>
+  );
+}
+
+/* ───────── System prompts ─────────
+   Standing instructions for the investigator, saved on the server. The built-in prompt carries the
+   operating rules the loop depends on (answer first, cite real ids, record as you go, the search DSL);
+   an `extend` prompt is appended to it, a `replace` prompt is sent instead of it. One of them can be
+   the default; the panel can pick another per run.                                                  */
+const MODE_HELP: Record<SystemPromptMode, string> = {
+  extend: 'Added to the built-in prompt as an "Analyst instructions" section — the tool discipline and citation rules stay in force.',
+  replace: 'Sent INSTEAD of the built-in prompt, verbatim. Iris still refuses invented event ids and still sends its record / summary nudges; everything else the model knows about the workspace has to be in your text.',
+};
+
+function SystemPrompts({ settings }: { settings: Settings }) {
+  const toast = useToast();
+  const qc = useQueryClient();
+  const save = useSaveSettings();
+  const list = useQuery({ queryKey: qk.aiSystemPrompts, queryFn: api.aiSystemPrompts });
+  const prompts = list.data?.prompts ?? [];
+  const activeId = settings.ai.systemPromptId ?? '';
+
+  const [editing, setEditing] = useState<SystemPrompt | 'new' | null>(null);
+  const [name, setName] = useState('');
+  const [text, setText] = useState('');
+  const [mode, setMode] = useState<SystemPromptMode>('extend');
+  const [confirmDel, setConfirmDel] = useState<SystemPrompt | null>(null);
+  const [showBuiltin, setShowBuiltin] = useState(false);
+  const [effective, setEffective] = useState<{ id: string; text: string } | null>(null);
+
+  const invalidate = () => { void qc.invalidateQueries({ queryKey: qk.aiSystemPrompts }); };
+  const open = (p: SystemPrompt | 'new') => {
+    setEditing(p);
+    setEffective(null);
+    if (p === 'new') { setName(''); setText(''); setMode('extend'); } else { setName(p.name); setText(p.text); setMode(p.mode); }
+  };
+  const close = () => { setEditing(null); setEffective(null); };
+
+  const upsert = useMutation({
+    mutationFn: () => editing === 'new' || !editing
+      ? api.aiCreateSystemPrompt({ name: name.trim(), text, mode })
+      : api.aiUpdateSystemPrompt(editing.id, { name: name.trim(), text, mode }),
+    onSuccess: (row) => { toast.success(editing === 'new' ? 'System prompt saved' : 'System prompt updated', row.name); invalidate(); close(); },
+    onError: (e) => toast.error('Could not save the system prompt', e),
+  });
+  const del = useMutation({
+    mutationFn: (p: SystemPrompt) => api.aiDeleteSystemPrompt(p.id),
+    onSuccess: (r, p) => {
+      toast.success('System prompt deleted', r.defaultReset ? `${p.name} — the assistant is back on the built-in prompt` : p.name);
+      setConfirmDel(null);
+      if (editing && editing !== 'new' && editing.id === p.id) close();
+      invalidate();
+      if (r.defaultReset) void qc.invalidateQueries({ queryKey: qk.settings });
+    },
+    onError: (e) => toast.error('Could not delete the system prompt', e),
+  });
+  const setDefault = (id: string) => {
+    save.mutate({ ai: { systemPromptId: id } }, {
+      onSuccess: () => toast.success('Default system prompt', id ? (prompts.find((p) => p.id === id)?.name ?? id) : 'Built-in prompt'),
+      onError: (e) => toast.error('Could not change the default prompt', e),
+    });
+  };
+  const viewEffective = (p: SystemPrompt) => {
+    if (effective?.id === p.id) { setEffective(null); return; }
+    api.aiEffectiveSystemPrompt(p.id).then((r) => setEffective({ id: p.id, text: r.text })).catch((e) => toast.error('Could not load the effective prompt', e));
+  };
+
+  const canSave = !!name.trim() && !!text.trim() && !upsert.isPending;
+  const dirty = editing === 'new' ? (!!name || !!text) : editing ? (name !== editing.name || text !== editing.text || mode !== editing.mode) : false;
+
+  return (
+    <Section id="prompts" title="System prompts" desc="standing instructions for the AI assistant · saved on this server · one is the default, the panel can pick another per run" collapsible
+      footer={<>
+        {editing ? (
+          <>
+            <button className="btn btn--primary" onClick={() => upsert.mutate()} disabled={!canSave || !dirty}>{upsert.isPending && <span className="btn__spinner" />}{editing === 'new' ? 'Save prompt' : 'Save changes'}</button>
+            <button className="btn" onClick={close} disabled={upsert.isPending}>Cancel</button>
+            {dirty && !upsert.isPending && <span className="field__hint" style={{ marginLeft: 'auto' }}>unsaved changes</span>}
+          </>
+        ) : (
+          <button className="btn btn--primary" onClick={() => open('new')}><Icon.Plus /> New system prompt</button>
+        )}
+      </>}
+    >
+      {list.isError && <ErrorState inline title="System prompts unavailable" error={list.error} onRetry={() => void list.refetch()} />}
+
+      <div className="field">
+        <label className="field__label" htmlFor="sp-default">Default prompt</label>
+        <select id="sp-default" value={activeId} onChange={(e) => setDefault(e.target.value)} disabled={save.isPending}>
+          <option value="">Built-in prompt only</option>
+          {prompts.map((p) => <option key={p.id} value={p.id}>{p.name} · {p.mode}</option>)}
+        </select>
+        <div className="field__hint">Used by every investigation unless the assistant panel picks another for that run. The built-in prompt is what Iris ships with — how to search, how to cite, when to stop.</div>
+      </div>
+
+      {prompts.length > 0 && (
+        <ul className="sp-list" aria-label="Saved system prompts">
+          {prompts.map((p) => (
+            <li key={p.id} className={cx('sp-row', editing !== 'new' && editing?.id === p.id && 'sp-row--editing')}>
+              <div className="sp-row__main">
+                <div className="sp-row__name">
+                  {p.name}
+                  <span className={cx('pill', p.mode === 'replace' ? 'pill--accent' : 'pill--muted')} title={MODE_HELP[p.mode]}>{p.mode === 'replace' ? 'replaces built-in' : 'extends built-in'}</span>
+                  {p.id === activeId && <span className="badge badge--ok"><span className="badge__dot" />default</span>}
+                </div>
+                <div className="sp-row__meta" title={fmtTs(p.updatedAt)}>{p.text.length.toLocaleString()} characters · updated {fmtRelative(p.updatedAt)}</div>
+              </div>
+              <div className="sp-row__actions">
+                {p.id !== activeId && <button className="btn btn--sm btn--ghost" onClick={() => setDefault(p.id)} disabled={save.isPending}>Use by default</button>}
+                <button className="btn btn--sm" onClick={() => viewEffective(p)} aria-expanded={effective?.id === p.id}>{effective?.id === p.id ? 'Hide effective' : 'View effective'}</button>
+                <button className="btn btn--sm" onClick={() => open(p)}>Edit</button>
+                <button className="btn btn--sm btn--ghost" onClick={() => setConfirmDel(p)} aria-label={`Delete ${p.name}`}><Icon.Trash /> Delete</button>
+              </div>
+              {effective?.id === p.id && (
+                <div className="sp-row__effective">
+                  <div className="field__hint">Exactly what the model receives as its system message with this prompt selected.</div>
+                  <pre className="sp-pre">{effective.text}</pre>
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {!list.isLoading && prompts.length === 0 && !editing && (
+        <div className="field__hint">No saved prompts yet. The assistant runs on the built-in prompt. Save one to give it standing instructions — a report format, what counts as critical in your environment, sources to distrust, a language.</div>
+      )}
+
+      {editing && (
+        <div className="sp-editor">
+          <div className="form-grid">
+            <div className="field">
+              <label className="field__label" htmlFor="sp-name">Name</label>
+              <input id="sp-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. House report format" maxLength={120} spellCheck={false} autoFocus />
+            </div>
+            <div className="field">
+              <span className="field__label">Mode</span>
+              <div className="sp-modes" role="radiogroup" aria-label="How the prompt is used">
+                {(['extend', 'replace'] as SystemPromptMode[]).map((m) => (
+                  <label key={m} className={cx('sp-mode', mode === m && 'active')}>
+                    <input type="radio" name="sp-mode" value={m} checked={mode === m} onChange={() => setMode(m)} />
+                    <span className="sp-mode__name">{m === 'extend' ? 'Extend the built-in prompt' : 'Replace the built-in prompt'}</span>
+                    <span className="sp-mode__desc">{MODE_HELP[m]}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div className="field">
+            <label className="field__label" htmlFor="sp-text">Prompt text</label>
+            <textarea id="sp-text" className="sp-textarea" value={text} onChange={(e) => setText(e.target.value)} rows={12} spellCheck={false}
+              placeholder={mode === 'extend'
+                ? 'Standing instructions, e.g. "Write findings in British English. Treat anything from 10.0.0.0/8 as internal. Every note ends with a confidence rating."'
+                : 'The whole system prompt. The built-in one is shown below for reference — copy what you need from it.'} />
+            <div className="field__hint">{text.length.toLocaleString()} / 40,000 characters. {mode === 'replace' && <span style={{ color: 'var(--warn)' }}>Replace mode drops the built-in guidance on the search DSL, aggregation tools and stopping rules — the assistant will only know what you tell it here.</span>}</div>
+          </div>
+        </div>
+      )}
+
+      <div className="advanced">
+        <button className="advanced__head" onClick={() => setShowBuiltin((v) => !v)} aria-expanded={showBuiltin}>
+          <Icon.Chevron className={cx('advanced__caret', showBuiltin && 'open')} />
+          Built-in prompt
+          <span className="field__hint" style={{ marginLeft: 8 }}>read-only · {list.data ? `${list.data.builtin.length.toLocaleString()} characters` : ''}</span>
+        </button>
+        {showBuiltin && (
+          <div className="advanced__body">
+            <pre className="sp-pre">{list.data?.builtin ?? ''}</pre>
+          </div>
+        )}
+      </div>
+
+      <ConfirmDialog open={!!confirmDel} title="Delete this system prompt?" danger busy={del.isPending}
+        text={confirmDel ? `"${confirmDel.name}" will be removed.${confirmDel.id === activeId ? ' It is the default — the assistant goes back to the built-in prompt.' : ''} Conversations already run on it are unaffected.` : ''}
+        confirmLabel="Delete" onConfirm={() => confirmDel && del.mutate(confirmDel)} onCancel={() => setConfirmDel(null)} />
     </Section>
   );
 }
@@ -943,6 +1118,7 @@ export function SettingsScreen() {
         <Appearance settings={s.data} />
         <Compute settings={s.data} />
         <AiAssistant settings={s.data} />
+        <SystemPrompts settings={s.data} />
         <McpServer settings={s.data} />
         <SecuritySection />
         <DataSection />

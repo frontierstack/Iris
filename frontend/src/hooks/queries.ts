@@ -6,6 +6,7 @@ import type { FieldFacetsQuery } from '../api/types';
 export const qk = {
   case: ['case'] as const,
   settings: ['settings'] as const,
+  aiSystemPrompts: ['ai', 'systemPrompts'] as const,
   compute: ['compute'] as const,
   timeline: ['timeline'] as const,
   timelineIocs: ['timeline-iocs'] as const,
