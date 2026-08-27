@@ -606,6 +606,8 @@ export interface UploadJob {
   target: 'case' | 'library';
   /** '' for a library job: staged bytes belong to no case by design */
   caseId: string;
+  /** a sentence about the job that is NOT a failure — e.g. a parse resumed from the staged copy after a restart */
+  note?: string;
   parser: string;
   confidence: number;
   events: number;

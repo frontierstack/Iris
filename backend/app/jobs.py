@@ -235,6 +235,10 @@ class Job:
     events: int = 0
     error: str = ""
     interrupted: bool = False      # the server died while this job was in flight
+    # A sentence about the job that is NOT a failure — today only "the server restarted while this
+    # file was parsing; it is being read again from the staged copy". `error` means the evidence did
+    # not reach the pool, and this must never be folded into it.
+    note: str = ""
     # Failed by the WATCHDOG, not by the parser. The distinction is what makes reviving safe: a byte, a
     # heartbeat or the ingest request itself brings a stale job back, while a job `finish()` failed stays
     # failed — that failure is a real report about evidence that did not reach the pool.
@@ -249,6 +253,7 @@ class Job:
             "state": self.state, "target": self.target, "caseId": self.caseId, "parser": self.parser,
             "confidence": round(self.confidence, 3), "events": self.events, "error": self.error,
             "interrupted": self.interrupted, "stale": self.stale, "sourceIds": list(self.sourceIds),
+            "note": self.note,
             # live parse progress, present only while state == 'parsing' (see ProgressTracker)
             "progress": progress,
             "createdAt": _iso(self.created_ts), "updatedAt": _iso(self.updated_ts),
@@ -310,6 +315,56 @@ def _pool_settled() -> bool:
         return False
 
 
+def _staged_library_files() -> dict[str, tuple[str, int]]:
+    """{staged name: (display name, size on disk)} for every file actually present in library/.
+
+    Read from DISK and the library index, never from the store: reconcile runs while the library may
+    still be loading in a background thread, and the whole point is to answer before it has.
+    """
+    out: dict[str, tuple[str, int]] = {}
+    try:
+        from . import config
+        idx: dict = {}
+        try:
+            import json
+            idx = json.loads(config.LIBRARY_INDEX.read_text(encoding="utf-8")) or {}
+        except Exception:
+            idx = {}
+        if not config.LIBRARY_DIR.is_dir():
+            return out
+        for p in config.LIBRARY_DIR.iterdir():
+            if not p.is_file() or p.name.startswith("."):
+                continue
+            meta = idx.get(p.name) if isinstance(idx, dict) else None
+            display = str((meta or {}).get("file") or "") if isinstance(meta, dict) else ""
+            out[p.name] = (display, p.stat().st_size)
+    except Exception:
+        return {}
+    return out
+
+
+def _staged_copy_for(job: "Job", staged: dict[str, tuple[str, int]]) -> Optional[str]:
+    """The staged library file this job was parsing, or None when no intact copy is on disk.
+
+    Matched by the DISPLAY name the index recorded (the upload's own file name, which is `job.file`),
+    and by size when the job knows it — a half-written spool is not a copy. A job that already knows
+    its source id is matched through that id instead, because the staged name determines it.
+    """
+    if job.target != "library":
+        return None
+    for name, (display, size) in staged.items():
+        if job.sourceIds and _library_sid(name) in job.sourceIds:
+            return name
+        if display and display == job.file and (not job.size or size == job.size):
+            return name
+    return None
+
+
+def _library_sid(staged_name: str) -> str:
+    from .store import Store
+    return Store.library_sid(staged_name)
+
+
 class JobRegistry:
     def __init__(self) -> None:
         self.lock = threading.RLock()
@@ -346,6 +401,7 @@ class JobRegistry:
                         parser=str(r.get("parser") or ""), confidence=float(r.get("confidence") or 0.0),
                         events=int(r.get("events") or 0), error=str(r.get("error") or ""),
                         interrupted=bool(r.get("interrupted")), stale=bool(r.get("stale")),
+                        note=str(r.get("note") or ""),
                         sourceIds=[str(s) for s in (r.get("sourceIds") or [])],
                         created_ts=float(r.get("created_ts") or time.time()),
                         updated_ts=float(r.get("updated_ts") or time.time()),
@@ -673,9 +729,18 @@ class JobRegistry:
                         # deleted the file before phase 2 landed. Nothing is in flight and nothing is
                         # in the workspace to report on, so the row has nothing left to say — it used
                         # to poll `parsing` until the next restart.
-                        job.state = "ready"
-                        job.events = 0
-                        job.error = ""
+                        if job.note and job.interrupted:
+                            # A parse RESUMED after a restart (reconcile) whose staged copy the library
+                            # load did not produce after all: that is a failure to report, not a
+                            # 0-event success.
+                            job.state = "error"
+                            job.error = ("the server restarted while this file was parsing and the "
+                                         "staged copy could not be read again - re-upload it")
+                            job.note = ""
+                        else:
+                            job.state = "ready"
+                            job.events = 0
+                            job.error = ""
                         self._touch(job)
                         changed = True
                         continue
@@ -757,21 +822,49 @@ class JobRegistry:
         self.sync()
         _, known = _store_snapshot()
         resuming = {sid for sid, row in known.items() if row[4] in ("raw", "queued", "enriching")}
+        staged = _staged_library_files()
         with self.lock:
             buried = 0
+            resumed = 0
             for job in self._jobs.values():
                 if job.state == "parsing" and any(s in resuming for s in job.sourceIds):
                     continue
-                if job.state in ACTIVE_STATES:
-                    was = "parsing" if job.state == "parsing" else "uploading"
-                    job.state = "error"
+                if job.state not in ACTIVE_STATES:
+                    continue
+                # A `parsing` job means the WHOLE file was on disk before the parse began — staging
+                # spools it, then `begin_parse`, then the index entry, then the parse. If the staged
+                # copy is still there, intact, the startup library load is about to read it again
+                # (`Store.restore_library` parses every staged file not yet in memory), under a source
+                # id DERIVED from the staged name. So the job is not dead work: it takes that id now,
+                # stays `parsing`, says why, and `sync()` settles it when the source lands. Telling
+                # the analyst to re-upload a file the server is re-reading at that moment was reported
+                # as exactly the wrong answer ("handle it more gracefully or continue the parsing").
+                name = _staged_copy_for(job, staged) if job.state == "parsing" else None
+                if name is not None:
                     job.interrupted = True
-                    job.error = (f"the server restarted while this file was still {was}"
-                                 " — re-upload it, or attach it again from the library")
+                    job.error = ""
+                    job.note = ("the server restarted while this file was parsing — it is being read "
+                                "again from the staged copy in the library; nothing to re-upload")
+                    if not job.sourceIds:
+                        job.sourceIds = [_library_sid(name)]
                     self._touch(job)
-                    buried += 1
-            if buried:
+                    resumed += 1
+                    continue
+                was = "parsing" if job.state == "parsing" else "uploading"
+                job.state = "error"
+                job.interrupted = True
+                job.error = (
+                    f"the server restarted while this file was still {was} and no staged copy of it "
+                    "was found — re-upload it, or attach it again from the library"
+                    if was == "parsing" else
+                    "the server restarted while this file was still uploading — the bytes never fully "
+                    "arrived, so drop it again")
+                self._touch(job)
+                buried += 1
+            if buried or resumed:
                 self._save_locked()
+            if resumed:
+                print(f"[iris] jobs: {resumed} interrupted parse(s) resume from the staged library copy", flush=True)
             return buried
 
     # ------------------------------------------------------------------- reads

@@ -583,6 +583,9 @@ function JobRow({ job, pct, localError }: { job: UploadJob; pct?: number; localE
     : stage ? stage.pct : 100;
   const label = failed ? (job.interrupted ? 'interrupted' : 'failed')
     : job.state === 'ready' ? (job.target === 'library' ? 'in library' : `${fmtInt(job.events)} events`)
+    // A parse the server picked up again after a restart: the staged copy is being re-read, and the
+    // row says so instead of asking for a re-upload (see jobs.reconcile).
+    : job.state === 'parsing' && job.interrupted ? (stage ? `${stage.label} · resumed` : 'resumed after restart')
     // name the PHASE: 'reading' is now visible from the first tick of a big file (the job adopts its
     // tracker row before it knows its source ids), and calling phase 2 'parsing' told the analyst the
     // file was still being read when it was already being interpreted.

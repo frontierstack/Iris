@@ -1059,7 +1059,8 @@ registry lock; parse threads and concurrent uploads write through the same lock)
 type JobState = 'queued'|'uploading'|'parsing'|'ready'|'error';
 interface UploadJob { id:string; file:string; size:number; received:number; state:JobState;
   target:'case'|'library'; caseId:string /*'' for a library job*/; parser:string; confidence:number; events:number;
-  error:string; interrupted:boolean /*killed by a server restart*/;
+  error:string; interrupted:boolean /*the server restarted while it was in flight*/;
+  note?:string /*a sentence that is NOT a failure: a parse resumed from the staged library copy after a restart*/;
   stale:boolean /*failed by the watchdog, not by the parser — a heartbeat or a byte revives it*/;
   sourceIds:string[];
   progress:ParseProgress|null /*live parse detail; non-null only while state === 'parsing'*/;
@@ -1122,7 +1123,10 @@ interface JobsResponse { jobs:UploadJob[] /*newest first*/; active:number; total
   the client, and a stream would have to poll the parse threads internally (they have no event loop to publish from).
   The Sources screen already polls `/api/case`; the jobs query polls at 1 s while anything is active, 20 s otherwise.
 - **Restart:** `jobs.REGISTRY.reconcile()` runs in `main.lifespan` AFTER the case is restored — jobs whose sources came
-  back complete resolve to `ready`, anything still queued/uploading/parsing becomes `error` with `interrupted:true`.
+  back complete resolve to `ready`. A `parsing` LIBRARY job whose staged copy is intact on disk is RESUMED, not failed:
+  it keeps `parsing` with `interrupted:true` and a `note`, takes the source id the staged name derives, and settles
+  through `sync()` when the startup library load lands that source. Anything still queued/uploading, or a parse with
+  no staged copy, becomes `error` with `interrupted:true` and a message that says which.
 - UI: the Ingest ("Sources") screen rebuilds its upload list from `GET /api/jobs` on mount, so a refresh mid-upload or
   mid-parse shows the real state and a second tab shows the same thing. Local XHR percentage is merged over the server
   record for the tab doing the sending; the pill says `uploading` vs `parsing` so the two phases are never conflated.
