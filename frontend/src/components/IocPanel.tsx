@@ -163,6 +163,9 @@ export function IocPanel({ scope = 'all', adding = false, onAddingDone }: { scop
   const [kind, setKind] = useState<string>('');
   const kinds = useMemo(() => [...new Set((q.data?.iocs ?? []).map((i) => i.kind))].sort(), [q.data]);
   const list = useMemo(() => (q.data?.iocs ?? []).filter((i) => !kind || i.kind === kind), [q.data, kind]);
+  const recorded = useMemo(() => list.filter((i) => i.addedBy !== 'extracted'), [list]);
+  const extracted = useMemo(() => list.filter((i) => i.addedBy === 'extracted'), [list]);
+  const [showExtracted, setShowExtracted] = useState(false);
 
   if (q.isError) return <ErrorState title="Could not load indicators" error={q.error} onRetry={() => void q.refetch()} />;
 
@@ -188,13 +191,37 @@ export function IocPanel({ scope = 'all', adding = false, onAddingDone }: { scop
           body="Indicators are extracted automatically from events that fired a detection rule — IPs, access keys, paths, user agents and destinations. You can also add your own above; Iris then searches the case for it and links every occurrence." />
       )}
 
-      {!!list.length && (
+      {/* RECORDED first — what the analyst or the assistant put on the case, each with its reason —
+          and the automatically EXTRACTED ones (every IP / path / key the extractor pulls out of the
+          case's events) under their own heading, closed by default. Mixed into one table the extracted
+          rows outnumbered the curated ones and read as indicators nobody had chosen. */}
+      {!!recorded.length && (
         <div className="table">
           <div className="table__head ioc-grid">
             <div>Kind</div><div>Indicator</div><div className="num">Seen</div><div>Log files</div><div>First seen</div><div />
           </div>
           {q.isFetching && !q.data && <SkeletonRows n={4} />}
-          {list.map((i) => <IocRow key={i.id || `${i.kind}:${i.value}`} ioc={i} />)}
+          {recorded.map((i) => <IocRow key={i.id || `${i.kind}:${i.value}`} ioc={i} />)}
+        </div>
+      )}
+      {!!extracted.length && (
+        <div className="ioc-extracted">
+          <button className="ioc-extracted__head" onClick={() => setShowExtracted((v) => !v)} aria-expanded={showExtracted}>
+            <span className="eyebrow">Extracted automatically</span>
+            <span className="ioc-extracted__hint">
+              {fmtInt(extracted.length)} value{extracted.length === 1 ? '' : 's'} the extractor pulled out of
+              {scope === 'case' ? ' the events on this case' : ' the workspace'} — not curated, no reason attached
+            </span>
+            <span className="btn btn--sm btn--ghost">{showExtracted ? 'Hide' : 'Show'}</span>
+          </button>
+          {showExtracted && (
+            <div className="table">
+              <div className="table__head ioc-grid">
+                <div>Kind</div><div>Indicator</div><div className="num">Seen</div><div>Log files</div><div>First seen</div><div />
+              </div>
+              {extracted.map((i) => <IocRow key={i.id || `${i.kind}:${i.value}`} ioc={i} />)}
+            </div>
+          )}
         </div>
       )}
     </div>

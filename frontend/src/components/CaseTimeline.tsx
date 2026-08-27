@@ -355,7 +355,7 @@ export function CaseTimeline({ sources }: { sources: Source[] }) {
   // a fade and their sentence revealed; the initial load paints at once. An ANNOTATION of an entry
   // already present is keyed separately (id + note) so a fresh sentence on an old row is revealed too.
   const arrivals = useArrivals(useMemo(
-    () => ordered.map((en) => `${en.eventId}\u0001${en.note ? 'n' : ''}`), [ordered]));
+    () => ordered.map((en) => `${en.eventId}\u0001${en.note ? 'n' : ''}`), [ordered]), caseSet.data !== undefined);
   /* What the sequence covers, stated once above it. Not a row of stat tiles — the case screen
      deliberately has none — just the two facts a chronology is asked for first: how long it spans, and
      how much of it the analyst has actually written up. */

@@ -29,24 +29,33 @@
  */
 import { useEffect, useReducer, useRef } from 'react';
 
-/** How long an arrival keeps its `arriving` state (the fade + the reveal, with margin). */
-export const ARRIVAL_MS = 1800;
-/** Target time for the typewriter to reveal a whole text, however long it is. */
-export const REVEAL_MS = 1100;
+/** How long an arrival keeps its `arriving` state (the fade, the reveal and the tint settling). */
+export const ARRIVAL_MS = 5200;
+/** The reveal is paced by LENGTH — about 520 characters a second reads as writing rather than as a
+ *  flicker (the first cut revealed 412 characters in 1.1 s and was reported as "they just appear") —
+ *  bounded so a one-liner still takes a readable moment and a long write-up never drags. */
+export const REVEAL_CHARS_PER_SEC = 520;
+export const REVEAL_MIN_MS = 1200;
+export const REVEAL_MAX_MS = 3500;
 
 function reducedMotion(): boolean {
   try { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; }
 }
 
-/** The ids in `ids` that arrived while this list was mounted, for ARRIVAL_MS after they did. */
-export function useArrivals(ids: readonly string[]): ReadonlySet<string> {
+/** The ids in `ids` that arrived while this list was mounted, for ARRIVAL_MS after they did.
+ *
+ *  `loaded` is whether the list's query has answered. The first render of a feed happens with the
+ *  query still in flight — no ids at all — and seeding "seen" from THAT made every note of the
+ *  initial load an arrival when the data landed a moment later. So nothing is seeded until the
+ *  first loaded render; before it there are no arrivals. */
+export function useArrivals(ids: readonly string[], loaded = true): ReadonlySet<string> {
   const seen = useRef<Set<string> | null>(null);
   const stamped = useRef<Map<string, number>>(new Map());
   const [, rerender] = useReducer((n: number) => n + 1, 0);
   const now = Date.now();
 
   if (seen.current === null) {
-    seen.current = new Set(ids);                      // first render: the initial load, no arrivals
+    if (loaded) seen.current = new Set(ids);          // first LOADED render: the initial load, no arrivals
   } else {
     for (const id of ids) {
       if (!seen.current.has(id)) {
@@ -78,7 +87,8 @@ export function useTypewriter(text: string, active: boolean): string {
   const [n, setN] = useReducer((_: number, v: number) => v, animate.current ? 0 : text.length);
   useEffect(() => {
     if (!animate.current) return;
-    const frames = Math.max(1, Math.round(REVEAL_MS / 16));
+    const ms = Math.min(REVEAL_MAX_MS, Math.max(REVEAL_MIN_MS, (text.length / REVEAL_CHARS_PER_SEC) * 1000));
+    const frames = Math.max(1, Math.round(ms / 16));
     const step = Math.max(1, Math.ceil(text.length / frames));
     let shown = 0;
     let raf = 0;

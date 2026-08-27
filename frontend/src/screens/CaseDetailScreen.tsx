@@ -196,7 +196,10 @@ export function CaseDetailScreen() {
               </button>
             } />
           {iocOpen && (<div className="sec-card__body">
-            <IocPanel adding={addingIoc} onAddingDone={() => setAddingIoc(false)} />
+            {/* scope="case" — the panel defaults to the WHOLE POOL, and under the heading "IOCs found in
+                this case" that listed every IP extracted from every log in the workspace: reported as
+                "these iocs are being populated every time and seem unrelated". They were unrelated. */}
+            <IocPanel scope="case" adding={addingIoc} onAddingDone={() => setAddingIoc(false)} />
           </div>)}
         </section>
       )}

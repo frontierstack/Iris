@@ -421,7 +421,7 @@ function newestFirst(notes: CaseNote[]): CaseNote[] {
 export function CaseNotesFeed({ caseId, pendingRefs = [], onPosted }: { caseId: string; pendingRefs?: NoteRef[]; onPosted?: () => void }) {
   const notes = useNotes(caseId);
   const list = useMemo(() => newestFirst(notes.data ?? []), [notes.data]);
-  const arrivals = useArrivals(useMemo(() => list.map((n) => n.id), [list]));
+  const arrivals = useArrivals(useMemo(() => list.map((n) => n.id), [list]), notes.data !== undefined);
   return (
     <div className="notes">
       {/* The composer leads the feed because the feed is newest-first: what you post appears in the
