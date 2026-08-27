@@ -1246,6 +1246,12 @@ type AiRunEvent =
 - `DELETE /api/ai/runs/{id}` → `{ok:true, runId}` (404 unknown) — delete ONE conversation. The case artefacts it
    created are untouched; `/undo` is the tool for those. `DELETE /api/ai/runs` → `{ok:true, removed:number}` clears
    the whole history.
+- `GET  /api/ai/live` → SSE (`text/event-stream`), one stream for the WHOLE workspace, kept open for the app's
+  lifetime: `{type:'hello',subscribers}` on connect, then `{type:'run',runId,caseId}` when an investigation starts,
+  `{type:'write',runId,action:AiAction}` for every write it lands, `{type:'done',runId,state,writes}` when it ends,
+  `{type:'undo',runId,undone}` after an undo; a `: keepalive` comment every 15 s while idle. It carries ids and the
+  action, never data — the SPA turns each event into a TanStack Query invalidation so the case screens refetch
+  what they show (`hooks/useLiveWorkspace.ts`). No history: a subscriber sees what happens after it connects.
 - `POST /api/ai/runs/{id}/undo` → `{ok:true, undone:number, actions:AiAction[]}` — reverse every write of that run,
    newest first. Idempotent; already-undone actions are skipped. Creating a CASE is deliberately not undone —
    deleting a case is not an operation this path may perform. The `undone` flags are persisted, so a refresh does

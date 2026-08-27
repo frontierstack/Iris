@@ -802,7 +802,10 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
 
   /** Anything the agent touched invalidates the screens that render it. */
   const refreshWorkspace = useCallback(() => {
-    for (const key of [['case'], ['iocs'], ['timeline'], ['timeline-iocs'], ['graph'], ['case-set'], ['notes'], ['events']]) {
+    // `case-detail` and `cases` were missing here, so the case screen's own query (header, counts,
+    // the graph section) never refetched on a write. The live bus (hooks/useLiveWorkspace.ts) now
+    // does this for every tab; this stays as the immediate path for the tab holding the stream.
+    for (const key of [['case'], ['cases'], ['case-detail'], ['iocs'], ['timeline'], ['timeline-iocs'], ['graph'], ['case-set'], ['notes'], ['events']]) {
       void qc.invalidateQueries({ queryKey: key });
     }
   }, [qc]);

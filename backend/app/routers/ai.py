@@ -27,6 +27,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from ..ai import live as ai_live
 from ..ai import runs as ai_runs
 from ..ai.agents import analyze_stream
 from ..ai.client import LLMClient
@@ -111,6 +112,12 @@ async def investigate_stream(body: InvestigateBody) -> StreamingResponse:
                     queue.put_nowait(item)
                 except asyncio.QueueFull:
                     pass   # nobody is reading fast enough; the persisted transcript still has it
+                # The LIVE BUS (ai/live.py): a write, the start and the end go to every open screen,
+                # not only to the tab holding this stream. This is the one place every run event
+                # passes through, so it is the one place the workspace is told it changed.
+                live_ev = ai_live.event_for(run_id, item)
+                if live_ev is not None:
+                    ai_live.publish(live_ev)
         finally:
             for _ in range(3):
                 try:
@@ -300,9 +307,26 @@ def undo_run(run_id: str) -> dict:
     half of that bargain: one call takes the whole run back off the case.
     """
     try:
-        return ai_runs.undo_run(run_id)
+        out = ai_runs.undo_run(run_id)
     except KeyError:
         raise HTTPException(404, "no such run")
+    # An undo changes the case exactly as a write does; every screen showing it must refetch.
+    ai_live.publish({"type": "undo", "runId": run_id, "undone": int(out.get("undone") or 0)})
+    return out
+
+
+@router.get("/live")
+async def live_stream() -> StreamingResponse:
+    """Server-sent events for the WHOLE workspace: a run starting, every write it lands, its end, an undo.
+
+    The SPA opens one of these for its lifetime and turns each event into a query invalidation, so a
+    case being built by the assistant updates on screen as it is built — in every tab, with the panel
+    open or closed. It carries ids and the action, never the transcript: the data itself is fetched
+    through the same endpoints the screens already use. See ai/live.py.
+    """
+    return StreamingResponse(ai_live.stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                                      "Connection": "keep-alive"})
 
 
 @router.post("/test")

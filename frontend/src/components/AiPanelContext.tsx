@@ -15,6 +15,7 @@
  */
 import { Suspense, createContext, lazy, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
 import type { AiScope } from '../api/types';
+import { useLiveWorkspace } from '../hooks/useLiveWorkspace';
 
 const AiPanel = lazy(() => import('./AiPanel').then((m) => ({ default: m.AiPanel })));
 
@@ -33,6 +34,14 @@ export function useAiPanel(): AiCtx {
   return c;
 }
 
+/** The live-workspace listener (hooks/useLiveWorkspace.ts) as a component, so the provider's own
+ *  render stays hook-free of it and it mounts exactly once, for the app's lifetime — a run outlives
+ *  the panel, and the screens must keep updating after the panel is closed. */
+function LiveWorkspace() {
+  useLiveWorkspace();
+  return null;
+}
+
 export function AiPanelProvider({ children }: { children: ReactNode }) {
   const [target, setTarget] = useState<AiTarget | null>(null);
   const open = useCallback((t: AiTarget) => setTarget(t), []);
@@ -40,6 +49,7 @@ export function AiPanelProvider({ children }: { children: ReactNode }) {
   const value = useMemo(() => ({ open, close, isOpen: target !== null }), [open, close, target]);
   return (
     <Ctx.Provider value={value}>
+      <LiveWorkspace />
       {children}
       {target && (
         <Suspense fallback={null}>
