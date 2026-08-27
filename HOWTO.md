@@ -51,7 +51,7 @@ anyway — these scripts print progress you are meant to read.
 
 ```powershell
 .\start.ps1                      # Docker: bring the whole app up (the GPU image if one was built)
-.\start.ps1 -Mode local          # no Docker: build frontend/dist if missing, run uvicorn on this machine
+.\start.ps1 -Mode local          # no Docker: rebuild frontend/dist if stale, run uvicorn on this machine
 .\start.ps1 -Mode stop           # stop the container
 .\start.ps1 -Mode restart        # stop, then start
 .\start.ps1 -Mode logs           # follow the container logs (Ctrl+C to exit)
@@ -75,12 +75,12 @@ anyway — these scripts print progress you are meant to read.
 | PowerShell | bash | Meaning |
 |---|---|---|
 | `-Mode docker` (default) | `docker` (default) | Start the container. |
-| `-Mode local` | `local` | No Docker: builds `frontend/dist` if missing, then runs uvicorn on the host. |
+| `-Mode local` | `local` | No Docker: rebuilds `frontend/dist` when the tree is newer than it, then runs uvicorn on the host. |
 | `-Mode stop` | `stop` | Stop the container. |
 | `-Mode restart` | `restart` | Stop, then start. |
 | `-Mode logs` | `logs` | Follow container logs. |
 | `-Mode status` | `status` | Up/down, pool size, whether it is still loading. |
-| `-Build` | `--build`, `-b` | Rebuild the image first. Otherwise it builds only when no `iris:*` image exists. |
+| `-Build` | `--build`, `-b` | Rebuild the image first. Otherwise it builds when no `iris:*` image exists, or when a source file is newer than the image. |
 | `-NoBrowser` | `--no-browser`, `-n` | Don't open the browser. |
 | `-Port <n>` | `--port=<n>`, `$IRIS_PORT` | Port to serve/probe. |
 | `-SkipWslCheck` | *(n/a — Windows only)* | Skip the `.wslconfig` drift check. |
@@ -95,6 +95,27 @@ says which and why).
 Starting is not instant on a large library: the API answers in seconds, but parsing a few hundred MB of logs back
 into the pool takes minutes, and the entity graph is restored from cache or rebuilt after that. The spinner says
 which of those is happening.
+
+### It never serves a build the tree has moved past
+
+A fix that is deployed but not *served* looks exactly like a fix that does not work, and this has cost several
+rounds of "it still looks the same" on changes that were correct. So the launcher checks, on every start, that what
+it is about to serve matches what is in the tree:
+
+| Mode | Checked against | If the tree is newer |
+|---|---|---|
+| `local` | `frontend/dist/index.html` vs `frontend/src`, `index.html`, `package.json`, `package-lock.json`, `vite.config.ts`, `tsconfig.json` | Runs `npm run build` first, naming the file that changed. |
+| `local` | `package-lock.json` vs `node_modules` | Runs `npm ci --ignore-scripts` before the build. |
+| `local` | `backend/requirements.txt` vs `.venv` | Warns and names `setup.* local` — it does not install behind your back. |
+| `docker` | the image's build time vs the SPA sources, `backend/app`, the requirements files, `Dockerfile`, the compose files | Rebuilds the image, then recreates the container on it. |
+
+Step `[2] Checking the UI bundle` / `Checking the image against the tree` prints either `is current` or the first
+file that changed. Nothing is skipped silently: if `npm` is missing, or the image's build time cannot be read, it
+says so and names the remedy (`--build` / `-Build`) rather than starting on a stale build without comment.
+
+`local` mode also refuses to start when something is **already serving Iris on that port**. Without that check
+uvicorn fails to bind while the health probe succeeds against the *old* process — so the browser opens onto the
+previous build and the launcher looks like it worked. Stop the other one, or pass `--port=` / `-Port`.
 
 ## `setup.*` — first run
 
@@ -118,6 +139,13 @@ which of those is happening.
 ./setup.sh --yes | -y      # install anything missing without asking
 ./setup.sh --no-install    # never install; report what is missing and stop
 ```
+
+### Setup always builds fresh
+
+`setup.*` is the *first-run and after-an-update* script, so it never reuses a previous build: it exports a fresh
+`WEB_REBUILD` (which busts the SPA layer of the image — see below) and brings the container up with
+`--force-recreate`, so a container that was already running cannot stay on its old image. `local` mode rebuilds
+`frontend/dist` unconditionally.
 
 ### Missing dependencies are installed, not reported
 
@@ -250,6 +278,19 @@ docker compose down -v                                                         #
 Build args: `BASE_IMAGE`, `WITH_GPU`, `GPU_REQUIREMENTS`, `GPU_TORCH_INDEX` — the GPU overlay fills them from
 `IRIS_GPU_BASE_IMAGE`, `IRIS_GPU_REQUIREMENTS` and `IRIS_GPU_TORCH_INDEX`, which the setup scripts export after
 reading your driver.
+
+**If you build by hand, set `WEB_REBUILD` yourself:**
+
+```bash
+WEB_REBUILD=$(date +%s) docker compose up -d --build --force-recreate
+```
+
+`WEB_REBUILD` is a build arg placed immediately before the frontend `COPY` in the Dockerfile, and its compose
+default is the constant `now`. A constant means BuildKit may reuse the cached SPA layer — it has reported
+`COPY frontend/ ./  CACHED` for a context that had genuinely changed — and the image then ships a frontend from an
+earlier build while the build output says it succeeded. `--force-recreate` is the other half: plain `up -d` leaves
+a *running* container on its old image, so a freshly built one is tagged and never served. `start.*` and `setup.*`
+pass both for you.
 
 ---
 
@@ -612,12 +653,22 @@ Full contract: `docs/API_CONTRACT.md`.
   (its source was deleted, or the file has not finished parsing). The entry itself is never discarded: it
   keeps your labels and note, and it re-points itself at the line as soon as that line is back, even if the
   event id changed.
-- **The app updated but the screen looks the same** — your browser is holding the old page. Hard-refresh
-  once: **Ctrl+Shift+R** (Windows/Linux) or **Cmd+Shift+R** (macOS). Iris now serves `index.html` with
-  `Cache-Control: no-store` and its hashed assets as immutable, so this should only ever be needed once,
-  for a copy your browser cached before that header existed. To check what the server is actually
-  sending: `curl -s -D- -o /dev/null http://127.0.0.1:8000/ | grep -i cache` (use `-D-`, not `-I` — the
-  page route answers HEAD with 405).
+- **The app updated but the screen looks the same** — four caches sit between an edit and what you see, and
+  the launcher now closes three of them for you. Check them in this order:
+  1. **The build.** `start.*` compares the tree against `frontend/dist` (local) or against the image's build
+     time (docker) and rebuilds when yours is newer, naming the file that changed. If step `[2]` said
+     `is current` and you still expect a change, your edit is not in one of the paths it watches — force it:
+     `./start.sh --build` / `.\start.ps1 -Build`.
+  2. **The container.** Both scripts pass `--force-recreate`, so a running container cannot stay on its old
+     image. A hand-run `docker compose up -d` does not — see *Plain `docker compose`* above.
+  3. **A second Iris.** `local` mode refuses to start when something already serves that port, because
+     otherwise you end up reading the old instance. Docker mode cannot detect that — check `docker ps`.
+  4. **Your browser**, the one thing no script can reach. Hard-refresh once: **Ctrl+Shift+R**
+     (Windows/Linux) or **Cmd+Shift+R** (macOS). Iris serves `index.html` with `Cache-Control: no-store`
+     and its hashed assets as immutable, so this should only ever be needed for a copy cached before that
+     header existed. To see what the server actually sends:
+     `curl -s -D- -o /dev/null http://127.0.0.1:8000/ | grep -i cache` (use `-D-`, not `-I` — the page route
+     answers HEAD with 405).
 - **The app is slow right after starting** — it is re-parsing the library into the pool, and the entity graph is
   restored or rebuilt after that. `./start.sh status` (or the Sources page) says how many files are left. Derived
   builds are deliberately paused until the load finishes.

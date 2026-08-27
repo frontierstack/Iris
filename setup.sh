@@ -625,7 +625,33 @@ fi
 # ── 6. Build & run ────────────────────────────────────────────────────────────
 [[ -f .env ]] || cp .env.example .env
 if [[ $USE_GPU == 1 ]]; then log "Building & starting (CUDA)..."; else log "Building & starting (CPU)..."; fi
-$COMPOSE "${FILES[@]}" up -d --build || die "compose up failed"
-log "Iris is up -> http://localhost:8000   (Settings > Compute shows the active backend)"
+# WEB_REBUILD and --force-recreate are the two halves of "setup serves what is in the tree RIGHT NOW",
+# and both have shipped an old app before (CLAUDE.md, "Deploying: FOUR caches"). Without WEB_REBUILD
+# the arg falls back to the compose default, which is the CONSTANT `now` - so BuildKit reuses the SPA
+# layer and the image ships a frontend from an earlier build. Without --force-recreate a RUNNING
+# container stays on its old image, and the one just built is never served.
+export WEB_REBUILD="$(date +%s)"
+
+# $COMPOSE may be `sudo docker compose`, and sudo RESETS the environment (env_reset is the default),
+# so an exported variable never reaches the compose process that has to interpolate it. That silently
+# costs WEB_REBUILD its whole point, and it costs the GPU picks above theirs: a CUDA 11-only host would
+# fall back to the CUDA 12 defaults after this script went and read the driver to avoid exactly that.
+# `sudo VAR=value cmd` passes them through explicitly.
+compose_run() {
+  local names=(WEB_REBUILD IRIS_GPU_BASE_IMAGE IRIS_GPU_REQUIREMENTS IRIS_GPU_TORCH_INDEX)
+  local assign=() n
+  for n in "${names[@]}"; do [[ -n "${!n:-}" ]] && assign+=("$n=${!n}"); done
+  if [[ "$COMPOSE" == sudo\ * ]]; then
+    # shellcheck disable=SC2086
+    sudo "${assign[@]}" ${COMPOSE#sudo } "$@"
+  else
+    # shellcheck disable=SC2086
+    env "${assign[@]}" $COMPOSE "$@"
+  fi
+}
+compose_run "${FILES[@]}" up -d --build --force-recreate || die "compose up failed"
+# NOT `localhost`: it resolves to ::1 first, nothing is published there, and the connection hangs
+# until it times out rather than being refused - measured 2,084 ms against 5 ms for 127.0.0.1.
+log "Iris is up -> http://127.0.0.1:8000   (Settings > Compute shows the active backend)"
 [[ "$ENV_KIND" == "wsl" ]] && log "The same URL works from Windows browsers."
 exit 0

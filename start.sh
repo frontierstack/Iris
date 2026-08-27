@@ -174,6 +174,43 @@ if skipped:
   echo
 }
 
+# ── freshness: never serve what the tree has already moved past ──────────────
+# CLAUDE.md, "Deploying: FOUR caches": a fix lands, the launcher reports success, and the analyst runs
+# the OLD app. Layer 4 is this one — `frontend/dist` is only as fresh as the last `npm run build`, and
+# rebuilding it only when it is MISSING means every edit after the first is invisible in local mode.
+# A UI fix missing from the bundle is indistinguishable from a UI fix that does not work.
+existing() {   # echo only the paths that are actually there — `find` errors on a missing operand
+  local p out=''
+  for p in "$@"; do [ -e "$p" ] && out="$out $p"; done
+  printf '%s' "$out"
+}
+WEB_SRC="frontend/src frontend/index.html frontend/package.json frontend/package-lock.json frontend/vite.config.ts frontend/tsconfig.json"
+# The whole build context, for the image: the SPA plus the API and everything the image installs.
+IMG_SRC="$WEB_SRC backend/app backend/requirements.txt backend/requirements-gpu.txt Dockerfile docker-compose.yml docker-compose.gpu.yml"
+
+newer_than() {   # newer_than <reference> <paths…> — prints the first path newer than the reference
+  local ref="$1"; shift
+  local srcs; srcs=$(existing "$@")
+  [ -n "$srcs" ] || return 0
+  # shellcheck disable=SC2086
+  find $srcs -newer "$ref" -print -quit 2>/dev/null
+}
+
+# A file whose mtime IS the image's creation instant, so `find -newer` can be used against it. `.Created`
+# is UTC and `touch -t` reads its argument in LOCAL time, so TZ=UTC is load-bearing: without it the
+# reference is wrong by the machine's offset and the comparison silently flips either way.
+image_ref() {
+  local created ts tmp d r
+  created=$(docker image inspect -f '{{.Created}}' "$1" 2>/dev/null) || return 1
+  d=${created%%T*}; d=${d//-/}                    # 2026-08-25T07:22:00.12Z -> 20260825
+  r=${created#*T}; r=${r%%.*}; r=${r%Z}; r=${r//:/}   # -> 072200
+  [ ${#d} = 8 ] && [ ${#r} = 6 ] || return 1
+  ts="${d}${r:0:4}.${r:4:2}"
+  tmp=$(mktemp 2>/dev/null) || return 1
+  TZ=UTC touch -t "$ts" "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  printf '%s' "$tmp"
+}
+
 open_app() {
   [ "$OPEN" = "1" ] || return 0
   if   command -v xdg-open     >/dev/null 2>&1; then xdg-open "$URL" >/dev/null 2>&1 &
@@ -198,16 +235,52 @@ if [ "$MODE" = "local" ]; then
   fi
   [ -n "$PY" ] || die "python not found. Install Python 3.11+ or run ./setup.sh local"
   ok "$("$PY" --version 2>&1)"
-  if [ ! -f frontend/dist/index.html ]; then
-    step "Building the UI (frontend/dist is missing)"
-    if command -v npm >/dev/null 2>&1; then
-      ( cd frontend && { [ -d node_modules ] || npm ci --ignore-scripts; } && npm run build ) || die "frontend build failed"
-      ok "frontend built"
-    else
-      warn "npm not found - only the API at $URL/api will respond"
-    fi
+  # The backend deps live in the venv and setup.sh owns installing them - but a requirements change
+  # since it was built must not be SILENT, or the app dies on ModuleNotFoundError for a package the
+  # tree says it needs.
+  if [ -x .venv/bin/python ] && [ backend/requirements.txt -nt .venv/bin/python ]; then
+    warn "backend/requirements.txt changed since .venv was built - run ./setup.sh local to install it"
   fi
+
+  # THE UI IS REBUILT WHENEVER THE TREE IS NEWER THAN THE BUNDLE, not only when the bundle is absent.
+  # Rebuilding only on absence is what made every edit after the first invisible here: the API is new,
+  # the launcher says "OK", and the browser is handed the SPA from the last build.
+  step "Checking the UI bundle"
+  WEB_REASON=''
+  if [ ! -f frontend/dist/index.html ]; then
+    WEB_REASON='frontend/dist is missing'
+  else
+    WEB_NEWER=$(newer_than frontend/dist/index.html $WEB_SRC)
+    [ -n "$WEB_NEWER" ] && WEB_REASON="$WEB_NEWER changed since the last build"
+  fi
+  if [ -z "$WEB_REASON" ]; then
+    ok "frontend/dist is current"
+  elif command -v npm >/dev/null 2>&1; then
+    step "Building the UI ($WEB_REASON)"
+    t0=$(date +%s)
+    # npm ci again when the LOCKFILE moved: a build against dependencies the tree no longer declares
+    # fails in ways that read as a code bug.
+    (
+      cd frontend || exit 1
+      if [ ! -d node_modules ] || [ package-lock.json -nt node_modules ]; then
+        npm ci --ignore-scripts || exit 1
+      fi
+      npm run build
+    ) || die "frontend build failed"
+    ok "frontend built ($(( $(date +%s) - t0 ))s)"
+  else
+    warn "npm not found - cannot rebuild the UI ($WEB_REASON); the browser will be served the OLD app"
+  fi
+
   [ -f .env ] || { [ -f .env.example ] && cp .env.example .env; }
+
+  # The OTHER way this hands back a stale app: an Iris already holding the port. uvicorn would fail to
+  # bind, while the health wait below would succeed against THAT process and open the browser onto it -
+  # a dead script and an old UI, which reads as "the fix did nothing".
+  if healthy; then
+    die "something is already serving Iris on $URL - stop it first (./start.sh stop for the container, or Ctrl-C the other terminal) or start this one elsewhere: ./start.sh local --port=8001"
+  fi
+
   step "Starting Iris (uvicorn) on port $PORT"
   info "Ctrl-C stops it"
   if [ "$OPEN" = "1" ]; then ( spin "waiting for the API" 300 healthy >/dev/null && open_app ) & fi
@@ -255,16 +328,38 @@ esac
 
 [ -f .env ] || { [ -f .env.example ] && cp .env.example .env; }
 
+# Resolved here rather than inside the build branch: the freshness check below needs it too.
+IMAGE_TAG="iris:cpu"; [ "$GPU_IMAGE" = "1" ] && IMAGE_TAG="iris:cuda"
+
 if [ "$BUILD" = "0" ] && ! docker image inspect iris:cpu >/dev/null 2>&1 && ! docker image inspect iris:cuda >/dev/null 2>&1; then
   info "no Iris image yet - building it (first run, several minutes)"
   BUILD=1
+fi
+
+# Sources newer than the image the container is about to run means the analyst would be served code
+# this tree has already moved past - the same stale-deploy failure as the local `dist`, one layer up.
+# `up -d --force-recreate` recreates the container on the OLD image; only a build replaces the code.
+if [ "$BUILD" = "0" ]; then
+  step "Checking the image against the tree"
+  REF=$(image_ref "$IMAGE_TAG")
+  if [ -z "$REF" ]; then
+    warn "could not read when $IMAGE_TAG was built - if a change of yours is missing, re-run with --build"
+  else
+    IMG_NEWER=$(newer_than "$REF" $IMG_SRC)
+    rm -f "$REF"
+    if [ -n "$IMG_NEWER" ]; then
+      info "$IMG_NEWER changed since $IMAGE_TAG was built - rebuilding so the container serves it"
+      BUILD=1
+    else
+      ok "$IMAGE_TAG is current"
+    fi
+  fi
 fi
 
 if [ "$BUILD" = "1" ]; then
   step "Building the image"
   # Remember what this build is about to replace, so the old image can be removed by ID afterwards.
   # Every rebuild leaves a 5.5 GB untagged layer set behind; a day of them is tens of gigabytes.
-  IMAGE_TAG=$([ "$GPU_IMAGE" = "1" ] && echo "iris:cuda" || echo "iris:cpu")
   PREV_IMAGE="$(docker image inspect -f '{{.Id}}' "$IMAGE_TAG" 2>/dev/null || true)"
   [ "$GPU_IMAGE" = "1" ] && info "CUDA image (iris:cuda)" || info "CPU image (iris:cpu)"
   info "the frontend build and the Python wheels are the slow parts; output follows"

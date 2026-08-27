@@ -201,6 +201,44 @@ function Check-Wsl {
   } catch { }
 }
 
+# ── freshness: never serve what the tree has already moved past ──────────────────
+# CLAUDE.md, "Deploying: FOUR caches": a fix lands, the launcher reports success, and the analyst runs
+# the OLD app. Layer 4 is `frontend/dist`, which is only as fresh as the last `npm run build` -
+# rebuilding it only when it is MISSING makes every edit after the first invisible in local mode.
+$WebSources = @(
+  'frontend/src', 'frontend/index.html', 'frontend/package.json',
+  'frontend/package-lock.json', 'frontend/vite.config.ts', 'frontend/tsconfig.json'
+)
+# The whole build context, for the image: the SPA plus the API and everything the image installs.
+$ImageSources = $WebSources + @(
+  'backend/app', 'backend/requirements.txt', 'backend/requirements-gpu.txt',
+  'Dockerfile', 'docker-compose.yml', 'docker-compose.gpu.yml'
+)
+
+# The first source modified after $Since, or $null. UTC throughout: LastWriteTime is local and the
+# image's creation time is not, so comparing the two raw is wrong by the machine's offset.
+function Newer-Than([datetime]$Since, [string[]]$Paths) {
+  foreach ($path in $Paths) {
+    if (-not (Test-Path $path)) { continue }
+    $item = Get-Item $path -Force
+    if ($item.PSIsContainer) {
+      $hit = Get-ChildItem $path -Recurse -File -Force -ErrorAction SilentlyContinue |
+             Where-Object { $_.LastWriteTimeUtc -gt $Since } | Select-Object -First 1
+      if ($hit) { return (Resolve-Path -Relative $hit.FullName) }
+    } elseif ($item.LastWriteTimeUtc -gt $Since) {
+      return $path
+    }
+  }
+  return $null
+}
+
+# When the named image was built, as UTC, or $null when that cannot be read.
+function Image-BuiltUtc([string]$Tag) {
+  $created = (& docker image inspect -f '{{.Created}}' $Tag 2>$null | Select-Object -First 1)
+  if ($LASTEXITCODE -ne 0 -or -not $created) { return $null }
+  try { return ([datetime]::Parse($created)).ToUniversalTime() } catch { return $null }
+}
+
 # ── local (no Docker) ────────────────────────────────────────────────────────
 if ($Mode -eq 'local') {
   Step "Checking Python"
@@ -219,19 +257,61 @@ if ($Mode -eq 'local') {
   if (-not $pyExe) { Die "python not found on PATH. Install Python 3.11+ or run .\setup.ps1 -Mode local" }
   Ok ((& $pyExe --version) 2>&1)
 
-  if (-not (Test-Path 'frontend/dist/index.html')) {
-    Step "Building the UI (frontend/dist is missing)"
-    if (Get-Command npm -ErrorAction SilentlyContinue) {
-      Push-Location frontend
-      if (-not (Test-Path 'node_modules')) { & npm ci --ignore-scripts }
-      & npm run build
-      Pop-Location
-      Ok "frontend built"
-    } else {
-      Warn "npm not found - only the API at $Url/api will respond"
+  # The backend deps live in the venv and setup.ps1 owns installing them - but a requirements change
+  # since it was built must not be SILENT, or the app dies on ModuleNotFoundError for a package the
+  # tree says it needs.
+  if ((Test-Path $venvPy) -and (Test-Path 'backend/requirements.txt')) {
+    if ((Get-Item 'backend/requirements.txt').LastWriteTimeUtc -gt (Get-Item $venvPy).LastWriteTimeUtc) {
+      Warn "backend/requirements.txt changed since .venv was built - run .\setup.ps1 -Mode local to install it"
     }
   }
+
+  # THE UI IS REBUILT WHENEVER THE TREE IS NEWER THAN THE BUNDLE, not only when the bundle is absent.
+  # Rebuilding only on absence is what made every edit after the first invisible here: the API is new,
+  # the launcher says "OK", and the browser is handed the SPA from the last build.
+  Step "Checking the UI bundle"
+  $webReason = $null
+  if (-not (Test-Path 'frontend/dist/index.html')) {
+    $webReason = 'frontend/dist is missing'
+  } else {
+    $built = (Get-Item 'frontend/dist/index.html').LastWriteTimeUtc
+    $newer = Newer-Than $built $WebSources
+    if ($newer) { $webReason = "$newer changed since the last build" }
+  }
+  if (-not $webReason) {
+    Ok "frontend/dist is current"
+  } elseif (Get-Command npm -ErrorAction SilentlyContinue) {
+    Step "Building the UI ($webReason)"
+    $t0 = Get-Date
+    Push-Location frontend
+    # npm ci again when the LOCKFILE moved: a build against dependencies the tree no longer declares
+    # fails in ways that read as a code bug.
+    $needCi = -not (Test-Path 'node_modules')
+    if (-not $needCi -and (Test-Path 'package-lock.json')) {
+      $needCi = (Get-Item 'package-lock.json').LastWriteTimeUtc -gt (Get-Item 'node_modules').LastWriteTimeUtc
+    }
+    # $built tracks each step explicitly: $LASTEXITCODE carries over from whatever ran last, so testing
+    # it when `npm ci` was SKIPPED would read some earlier command's status and skip the build itself.
+    $built = $true
+    if ($needCi) { & npm ci --ignore-scripts; $built = ($LASTEXITCODE -eq 0) }
+    if ($built) { & npm run build; $built = ($LASTEXITCODE -eq 0) }
+    Pop-Location
+    if (-not $built) { Die "frontend build failed" }
+    Ok "frontend built" ((Get-Date) - $t0).TotalSeconds
+  } else {
+    Warn "npm not found - cannot rebuild the UI ($webReason); the browser will be served the OLD app"
+  }
+
   if (-not (Test-Path .env) -and (Test-Path .env.example)) { Copy-Item .env.example .env }
+
+  # The OTHER way this hands back a stale app: an Iris already holding the port. uvicorn would fail to
+  # bind, while the health wait below would succeed against THAT process and open the browser onto it -
+  # a dead script and an old UI, which reads as "the fix did nothing".
+  try {
+    if ((Invoke-RestMethod -Uri "$Url/api/health" -TimeoutSec 2).ok) {
+      Die "something is already serving Iris on $Url - stop it first (.\start.ps1 -Mode stop for the container, or Ctrl-C the other terminal) or start this one elsewhere: .\start.ps1 -Mode local -Port 8001"
+    }
+  } catch { }
 
   Step "Starting Iris (uvicorn) on port $Port"
   Info "Ctrl-C stops it"
@@ -298,19 +378,40 @@ Check-Wsl
 
 if (-not (Test-Path .env) -and (Test-Path .env.example)) { Copy-Item .env.example .env }
 
-# Build only when asked, or when no image exists yet (a first run straight from a clone).
+# Build when asked, when no image exists yet (a first run straight from a clone), or when the tree has
+# moved past the image.
 $needBuild = [bool]$Build
+# Resolved here rather than inside the build branch: the freshness check below needs it too.
+$imageTag = if ($gpuImage) { 'iris:cuda' } else { 'iris:cpu' }
 if (-not $needBuild) {
   & docker image inspect iris:cpu *> $null; $cpu = ($LASTEXITCODE -eq 0)
   & docker image inspect iris:cuda *> $null; $cuda = ($LASTEXITCODE -eq 0)
   if (-not ($cpu -or $cuda)) { $needBuild = $true; Info "no Iris image yet - building it (first run, several minutes)" }
 }
 
+# Sources newer than the image the container is about to run means the analyst would be served code
+# this tree has already moved past - the same stale-deploy failure as the local `dist`, one layer up.
+# `up -d --force-recreate` recreates the container on the OLD image; only a build replaces the code.
+if (-not $needBuild) {
+  Step "Checking the image against the tree"
+  $builtUtc = Image-BuiltUtc $imageTag
+  if (-not $builtUtc) {
+    Warn "could not read when $imageTag was built - if a change of yours is missing, re-run with -Build"
+  } else {
+    $newer = Newer-Than $builtUtc $ImageSources
+    if ($newer) {
+      Info "$newer changed since $imageTag was built - rebuilding so the container serves it"
+      $needBuild = $true
+    } else {
+      Ok "$imageTag is current"
+    }
+  }
+}
+
 if ($needBuild) {
   Step "Building the image"
   # What this build is about to replace, so the old image can be removed by ID once the new one is
   # actually running. Every rebuild leaves a 5.5 GB untagged layer set behind.
-  $imageTag = if ($gpuImage) { 'iris:cuda' } else { 'iris:cpu' }
   $prevImage = (docker image inspect -f '{{.Id}}' $imageTag 2>$null)
   if ($gpuImage) { Info "CUDA image (iris:cuda)" } else { Info "CPU image (iris:cpu)" }
   Info "the frontend build and the Python wheels are the slow parts; output follows"

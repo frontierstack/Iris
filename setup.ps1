@@ -577,6 +577,14 @@ if ((Test-Path $wslHelper) -and (Get-Command wsl -ErrorAction SilentlyContinue))
 # ── Build & run ──────────────────────────────────────────────────────────────
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 if ($useGpu) { Log "Building & starting (CUDA)..." } else { Log "Building & starting (CPU)..." }
-Compose ($files + @('up','-d','--build'))
+# WEB_REBUILD and --force-recreate are the two halves of "setup serves what is in the tree RIGHT NOW",
+# and both have shipped an old app before (CLAUDE.md, "Deploying: FOUR caches"). Without WEB_REBUILD
+# the arg falls back to the compose default, which is the CONSTANT `now` - so BuildKit reuses the SPA
+# layer and the image ships a frontend from an earlier build. Without --force-recreate a RUNNING
+# container stays on its old image, and the one just built is never served.
+$env:WEB_REBUILD = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString()
+Compose ($files + @('up','-d','--build','--force-recreate'))
 if ($LASTEXITCODE -ne 0) { Die "compose up failed" }
-Log "Iris is up -> http://localhost:8000   (Settings > Compute shows the active backend)"
+# NOT `localhost`: it resolves to ::1 first, nothing is published there, and the connection hangs
+# until it times out rather than being refused - measured 2,084 ms against 5 ms for 127.0.0.1.
+Log "Iris is up -> http://127.0.0.1:8000   (Settings > Compute shows the active backend)"
