@@ -1678,8 +1678,12 @@ def _remove_events_from_case(args: dict[str, Any], ctx: RunContext) -> dict[str,
       "event ids abort the call.",
       {"kind": {"type": "string", "description": "ipv4, domain, url, file-path, file-hash, email, user-agent, aws-access-key, dst-endpoint, other"},
        "value": {"type": "string", "description": "the indicator itself, verbatim"},
-       "note": {"type": "string", "description": "why it is an indicator — one sentence"},
+       "note": {"type": "string", "description": "WHY it is an indicator — one specific sentence: what it was "
+                "seen doing, to what, when, in which log (e.g. 'Destination of 41 denied direct-IP requests "
+                "from 10.0.0.100 on 16 Aug 2026, Sophos Web Proxy.csv'). Shown on the indicator row; required"},
        "citedEventIds": {"type": "array", "items": {"type": "string"}, "description": "the events this indicator was observed in"}},
+      # `note` is enforced in the HANDLER, after the citation check, not by the schema: the schema
+      # check runs first, and a fabricated event id must stay the refusal the model hears first.
       ["kind", "value", "citedEventIds"], writes=True)
 def _add_ioc(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
     from ..routers.iocs import _all_iocs, _ioc_id
@@ -1689,9 +1693,18 @@ def _add_ioc(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
     if not value:
         raise ToolError("value is required")
     kind = (_s(args.get("kind"), 60).strip().lower() or "other")
+    # WHY is required. An indicator with no note is a bare value on the case — reported as "not much
+    # reference as to why those iocs were added" — and the analyst cannot act on, or stand behind, a
+    # value nobody explained. Refused rather than accepted empty, so the model supplies it now.
     # The note is where a model that forgets the parameter usually writes the ids ("seen in `l6e2…`").
     cited = _cited(args, _s(args.get("note"), 600), f"the indicator {value!r}",
                    "an indicator is only actionable if the analyst can open the log line it came from")
+    # Checked AFTER the citations: a fabricated event id is the graver refusal and must stay the one
+    # the model hears first.
+    if not _s(args.get("note"), 600).strip():
+        raise ToolError(f"note is required for the indicator {value!r}: one specific sentence saying what "
+                        "it was seen doing, to what, when, and in which log. It is shown on the indicator "
+                        "row — an indicator with no reason is a value the analyst cannot act on.")
     iid = _ioc_id(kind, value)
     store = _store()
     with store.lock:

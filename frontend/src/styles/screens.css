@@ -3010,6 +3010,9 @@ mark.hl {
   margin-bottom: 6px;
   line-height: 1.5;
 }
+/* The row's value cell carries WHY under the value: one dimmed, ellipsised line. */
+.ioc__id { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.ioc__why { font-size: var(--fs-xs); color: var(--muted-2); line-height: 1.4; }
 /* built-in rule: the regexes it matches with */
 .rule-logic__patterns { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
 .rule-logic__pat { display: flex; gap: 8px; align-items: baseline; }

@@ -46,7 +46,13 @@ function IocRow({ ioc }: { ioc: Ioc }) {
           )}
           {ioc.addedBy === 'analyst' && <span className="badge badge--ok" style={{ marginLeft: 4 }} title="Added by hand">manual</span>}
         </div>
-        <div className="cell-mono cell-bright ellipsis" title={ioc.note || ioc.value}>{ioc.value}</div>
+        <div className="ioc__id" title={ioc.note || ioc.value}>
+          <div className="cell-mono cell-bright ellipsis">{ioc.value}</div>
+          {/* WHY it is an indicator, on the row itself. It was only in the expanded detail, so the list
+              read as bare values with nothing saying what each had been seen doing — "not much
+              reference as to why those iocs were added". One ellipsised line; the detail has the rest. */}
+          {ioc.note && <div className="ioc__why ellipsis">{ioc.note}</div>}
+        </div>
         <div className="cell-mono num">{fmtInt(ioc.count)}</div>
         <div className="ioc__files ellipsis" title={ioc.files.join(', ')}>
           {ioc.files.slice(0, 2).map((f) => <span key={f} className="tag">{f}</span>)}
