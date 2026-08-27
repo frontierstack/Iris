@@ -650,6 +650,12 @@ function Turn({ run, entries, live, undoing, onUndo }: {
   const ranFor = run.endedAt ? spanOf(run.startedAt, run.endedAt) : '';
 
   const nodes = useMemo(() => trailNodes(trailBlocks), [trailBlocks]);
+  // The COMMENTARY: the one-line narration the assistant writes before each call ("Profiling X first
+  // - one call gives me..."). Live, it is read in place. Finished, it used to survive only inside the
+  // collapsed trail, and the analyst who opened the panel after the run reported the commentary as
+  // gone. It is its own quiet block now - the prose that is NOT part of the report, in order.
+  const commentary = useMemo(
+    () => trailBlocks.filter((b): b is Extract<Block, { kind: 'prose' }> => b.kind === 'prose'), [trailBlocks]);
 
   // LIVE: the calls are ONE trail, at the bottom, not a trail per model turn interleaved with the
   // prose. Threading tool cards through the answer meant the thing being read moved down the page
@@ -687,6 +693,12 @@ function Turn({ run, entries, live, undoing, onUndo }: {
               : 'This run produced no report.'}
           </div>
         )}
+      {!!commentary.length && answer && (
+        <section className="chat-commentary" aria-label="Commentary">
+          <div className="chat-commentary__head eyebrow">Commentary</div>
+          {commentary.map((b) => <Markdown key={b.key} className="md chat-md chat-commentary__line" text={b.text} />)}
+        </section>
+      )}
       <Changes actions={run.actions} busy={undoing} onUndo={() => onUndo(run.id)} />
       <ActivityTrail nodes={nodes} live={false} title="How it got there" startOpen={!answer} />
       {run.transcriptTruncated && (

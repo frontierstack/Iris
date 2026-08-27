@@ -3316,6 +3316,15 @@ mark.hl {
    rows rather than a chronology — and a curated timeline is the thing the analyst reads most slowly. */
 .tl__body { padding: 0 8px 0 0; min-width: 0; }
 .tl__item { transition: background 90ms linear; }
+/* An entry that ARRIVED while the timeline was on screen (the assistant building it): a short fade
+   and lift, once, with its sentence revealed by hooks/useArrivals.ts. Reduced motion collapses it to
+   the 0.01 ms base.css imposes. Not a pulse, not a glow — the row settles and stays. */
+@keyframes iris-arrive {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: none; }
+}
+.tl__item--arriving { animation: iris-arrive .42s ease-out both; }
+.note--arriving { animation: iris-arrive .42s ease-out both; }
 .tl__item:hover { background: var(--hover); }
 .tl__row {
   display: flex;

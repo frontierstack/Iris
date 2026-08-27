@@ -30,6 +30,7 @@ import { api } from '../api/client';
 import type { CaseSetEntry, Event, Source } from '../api/types';
 import { useAddToCase, useCaseSet, useRemoveFromCase } from '../hooks/queries';
 import { useToast } from '../hooks/useToast';
+import { useArrivals, useTypewriter } from '../hooks/useArrivals';
 import { cx, fmtClock, fmtDay, fmtInt, fmtTs, humanizeStamps, sevVar } from '../utils/format';
 import { inlineMd, renderMarkdown, unescapeBreaks } from '../utils/markdown';
 import { LabelEditor } from './CaseSet';
@@ -144,6 +145,23 @@ function noteLine(note: string): string {
   // The same stamp repair the renderer applies, and with the same exception: text between backticks
   // is a quoted value and keeps the form the log gave it.
   return bare.split('`').map((seg, i) => (i % 2 === 0 ? humanizeStamps(seg) : seg)).join('`');
+}
+
+/** The row's sentence. Its own component because an ARRIVING row (the assistant just annotated
+ *  it while the timeline was on screen) is revealed as if being written — hooks/useArrivals.ts —
+ *  and a hook has to live in a component, not in a `.map`. */
+function RowSaid({ said, summary, arriving, id }: { said: string; summary: string; arriving: boolean; id: string }) {
+  const shown = useTypewriter(said, arriving);
+  return (
+    <span className={cx('tl__title', !said && 'tl__title--log')} title={said || undefined}>
+      {said && <Icon.Note className="tl__noteglyph" aria-hidden />}
+      {/* The analyst's sentence is MARKUP: inline code, emphasis and the data marks
+          (`proseRun`) render on the row itself, so an address or a file name reads as
+          one at a glance instead of vanishing into the line. The log fallback stays
+          a plain string — those are the log's words, shown as the log wrote them. */}
+      {said ? inlineMd(shown, `tl-${id}`) : summary}
+    </span>
+  );
 }
 
 /** Everything behind one entry, revealed by clicking the row.
@@ -333,6 +351,11 @@ export function CaseTimeline({ sources }: { sources: Source[] }) {
     return [...stamped.reverse(), ...blank];
   }, [chronological, newestFirst, byId]);
   const inSet = useMemo(() => new Set(ordered.map((e) => e.eventId)), [ordered]);
+  // Entries that landed while the timeline was on screen — the assistant building it — arrive with
+  // a fade and their sentence revealed; the initial load paints at once. An ANNOTATION of an entry
+  // already present is keyed separately (id + note) so a fresh sentence on an old row is revealed too.
+  const arrivals = useArrivals(useMemo(
+    () => ordered.map((en) => `${en.eventId}\u0001${en.note ? 'n' : ''}`), [ordered]));
   /* What the sequence covers, stated once above it. Not a row of stat tiles — the case screen
      deliberately has none — just the two facts a chronology is asked for first: how long it spans, and
      how much of it the analyst has actually written up. */
@@ -432,7 +455,7 @@ export function CaseTimeline({ sources }: { sources: Source[] }) {
                 <span className="tl__day-rule" />
               </li>
             )}
-            <li className={cx('tl__item', open && 'tl__item--open')}>
+            <li className={cx('tl__item', open && 'tl__item--open', arrivals.has(`${en.eventId}\u0001${en.note ? 'n' : ''}`) && 'tl__item--arriving')}>
               <div className="tl__rail" aria-hidden><span className={cx('tl__dot', e && `tl__dot--${e.sev}`)} /></div>
               <div className="tl__body">
                 <div className="tl__row">
@@ -451,14 +474,7 @@ export function CaseTimeline({ sources }: { sources: Source[] }) {
                     {gap && <span className="tl__gap" title="how long after the entry just before it in time">{gap}</span>}
                     {e && <SevTag sev={e.sev} />}
                     {en.labels.map((l) => <span key={l} className="tag tag--label">{l}</span>)}
-                    <span className={cx('tl__title', !said && 'tl__title--log')} title={said || undefined}>
-                      {said && <Icon.Note className="tl__noteglyph" aria-hidden />}
-                      {/* The analyst's sentence is MARKUP: inline code, emphasis and the data marks
-                          (`proseRun`) render on the row itself, so an address or a file name reads as
-                          one at a glance instead of vanishing into the line. The log fallback stays
-                          a plain string — those are the log's words, shown as the log wrote them. */}
-                      {said ? inlineMd(said, `tl-${en.eventId}`) : summary}
-                    </span>
+                    <RowSaid said={said} summary={summary} arriving={arrivals.has(`${en.eventId}\u0001${en.note ? 'n' : ''}`)} id={en.eventId} />
                     {/* The FILE, not the parser. `source` is what the line was parsed AS (nginx,
                         delimited, jsonl) and several files share one; a timeline entry has to name the
                         log it came from, because that is what the analyst opens and what a report

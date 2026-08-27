@@ -6,6 +6,7 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import type { CaseNote, NoteRef } from '../api/types';
 import { qk, useNotes } from '../hooks/queries';
+import { useArrivals, useTypewriter } from '../hooks/useArrivals';
 import { useToast } from '../hooks/useToast';
 import { cx, fmtRelative, fmtTs, initials } from '../utils/format';
 import { renderMarkdown } from '../utils/markdown';
@@ -314,8 +315,11 @@ function Composer({ caseId, pending, onPosted }: { caseId: string; pending: Note
   );
 }
 
-function NoteRow({ caseId, note }: { caseId: string; note: CaseNote }) {
+function NoteRow({ caseId, note, arriving = false }: { caseId: string; note: CaseNote; arriving?: boolean }) {
   const qc = useQueryClient();
+  // A note that ARRIVED while the feed was on screen (the assistant just wrote it) fades in and is
+  // revealed as if being written; the initial load and an edit paint at once. hooks/useArrivals.ts.
+  const shown = useTypewriter(note.text, arriving);
   const toast = useToast();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(note.text);
@@ -339,7 +343,7 @@ function NoteRow({ caseId, note }: { caseId: string; note: CaseNote }) {
   });
 
   return (
-    <div className="note">
+    <div className={cx('note', arriving && 'note--arriving')}>
       <div className="note__avatar" aria-hidden>{initials(note.author) || '—'}</div>
       <div className="note__body">
         <div className="note__head">
@@ -374,7 +378,7 @@ function NoteRow({ caseId, note }: { caseId: string; note: CaseNote }) {
             </div>
           </div>
         ) : (
-          <div className="note__text md">{renderMarkdown(note.text)}</div>
+          <div className="note__text md">{renderMarkdown(shown)}</div>
         )}
         <RefChips refs={note.refs} />
       </div>
@@ -417,6 +421,7 @@ function newestFirst(notes: CaseNote[]): CaseNote[] {
 export function CaseNotesFeed({ caseId, pendingRefs = [], onPosted }: { caseId: string; pendingRefs?: NoteRef[]; onPosted?: () => void }) {
   const notes = useNotes(caseId);
   const list = useMemo(() => newestFirst(notes.data ?? []), [notes.data]);
+  const arrivals = useArrivals(useMemo(() => list.map((n) => n.id), [list]));
   return (
     <div className="notes">
       {/* The composer leads the feed because the feed is newest-first: what you post appears in the
@@ -428,7 +433,7 @@ export function CaseNotesFeed({ caseId, pendingRefs = [], onPosted }: { caseId: 
           body="Post what you find as you go — each entry is timestamped, editable, takes markdown and screenshots, and can link back to the events behind it. The newest entry stays at the top." />
       )}
       <div className="notes__feed">
-        {list.map((n) => <NoteRow key={n.id} caseId={caseId} note={n} />)}
+        {list.map((n) => <NoteRow key={n.id} caseId={caseId} note={n} arriving={arrivals.has(n.id)} />)}
       </div>
     </div>
   );

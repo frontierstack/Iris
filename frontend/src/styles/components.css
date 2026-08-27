@@ -1757,6 +1757,17 @@
 }
 .chat-warn svg { flex: 0 0 auto; margin-top: 2px; }
 .chat-note { font-size: var(--fs-xs); color: var(--muted); }
+/* The commentary of a FINISHED run: the narration lines, in order, quieter than the report they led
+   to but on the page rather than folded into the trail. A rail on the left binds the lines into one
+   block; each line keeps its own paragraph so the sequence is still legible. */
+.chat-commentary {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px 0 8px 12px;
+  border-left: 2px solid var(--border);
+}
+.chat-commentary__head { margin-bottom: 2px; }
+.chat-commentary__line { font-size: var(--fs-sm); color: var(--text-3); }
+.chat-commentary__line .md-p { margin: 0; }
 
 /* ── the answer: what they actually asked for, and it looks like it ── */
 /* Real padding, and a rule under the label rather than a gap: the report is the longest thing on this
