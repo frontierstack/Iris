@@ -1573,7 +1573,18 @@
    There are no "step 1 / step 2 …" labels: the sequence is carried by the rail, one card per call in
    order, with a break in the rail where one model turn ended and the next began.
    Every colour is a theme variable; nothing here is hardcoded. No glow, no pulse, no emoji. */
-.chat { display: flex; flex-direction: column; gap: 20px; }
+/* THE CONVERSATION IS A CENTRED COLUMN, not a left-hugging one.
+   Docked, the panel is 524px of content and this max-width never engages — nothing gets narrower on
+   the shell with the least room. Detached and dragged wide, the answer used to sit against the left
+   edge with half the window empty beside it; the whole column (objective, answer, changes, trail)
+   centres together, because centring the prose alone would leave it floating out of line with the
+   card its own heading sits on. `--chat-col` is shared with the composer so the pinned box below
+   stays on the same axis as the text above it. */
+:root { --chat-col: 880px; }
+.chat {
+  display: flex; flex-direction: column; gap: 20px;
+  width: 100%; max-width: var(--chat-col); margin-inline: auto;
+}
 
 /* ── the analyst's objective: a quoted card, not styled like the answer ── */
 .chat-objective {
@@ -1616,10 +1627,15 @@
    professional look". Three things were doing the squeezing and all three are fixed here: the type
    was one step below what a report deserves, the leading and the paragraph gap were set for a UI
    label rather than for prose, and the answer block had 12px of padding, so the text ran almost to
-   the panel's own edge. 70ch stays the measure — at --fs-2xl that is ~500px, still inside the 524px
-   the docked panel gives it, so nothing gets NARROWER on the shell that has the least room. */
+   the panel's own edge.
+   The measure is 78ch — asked for as "widen the response a little bit". At --fs-2xl that is ~560px,
+   which is ABOVE what the docked 524px panel can give it, so there the block simply fills its column
+   and nothing is narrower than before; detached, the report gets the extra line length. It is centred
+   in its own block for the same reason the column is: on a wide window a 560px measure pinned left
+   inside a full-width answer card reads as a mistake rather than as a measure. */
 .chat-md {
-  max-width: 70ch;
+  max-width: 78ch;
+  margin-inline: auto;
   font-size: var(--fs-2xl);
   line-height: 1.72;
   color: var(--text-2, var(--text));
@@ -1641,65 +1657,6 @@
 .chat-md .md-pre { max-width: 100%; overflow-x: auto; margin: 0 0 13px; }
 .chat-md .md-tablewrap { max-width: 100%; overflow-x: auto; margin: 0 0 13px; }
 .chat-md .md-table { min-width: 0; }
-
-/* ── two columns, but only past RAIL_MIN_CONTENT (AiPanel.tsx) ──
-   Left: what the assistant SAID and what it changed. Right: what it DID. The rail is sticky inside
-   the panel's own scroller and scrolls itself, so it stays beside a long answer; `min-width: 0` on
-   the main column is load-bearing, or a wide table inside it would push the grid instead of
-   scrolling in its own block. */
-.chat-split {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 264px;
-  gap: 22px;
-  align-items: start;
-  min-width: 0;
-}
-.chat-split__main { min-width: 0; }
-/* with a whole column to itself the report can take a wider measure than the docked panel allows */
-.chat-split__main .chat-md { max-width: 78ch; }
-
-.trail-rail {
-  position: sticky;
-  top: 0;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--panel-inset);
-  /* set from the measured scroll body (AiPanel useContentBox); the fallback keeps it sane
-     if the observer never fires, e.g. a browser with no ResizeObserver */
-  max-height: var(--rail-max-h, 60vh);
-  overflow: hidden;
-}
-.trail-rail__head {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border-2);
-}
-.trail-rail__title {
-  font-size: var(--fs-xxs); letter-spacing: .09em; text-transform: uppercase; font-weight: 600;
-  color: var(--text-3);
-}
-.trail-rail__counts { font-size: var(--fs-xxs); color: var(--muted); }
-.trail-rail__body {
-  flex: 1 1 auto;
-  overflow-y: auto;
-  overflow-x: hidden;
-  display: flex; flex-direction: column; gap: 6px;
-  padding: 10px 10px 10px 18px;
-  position: relative;
-}
-/* the same hairline rail the one-column trail hangs its cards off */
-.trail-rail__body::before {
-  content: ''; position: absolute; left: 9px; top: 14px; bottom: 14px;
-  width: 1px; background: var(--border);
-}
-.trail-rail__empty { font-size: var(--fs-xs); color: var(--muted); padding: 2px 0; }
-/* status notes during a live two-column run — see the comment in Turn's live branch */
-.chat-notes { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.chat-notes:empty { display: none; }
 
 /* No typing caret. A blinking `|` was the one animated ornament left in the panel and the analyst
    asked for it gone; liveness is carried by the existing spinner and the "running" state chip, which
@@ -1751,24 +1708,6 @@
 }
 .tcall--write { border-left-color: var(--accent); background: var(--accent-bg); }
 .tcall--bad { border-left-color: var(--bad); }
-/* in the rail the card is a NAV ROW first: the head is the control, the arguments open under it */
-.tcall--rail { padding: 5px 8px; gap: 4px; }
-.tcall__head--btn {
-  display: flex; align-items: center; gap: 7px; width: 100%; min-width: 0;
-  background: none; border: 0; padding: 0; margin: 0; cursor: pointer; text-align: left;
-  color: inherit; font: inherit;
-}
-.tcall__head--btn:hover .tcall__name { color: var(--accent-hover); }
-.tcall__head--btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-xs); }
-.tcall__chev {
-  flex: 0 0 auto; width: 11px; height: 11px; color: var(--muted-3, var(--muted));
-  transform: rotate(-90deg); transition: transform var(--t-fast);
-}
-.tcall__chev--open { transform: rotate(0deg); }
-.tcall--rail .tcall__ms { margin-left: 0; }
-.tcall--rail .tcall__head--btn .tcall__ms { margin-left: auto; }
-.tcall--rail .tcall__result { font-size: var(--fs-xxs); }
-.tcall--rail .tcall__arg dd { font-size: var(--fs-xxs); }
 /* the model's own sentence about WHY it is making this call, folded into the card it explains */
 .tcall__lead {
   font-size: var(--fs-base); line-height: 1.5; color: var(--text-2); min-width: 0;
@@ -1895,6 +1834,7 @@
       Sticky, auto-growing, and the ONLY home of Stop. ── */
 .chat-composer {
   display: flex; flex-direction: column;
+  width: 100%; max-width: var(--chat-col); margin-inline: auto;
   background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius-lg);
   transition: border-color var(--t-fast), box-shadow var(--t-fast);
 }

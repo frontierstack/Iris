@@ -992,6 +992,19 @@ async def investigate(store: Any, objective: str, run_id: str,
             messages.append(final_msg)
 
             calls = final_msg.get("tool_calls") or []
+            # NARRATION THAT NEVER STREAMED. The transcript's prose comes only from `text` deltas, and a
+            # provider is perfectly entitled to return the turn's content in the assembled message and
+            # stream no deltas at all — the wrap-up turn below already guards exactly that case, with
+            # the note explaining why. The main loop did not, so on such a provider every line the model
+            # wrote ALONGSIDE its tool calls was dropped on the floor and the run read as a column of
+            # silent calls. Back-filled only when the deltas carried nothing, so a streaming provider is
+            # untouched, and before the tool entries of this turn are appended, so it keeps its place in
+            # front of the calls it is about.
+            if calls and not buf:
+                said = str(final_msg.get("content") or "").strip()
+                if said:
+                    HISTORY.append_text(run_id, said)
+                    yield {"type": "delta", "text": said, "step": step}
             if not calls:
                 answer = final_msg.get("content") or "".join(buf)
                 # THE CASE IS THE POINT. A run that investigated and wrote nothing down leaves the

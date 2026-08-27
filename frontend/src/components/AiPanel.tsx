@@ -28,7 +28,6 @@
  * `AiTranscriptEntry[]`, so there is one renderer, not two.
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { api } from '../api/client';
@@ -45,10 +44,26 @@ import { Icon } from './icons';
 import type { AiTarget } from './AiPanelContext';
 
 const POLL_MS = 900;
-// How often streamed prose is committed to state. Tokens arrive faster than anything can be read and
-// each commit costs a re-render, a markdown parse and a scroll — batching them is what makes the
-// report appear smoothly instead of stuttering. Low enough to still read as typing.
-const STREAM_FLUSH_MS = 90;
+/**
+ * HOW STREAMED PROSE REACHES THE SCREEN.
+ *
+ * Tokens do not arrive evenly: a provider sends them in bursts, and the gaps between bursts are the
+ * model thinking, the network, or Iris running a tool. Committing each burst as it lands — which a
+ * fixed 90 ms timer effectively did — reproduces that shape exactly, so the report appeared as lumps
+ * of a paragraph separated by stalls. That is what "very jumpy" is: the cadence of the wire, painted.
+ *
+ * So arrival is decoupled from painting. Deltas go into a buffer, and one requestAnimationFrame loop
+ * drains a SLICE of it per frame, sized by how far behind the screen is (`elapsed / SMOOTH_MS` of what
+ * is waiting). A burst therefore plays out over a few frames instead of landing at once, a trickle
+ * still moves every frame, and the buffer can never fall further behind than that time constant —
+ * it is a smoothing filter, not a queue. Painting is on the frame clock, which is the only clock the
+ * screen actually has.
+ *
+ * A frame is only affordable because the transcript around the growing paragraph does not re-render:
+ * `Markdown`, `ToolCall` and `ActivityTrail` are all memoised, so a commit re-parses the one block
+ * that changed. Take those memos away and this rate becomes a stutter of a different kind.
+ */
+const STREAM_SMOOTH_MS = 130;
 
 /**
  * DOCKED OR DETACHED, and the choice is remembered.
@@ -64,84 +79,6 @@ const STREAM_FLUSH_MS = 90;
  */
 const AI_DETACHED_KEY = 'iris.ai.detached';
 const SP_KEY = 'iris.ai.systemPrompt';   // the composer's system-prompt choice; absent = the settings default
-
-/**
- * TWO COLUMNS, BUT ONLY WHEN THERE IS ROOM FOR TWO.
- *
- * The analyst asked for two things that pull in opposite directions: the answer prose is "a little
- * squeezed", and the tool calls want "a mini side nav window". In the DOCKED shell — a 560px
- * slide-over, ~524px of content — a side rail would take a third of the only column the report has,
- * and make the squeeze worse. Detached, the window is whatever width they dragged it to, and at
- * 1100px the answer sits at its 70ch measure with half the window empty beside it, which is exactly
- * where the calls belong.
- *
- * So the split is conditional on the MEASURED content width, not on which shell is in use: a
- * ResizeObserver on the scroll body, and the rail appears the moment the window is dragged past the
- * threshold. The number is the sum of its parts rather than a guess — the reading column wants about
- * 540px (70ch at --fs-2xl plus slack), the rail is 264px, the gap is 22px. Below that the panel is
- * exactly what it is today: one column, the calls in a collapsible trail underneath.
- *
- * The invariant this must not break is CLAUDE.md's: ONE set of controls and ONE body, only the frame
- * swapped. This is one body in two layouts — every tool call is still drawn by the single `ToolCall`,
- * so neither layout can ever draw a write as a read.
- */
-const RAIL_MIN_CONTENT = 826;   /* 540 reading column + 264 rail + 22 gap */
-
-/**
- * ONE-TIME: widen a remembered detached window that predates the Activity rail.
- *
- * The rail needs RAIL_MIN_CONTENT of content width. The old default was 620px of WINDOW, which is
- * below it, so anyone who had already detached the panel carried a geometry in which the rail can
- * never appear — they would have been told a feature exists and never seen it, and "drag the window
- * wider first" is not a discoverable instruction.
- *
- * Runs once, keyed by its own flag, and only ever widens: a window the analyst deliberately made
- * narrow AFTER this shipped keeps its size, because the flag is already set by then. Height, x and y
- * are untouched. Everything is in try/catch — a private window with no localStorage still works, it
- * just gets the default box.
- */
-function widenForRailOnce(): void {
-  const FLAG = 'iris.ai.railWidth.v1';
-  try {
-    if (localStorage.getItem(FLAG)) return;
-    localStorage.setItem(FLAG, '1');
-    const raw = localStorage.getItem('iris.win.ai');
-    if (!raw) return;
-    const box = JSON.parse(raw) as { x: number; y: number; w: number; h: number };
-    if (typeof box?.w !== 'number' || box.w >= RAIL_MIN_CONTENT + 40) return;
-    const w = Math.min(1040, Math.max(box.w, window.innerWidth - 160));
-    if (w <= box.w) return;
-    localStorage.setItem('iris.win.ai', JSON.stringify({ ...box, w }));
-  } catch { /* no storage: the default box applies, which is already wide enough */ }
-}
-
-widenForRailOnce();
-
-/**
- * The element's own content box, live. Zero until it is mounted and measured.
- *
- * The HEIGHT is measured for the same reason as the width: the rail is `position: sticky` inside this
- * scroller and has to be told how tall it may be, and no CSS length names "the visible height of my
- * scroll container" — `100vh` is the WINDOW, which is far too tall for a detached panel and cuts the
- * bottom of the rail off below the composer, out of reach of its own scrollbar.
- */
-function useContentBox(el: HTMLElement | null): { w: number; h: number } {
-  const [box, setBox] = useState({ w: 0, h: 0 });
-  useEffect(() => {
-    if (!el) { setBox({ w: 0, h: 0 }); return; }
-    const read = (w: number, h: number) =>
-      setBox((prev) => (prev.w === w && prev.h === h ? prev : { w, h }));
-    if (typeof ResizeObserver === 'undefined') { read(el.clientWidth, el.clientHeight); return; }
-    const ro = new ResizeObserver((rows) => {
-      const r = rows[0]?.contentRect;
-      if (r) read(Math.round(r.width), Math.round(r.height));
-    });
-    ro.observe(el);
-    read(el.clientWidth, el.clientHeight);
-    return () => ro.disconnect();
-  }, [el]);
-  return box;
-}
 
 /**
  * Which tools change the case. The PERSISTED transcript carries `writes` on every tool entry, but the
@@ -293,14 +230,7 @@ type TrailNode =
   | { k: 'note'; key: number; text: string; turn: boolean }
   | { k: 'prose'; key: number; text: string; turn: boolean };
 
-/**
- * `fold` claims the narration sentence directly ahead of a call as that card's lead line — see the
- * comment inside. It is TRUE in the one-column layout, where the card and the sentence sit in the same
- * reading order, and FALSE in the two-column one, where the calls move into the rail and the narration
- * is the whole point of the chat column: folding it there would empty the column the analyst asked to
- * be "the agents response area showing what it's looking at and doing".
- */
-function trailNodes(blocks: Block[], fold = true): TrailNode[] {
+function trailNodes(blocks: Block[]): TrailNode[] {
   const out: TrailNode[] = [];
   let turn = false;
   for (const b of blocks) {
@@ -324,7 +254,7 @@ function trailNodes(blocks: Block[], fold = true): TrailNode[] {
       // that follows a result stays where it is, because there it is the conclusion drawn from it.
       const prev = out[out.length - 1];
       let lead = '';
-      if (fold && prev && prev.k === 'prose' && !turn) { lead = prev.text; out.pop(); }
+      if (prev && prev.k === 'prose' && !turn) { lead = prev.text; out.pop(); }
       out.push({ k: 'tool', key: e.seq, e, turn: lead ? prev!.turn : turn, lead });
       turn = false;
     }
@@ -409,46 +339,26 @@ function toolIcon(name: string): typeof Icon.Doc {
  * long run read as alternating noise; the arguments are a labelled list and the outcome is a row of
  * its own with a glyph, so "what was asked" and "what came back" are readable at a glance.
  */
-function ToolCall({ e, live, lead = '', rail = false }: {
-  e: AiTranscriptEntry; live: boolean; lead?: string;
-  /** the narrow column of the two-column layout: arguments start closed, the head opens them */
-  rail?: boolean;
-}) {
+const ToolCall = memo(function ToolCall({ e, live, lead = '' }: { e: AiTranscriptEntry; live: boolean; lead?: string }) {
   const [open, setOpen] = useState(false);
   const rows = argRows(e.args ?? {});
-  const shown = rail ? (open ? rows : []) : (open ? rows : rows.slice(0, ARGS_SHOWN));
+  const shown = open ? rows : rows.slice(0, ARGS_SHOWN);
   const hidden = rows.length - shown.length;
   const Glyph = toolIcon(e.name);
   const bad = e.ok === false;
-  // ONE definition of the head, whichever layout draws it. The `write` tag and the accent rail both
-  // read `e.writes` here and nowhere else, so the two layouts cannot disagree about what a write is.
-  const head = (
-    <>
-      <Glyph className="tcall__glyph" />
-      <span className="tcall__name mono">{e.name}</span>
-      {e.writes && <span className="tcall__kind" title="this tool changed the case">write</span>}
-      {e.ok === null && live && <span className="spinner" style={{ width: 9, height: 9, borderWidth: 1.5 }} />}
-      {e.ok === null && !live && <span className="tcall__unknown" title="the run ended before this call reported back">—</span>}
-      {!!e.tookMs && <span className="tcall__ms">{e.tookMs} ms</span>}
-    </>
-  );
   return (
-    <div className={cx('tcall', rail && 'tcall--rail', e.writes && 'tcall--write', bad && 'tcall--bad')}>
+    <div className={cx('tcall', e.writes && 'tcall--write', bad && 'tcall--bad')}>
       {!!lead.trim() && <Markdown className="md chat-md tcall__lead" text={lead} />}
-      {rail && rows.length ? (
-        <button
-          type="button"
-          className="tcall__head tcall__head--btn"
-          aria-expanded={open}
-          title={open ? 'Hide the arguments' : 'Show the arguments'}
-          onClick={() => setOpen((v) => !v)}
-        >
-          {head}
-          <Icon.Chevron className={cx('tcall__chev', open && 'tcall__chev--open')} />
-        </button>
-      ) : (
-        <div className="tcall__head">{head}</div>
-      )}
+      {/* There is ONE card and ONE head, so `e.writes` is read here and nowhere else — the rule that
+          stops one layout drawing a write as a read. Keep it that way if a variant is ever added. */}
+      <div className="tcall__head">
+        <Glyph className="tcall__glyph" />
+        <span className="tcall__name mono">{e.name}</span>
+        {e.writes && <span className="tcall__kind" title="this tool changed the case">write</span>}
+        {e.ok === null && live && <span className="spinner" style={{ width: 9, height: 9, borderWidth: 1.5 }} />}
+        {e.ok === null && !live && <span className="tcall__unknown" title="the run ended before this call reported back">—</span>}
+        {!!e.tookMs && <span className="tcall__ms">{e.tookMs} ms</span>}
+      </div>
 
       {!!shown.length && (
         <dl className="tcall__args">
@@ -460,7 +370,7 @@ function ToolCall({ e, live, lead = '', rail = false }: {
           ))}
         </dl>
       )}
-      {!rail && (hidden > 0 || open) && rows.length > ARGS_SHOWN && (
+      {(hidden > 0 || open) && rows.length > ARGS_SHOWN && (
         <button type="button" className="tcall__more" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
           {open ? 'fewer arguments' : `${hidden} more argument${hidden === 1 ? '' : 's'}`}
         </button>
@@ -478,6 +388,18 @@ function ToolCall({ e, live, lead = '', rail = false }: {
       </div>
     </div>
   );
+});
+
+/**
+ * A trail node is a NEW object on every render — `trailNodes` rebuilds them from the transcript — so
+ * the memos below compare what a node is MADE OF, not the wrapper. The transcript entry itself is
+ * stable (it is replaced, never mutated, when its result lands), which is what makes `n.e === m.e` the
+ * right test: a card re-renders exactly when its own call changes and at no other time.
+ */
+function sameNode(a: TrailNode, b: TrailNode): boolean {
+  if (a.k !== b.k || a.key !== b.key || a.turn !== b.turn) return false;
+  if (a.k === 'tool') return b.k === 'tool' && a.e === b.e && a.lead === b.lead;
+  return a.text === (b as { text: string }).text;
 }
 
 /** The counts that head both the trail and the rail — one sentence, computed in one place. */
@@ -494,68 +416,11 @@ function countsOf(nodes: TrailNode[]): { bits: string[]; pending: boolean; tools
 }
 
 /**
- * THE RAIL: every tool call of this turn, in order, in its own column.
- *
- * The analyst's words were "a mini side nav window for the tool calls and then in the chat, that will
- * be the agents response area". So this column is what the assistant DID and the column beside it is
- * what the assistant SAID — reading down one and glancing across at the other, instead of scrolling
- * through them interleaved. It is never collapsible: at this width there is room for it, and hiding
- * the audit trail behind a click is what the collapsible version was already for.
- *
- * It scrolls itself and sticks, so it stays beside the answer however long the answer is, and it
- * follows a live run to the newest call unless the analyst has scrolled up inside it.
- */
-function ActivityRail({ nodes, live }: { nodes: TrailNode[]; live: boolean }) {
-  const tools = useMemo(
-    () => nodes.filter((n): n is Extract<TrailNode, { k: 'tool' }> => n.k === 'tool'), [nodes]);
-  const { bits, pending } = useMemo(() => countsOf(nodes), [nodes]);
-  const listRef = useRef<HTMLDivElement>(null);
-  const followRef = useRef(true);
-
-  useEffect(() => {
-    const el = listRef.current;
-    if (el && live && followRef.current) el.scrollTop = el.scrollHeight;
-  }, [tools.length, live]);
-
-  return (
-    <aside className="trail-rail" aria-label="Tool calls this turn made">
-      <div className="trail-rail__head">
-        <span className="trail-rail__title">Activity</span>
-        {!!bits.length && <span className="trail-rail__counts">{bits.join(' · ')}</span>}
-        {pending && live && <span className="spinner" style={{ width: 10, height: 10, borderWidth: 1.5 }} />}
-      </div>
-      <div
-        className="trail-rail__body"
-        ref={listRef}
-        onScroll={(ev) => {
-          const el = ev.currentTarget;
-          followRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-        }}
-      >
-        {tools.map((t) => (
-          <div key={t.key} className={cx('trail__node', t.turn && 'trail__node--turn')}>
-            <ToolCall e={t.e} live={live} rail />
-          </div>
-        ))}
-        {!tools.length && (
-          <div className="trail-rail__empty">
-            {live ? 'No tools called yet.' : 'This turn called no tools.'}
-          </div>
-        )}
-      </div>
-    </aside>
-  );
-}
-
-/**
  * The audit trail: every tool call in order, on one rail, collapsible. Deliberately secondary — the
  * answer and the case changes come first — but never hidden, because it is how the answer was reached.
  */
-function ActivityTrail({ nodes, live, title, startOpen, alwaysPanel = false }: {
+const ActivityTrail = memo(function ActivityTrail({ nodes, live, title, startOpen }: {
   nodes: TrailNode[]; live: boolean; title: string; startOpen: boolean;
-  /** keep the collapsible panel even with no tool calls — the two-column layout's narration block,
-   *  where the calls have gone to the rail and what is left is a long tail of the model's own prose */
-  alwaysPanel?: boolean;
 }) {
   const [open, setOpen] = useState(startOpen);
   if (!nodes.length) return null;
@@ -564,7 +429,7 @@ function ActivityTrail({ nodes, live, title, startOpen, alwaysPanel = false }: {
   // Nothing was CALLED — this is just the agent saying something (the opening line, a compaction
   // notice). Wrapping one sentence in a collapsible panel labelled "0 tool calls" is chrome, not
   // structure, so it is rendered plainly.
-  if (!tools.length && !alwaysPanel) {
+  if (!tools.length) {
     return (
       <div className="trail__bare">
         {nodes.map((n) => (n.k === 'prose'
@@ -604,7 +469,10 @@ function ActivityTrail({ nodes, live, title, startOpen, alwaysPanel = false }: {
       )}
     </section>
   );
-}
+}, (a, b) => (
+  a.live === b.live && a.title === b.title && a.startOpen === b.startOpen &&
+  a.nodes.length === b.nodes.length && a.nodes.every((n, i) => sameNode(n, b.nodes[i]!))
+));
 
 /** The thing they asked for. First in the assistant turn once the run is over, and marked as such. */
 function Answer({ text, state }: { text: string; state: AiRun['state'] }) {
@@ -761,10 +629,8 @@ function HistoryList({ runs, busy, onOpen, onDelete }: {
  * the same thing at different moments — and because two renderers would drift, which on this screen
  * means one of them eventually shows a write as a read.
  */
-function Turn({ run, entries, live, undoing, onUndo, wide }: {
+function Turn({ run, entries, live, undoing, onUndo }: {
   run: AiRun; entries: AiTranscriptEntry[]; live: boolean; undoing: boolean; onUndo: (id: string) => void;
-  /** the panel is wide enough for the calls to have their own column — see RAIL_MIN_CONTENT */
-  wide: boolean;
 }) {
   const blocks = useMemo(() => toBlocks(entries), [entries]);
   const warnings = useMemo(
@@ -783,36 +649,29 @@ function Turn({ run, entries, live, undoing, onUndo, wide }: {
   }), [blocks, answer]);
   const ranFor = run.endedAt ? spanOf(run.startedAt, run.endedAt) : '';
 
-  // ONE COLUMN: the calls and the narration read in order, so the narration folds into the card it
-  // explains. TWO COLUMNS: the calls go to the rail and the narration stays in the chat column.
-  const narrowNodes = useMemo(() => (wide ? [] : trailNodes(trailBlocks, true)), [wide, trailBlocks]);
-  const wideNodes = useMemo(() => (wide ? trailNodes(trailBlocks, false) : []), [wide, trailBlocks]);
-  const railNodes = useMemo(() => wideNodes.filter((n) => n.k === 'tool'), [wideNodes]);
-  const saidNodes = useMemo(() => wideNodes.filter((n) => n.k !== 'tool'), [wideNodes]);
+  const nodes = useMemo(() => trailNodes(trailBlocks), [trailBlocks]);
 
-  /* The chat column, minus the rail. Live it is arrival order; finished it is answer-first. */
+  // LIVE: the calls are ONE trail, at the bottom, not a trail per model turn interleaved with the
+  // prose. Threading tool cards through the answer meant the thing being read moved down the page
+  // every time a call landed, and the reading column was broken into fragments by cards that are
+  // deliberately secondary. Collected here it is the same shape as a finished turn — what it said,
+  // then what it changed, then how it got there — so the layout no longer rearranges itself the
+  // moment a run ends. Turn breaks are kept, so the sequence is still legible inside the trail.
+  const liveNodes = useMemo(() => trailNodes(blocks.filter((b) => b.kind !== 'prose')), [blocks]);
+
+  /* ONE COLUMN, at every width. Prose first, activity last, live and finished alike. */
   const said = live ? (
     <>
       {blocks.map((b) => {
         if (b.kind === 'warning') return <Warning key={b.key} text={b.text} />;
         if (b.kind === 'prose') return <Markdown key={b.key} className="md chat-md" text={b.text} />;
-        // NARROW: the calls are a trail here, in place, in arrival order.
-        if (!wide) return <ActivityTrail key={b.key} nodes={trailNodes([b], true)} live title="Activity" startOpen />;
-        // WIDE: the calls have gone to the rail — but a STATUS note (a compaction, "built-in prompt:
-        // edited", a check-in) is not a call and has no rail card, so it would vanish from a live run.
-        // Those are never silent; they stay in the chat column, in order, where the prose is.
-        return (
-          <div key={b.key} className="chat-notes">
-            {trailNodes([b], false)
-              .filter((n) => n.k === 'note')
-              .map((n) => <Markdown key={n.key} className="trail__note md" text={n.k === 'note' ? n.text : ''} />)}
-          </div>
-        );
+        return null;
       })}
       {!blocks.length && (
         <div className="state state--inline"><div className="spinner" /><div className="state__body">Starting the investigation…</div></div>
       )}
       <Changes actions={run.actions} busy={undoing} onUndo={() => onUndo(run.id)} />
+      <ActivityTrail nodes={liveNodes} live title="Activity" startOpen />
     </>
   ) : (
     <>
@@ -829,13 +688,7 @@ function Turn({ run, entries, live, undoing, onUndo, wide }: {
           </div>
         )}
       <Changes actions={run.actions} busy={undoing} onUndo={() => onUndo(run.id)} />
-      <ActivityTrail
-        nodes={wide ? saidNodes : narrowNodes}
-        live={false}
-        title={wide ? 'What it was thinking' : 'How it got there'}
-        startOpen={!answer}
-        alwaysPanel={wide}
-      />
+      <ActivityTrail nodes={nodes} live={false} title="How it got there" startOpen={!answer} />
       {run.transcriptTruncated && (
         <div className="chat-note">This transcript was long and its earliest lines were dropped; the report and the change list are complete.</div>
       )}
@@ -873,18 +726,9 @@ function Turn({ run, entries, live, undoing, onUndo, wide }: {
           )}
         </header>
 
-        {wide ? (
-          <div className="chat-split">
-            <div className="chat-turn__body chat-split__main" {...(live ? { 'aria-live': 'polite' as const, 'aria-busy': true } : {})}>
-              {said}
-            </div>
-            <ActivityRail nodes={railNodes} live={live} />
-          </div>
-        ) : (
-          <div className="chat-turn__body" {...(live ? { 'aria-live': 'polite' as const, 'aria-busy': true } : {})}>
-            {said}
-          </div>
-        )}
+        <div className="chat-turn__body" {...(live ? { 'aria-live': 'polite' as const, 'aria-busy': true } : {})}>
+          {said}
+        </div>
       </article>
     </>
   );
@@ -919,7 +763,16 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
   const [error, setError] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
   const [undoingId, setUndoingId] = useState<string | null>(null);
+  // Whether the panel is following the bottom of the transcript. The REF is the one that decides —
+  // see the scroll effect below for why state cannot; the state copy only renders "Jump to latest".
   const [atBottom, setAtBottom] = useState(true);
+  const atBottomRef = useRef(true);
+  const lastTopRef = useRef(0);
+  const follow = useCallback((on: boolean) => {
+    if (atBottomRef.current === on) return;
+    atBottomRef.current = on;
+    setAtBottom(on);
+  }, []);
   const [detached, setDetached] = useState<boolean>(() => {
     try { return localStorage.getItem(AI_DETACHED_KEY) === '1'; } catch { return false; }
   });
@@ -936,18 +789,7 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
   // to re-evaluate the moment the stream ends — a dropped SSE connection must hand over to polling.
   const [streamingId, setStreamingId] = useState<string | null>(null);
   const sseSeqRef = useRef(0);
-  const bodyRef = useRef<HTMLDivElement | null>(null);
-  // The scroll body is REMOUNTED when the panel docks or detaches (two different frames), so the
-  // observer has to be re-attached to the new element — a plain ref would keep pointing at the old
-  // one and the rail would never appear after a detach. A stable callback ref does both jobs: it
-  // keeps `bodyRef` (scrolling) current and publishes the element to the measuring hook.
-  const [bodyEl, setBodyEl] = useState<HTMLDivElement | null>(null);
-  const attachBody = useCallback((el: HTMLDivElement | null) => {
-    bodyRef.current = el;
-    setBodyEl(el);
-  }, []);
-  const contentBox = useContentBox(bodyEl);
-  const wide = contentBox.w >= RAIL_MIN_CONTENT;
+  const bodyRef = useRef<HTMLDivElement>(null);
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const entriesRef = useRef<AiTranscriptEntry[]>([]);
   entriesRef.current = entries;
@@ -996,7 +838,7 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
       setThread(rows.slice(0, -1));
       setRun({ ...last, transcript: [] });
       setEntries(last.transcript);
-      setAtBottom(true);
+      follow(true);          // opening a conversation lands at its end
     } catch (e) {
       setError(errMsg(e));
     }
@@ -1070,7 +912,7 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
     if (previous) setThread((prev) => [...prev, { ...previous, transcript: entriesRef.current }]);
     else setThread([]);
     setEntries([]);
-    setAtBottom(true);
+    follow(true);            // a new turn always starts by following it
     setRun({
       id: rid, prompt: text, focus: focus ?? '', model: settings.data?.ai.model ?? '',
       parentId: continueFrom ?? '', threadId: previous?.threadId || rid,
@@ -1088,24 +930,52 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
     const spKnown = spChoice === null || spChoice === '' || !!systemPrompts.data?.prompts.some((p) => p.id === spChoice);
     if (spChoice !== null && spKnown) body.systemPromptId = spChoice;
 
-    // Prose arrives one TOKEN at a time. A `setEntries` per token is a re-render, a markdown re-parse
-    // and a scroll-to-bottom per token — the report visibly stuttered as it was written. Tokens are
-    // buffered and flushed on a fixed cadence instead, which is far above what anyone reads at and
-    // costs nothing in latency. Every other event flushes FIRST, so ordering is exactly the stream's.
+    // Prose arrives one TOKEN at a time, in bursts. See STREAM_SMOOTH_MS: deltas go into `buffered`
+    // and a frame loop pours a slice of it onto the screen, so what is painted is a steady rate rather
+    // than the shape of the wire. Every other event flushes the buffer FIRST, so the order on screen is
+    // exactly the stream's — a tool card can never appear ahead of the sentence that introduced it.
     let buffered = '';
-    let flushTimer = 0;
-    const flushText = () => {
-      if (flushTimer) { window.clearTimeout(flushTimer); flushTimer = 0; }
-      const t = buffered;
-      buffered = '';
-      // A pending flush must never land on the NEXT conversation: `startRun` aborts the old stream, and
-      // a timer that fires after that would append the previous run's tail to a fresh transcript.
-      if (!t || ac.signal.aborted) return;
+    let raf = 0;
+    let prevTs = 0;
+
+    const commit = (t: string) => {
       setEntries((prev) => {
         const last = prev[prev.length - 1];
         if (last?.kind === 'text') return [...prev.slice(0, -1), { ...last, text: last.text + t }];
         return [...prev, { ...blank(++sseSeqRef.current, 'text'), text: t }];
       });
+    };
+
+    const stopRaf = () => {
+      if (raf) { cancelAnimationFrame(raf); raf = 0; }
+      prevTs = 0;
+    };
+
+    /** Everything still buffered, at once. Used by every non-delta event and at end of stream. */
+    const flushText = () => {
+      stopRaf();
+      const t = buffered;
+      buffered = '';
+      // A pending flush must never land on the NEXT conversation: `startRun` aborts the old stream, and
+      // a frame that fires after that would append the previous run's tail to a fresh transcript.
+      if (!t || ac.signal.aborted) return;
+      commit(t);
+    };
+
+    const tick = (ts: number) => {
+      raf = 0;
+      if (ac.signal.aborted) { buffered = ''; prevTs = 0; return; }
+      const dt = prevTs ? Math.min(160, ts - prevTs) : 16;
+      prevTs = ts;
+      let n = Math.max(1, Math.ceil((buffered.length * dt) / STREAM_SMOOTH_MS));
+      if (n >= buffered.length) n = buffered.length;
+      // Never cut between the halves of a surrogate pair: half of one is not a character, and React
+      // would paint the replacement glyph for a frame before the other half arrived.
+      else if ((buffered.charCodeAt(n - 1) & 0xfc00) === 0xd800) n += 1;
+      commit(buffered.slice(0, n));
+      buffered = buffered.slice(n);
+      if (buffered) raf = requestAnimationFrame(tick);
+      else prevTs = 0;
     };
     const push = (e: Partial<AiTranscriptEntry> & { kind: AiTranscriptEntry['kind'] }) => {
       flushText();
@@ -1131,7 +1001,7 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
             break;
           case 'delta':
             buffered += ev.text;
-            if (!flushTimer) flushTimer = window.setTimeout(flushText, STREAM_FLUSH_MS);
+            if (!raf) raf = requestAnimationFrame(tick);
             break;
           case 'tool_call':
             push({ kind: 'tool', id: ev.id, name: ev.name, args: ev.arguments, writes: writeToolsRef.current.has(ev.name) });
@@ -1279,12 +1149,33 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
     return () => window.removeEventListener('keydown', on);
   }, [onClose, detached]);
 
-  // Follow the stream ONLY when the analyst is already at the bottom. Yanking someone back while they
-  // are reading is the single most annoying thing a chat UI does; "Jump to latest" is offered instead.
+  /**
+   * FOLLOWING THE STREAM, AND LETTING GO OF IT — reported as "the ai chat scroll doesn't allow me to
+   * scroll, I have to undock and re-dock for the scroll to become responsive".
+   *
+   * The panel pins itself to the bottom on every commit while it is following, and whether it is
+   * following was React STATE. State is not readable in time: the scroll event sets it, but the very
+   * next commit's effect still sees the previous render's value and puts the analyst back at the
+   * bottom. During a run that is a reset per commit, so the wheel appeared to do nothing at all —
+   * and undocking "fixed" it only because the shell swap remounts the scroller, usually after the run
+   * has ended and nothing is pinning any more. The frame-paced stream made it far worse: the fight
+   * went from ~11 resets a second to one per frame.
+   *
+   * So the flag lives in a REF, written synchronously in the scroll handler, and the effect reads
+   * that. The state copy exists only to render "Jump to latest".
+   *
+   * The second half is the threshold. "Near the bottom" was the whole test, so a small upward nudge —
+   * a trackpad flick, one line of a wheel — stayed inside 48px, counted as still following, and was
+   * pulled straight back. ANY deliberate upward scroll now stops the follow, however small; scrolling
+   * back down to the end resumes it. Reading is an explicit act and it wins.
+   */
   useEffect(() => {
-    if (!atBottom) return;
+    if (!atBottomRef.current) return;
     const el = bodyRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    // Remember where WE put it, so the scroll event this causes is not read as the analyst moving up.
+    lastTopRef.current = el.scrollTop;
     // `detached` is in here because the two shells hold DIFFERENT scroll containers: docking a window
     // that was following a live run must not silently jump the analyst back to the top of it.
   }, [entries, run?.answer, atBottom, detached]);
@@ -1292,14 +1183,18 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
   const onScroll = useCallback(() => {
     const el = bodyRef.current;
     if (!el) return;
-    setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 48);
-  }, []);
+    const top = el.scrollTop;
+    const movedUp = top < lastTopRef.current - 1;
+    lastTopRef.current = top;
+    if (movedUp) { follow(false); return; }
+    follow(el.scrollHeight - top - el.clientHeight < 48);
+  }, [follow]);
 
   const jumpToLatest = useCallback(() => {
     const el = bodyRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-    setAtBottom(true);
-  }, []);
+    if (el) { el.scrollTop = el.scrollHeight; lastTopRef.current = el.scrollTop; }
+    follow(true);
+  }, [follow]);
 
   /* ── auto-growing composer ─────────────────────────────────────────────────── */
   useEffect(() => {
@@ -1353,13 +1248,7 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
 
   const body = (
     <>
-      <div
-        className={cx('ai-panel__body', wide && 'ai-panel__body--wide')}
-        ref={attachBody}
-        onScroll={onScroll}
-        /* how tall the sticky Activity rail may be — see useContentBox */
-        style={contentBox.h ? ({ '--rail-max-h': `${contentBox.h}px` } as CSSProperties) : undefined}
-      >
+      <div className="ai-panel__body" ref={bodyRef} onScroll={onScroll}>
         {settings.isLoading && <div className="muted">Loading assistant settings…</div>}
         {settings.isError && <div className="compute-error">{errMsg(settings.error)}</div>}
 
@@ -1399,10 +1288,10 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
         {provider && provider !== 'none' && view === 'chat' && run && (
           <div className="chat">
             {thread.map((t) => (
-              <Turn key={t.id} run={t} entries={t.transcript} live={false} wide={wide}
+              <Turn key={t.id} run={t} entries={t.transcript} live={false}
                     undoing={undoingId === t.id} onUndo={undoRun} />
             ))}
-            <Turn run={run} entries={entries} live={live} wide={wide} undoing={undoingId === run.id} onUndo={undoRun} />
+            <Turn run={run} entries={entries} live={live} undoing={undoingId === run.id} onUndo={undoRun} />
           </div>
         )}
 
@@ -1482,12 +1371,13 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
         title={<span className="ai-win__title">AI assistant{live && <span className="spinner" style={{ width: 12, height: 12 }} />}</span>}
         sub={target.label}
         onClose={onClose}
-        /* Wide enough that the two-column layout is what a detached window ACTUALLY shows.
-           620 was below RAIL_MIN_CONTENT, so the Activity rail existed and nobody would ever have
-           seen it without dragging the window wider first — a feature you have to discover by
-           resizing is a feature that is not there. Clamped to the viewport by FloatingWindow, so a
-           small screen still gets a window that fits. */
-        defaultBox={{ w: Math.min(1040, Math.max(620, window.innerWidth - 160)),
+        /* Sized for READING, which is the only thing left deciding it now the rail is gone. The
+           measure is 70ch at --fs-2xl, so the answer wants ~500px; 620 of window is ~580 of content,
+           which puts a report 40px from each edge — that is the "squeezed" complaint, not a fix for
+           it. ~720px of content gives it real margins and lets a call's argument rows and a small
+           table sit without scrolling. Never below the old 620, and FloatingWindow clamps it to the
+           viewport, so a small screen still gets a window that fits. */
+        defaultBox={{ w: Math.min(760, Math.max(620, window.innerWidth - 160)),
                       h: Math.min(760, window.innerHeight - 120) }}
         minH={380}
         actions={

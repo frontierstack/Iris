@@ -111,6 +111,11 @@ class HistoryStore:
         self._stop: set[str] = set()          # in memory only: a stop request cannot survive a restart
         self._loaded_from: Optional[Path] = None
         self._dirty_since: float = 0.0
+        # The background writer behind the THROTTLED save — see `_save_locked`. Lazy, daemon, one per
+        # process, and it never holds a reference to anything but this store.
+        self._writer: Optional[threading.Thread] = None
+        self._wake = threading.Event()
+        self._suppress_write = False          # set by clear_all; cleared by the next real save
 
     # ------------------------------------------------------------- persistence
     @staticmethod
@@ -157,32 +162,76 @@ class HistoryStore:
         except (TypeError, ValueError):
             return None
 
+    @staticmethod
+    def _write_blob(path: Path, blob: str) -> None:
+        # A PRIVATE tmp name, not the shared `history.tmp`: the background writer and a forced save can
+        # both be in here at once, and on Windows `replace()` raises PermissionError while another
+        # thread holds the same file — the library index learned this the expensive way.
+        tmp = path.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(blob, encoding="utf-8")
+            tmp.replace(path)
+        except OSError:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            return
+
+    def _writer_loop(self) -> None:
+        """Drains the throttled save off the caller's thread, coalescing whatever landed while it wrote."""
+        while True:
+            self._wake.wait()
+            self._wake.clear()
+            with self.lock:
+                blob = None if self._suppress_write else self._prune_locked()
+                path = self._path()
+            if blob is not None:
+                self._write_blob(path, blob)
+
+    def _schedule_locked(self) -> None:
+        if self._writer is None or not self._writer.is_alive():
+            self._writer = threading.Thread(target=self._writer_loop, name="ai-history-writer", daemon=True)
+            self._writer.start()
+        self._wake.set()
+
     def _save_locked(self, force: bool = True) -> None:
         # Structural events (a step, a tool call, a result, a write) force a write; streamed PROSE does
         # not — append_text is called once per token, and rewriting the file per token is what jobs.py
         # learned to avoid with PARSE_PROGRESS.
-        if not force and (time.time() - self._dirty_since) < FLUSH_EVERY:
+        #
+        # THE THROTTLED SAVE DOES NOT RUN HERE. `append_text` is called from the investigator's token
+        # loop, which is on the event loop that is also writing the SSE frames — and a save is a prune,
+        # a full `json.dumps` of every conversation in the file and an atomic write through the data-dir
+        # bind mount. Once a second, for the length of it, no token could leave the server: the panel
+        # showed a burst, a pause, a burst. It is handed to a background writer instead, which coalesces
+        # (one pending write, however many tokens land while it runs) and which the loop never waits for.
+        # A forced save stays synchronous: those are per STEP, not per token, and callers that mutate and
+        # then hand control back to the analyst should leave the file already correct.
+        self._suppress_write = False
+        if not force:
+            if (time.time() - self._dirty_since) < FLUSH_EVERY:
+                return
+            self._dirty_since = time.time()   # stamped BEFORE, so the throttle holds while the write runs
+            self._schedule_locked()
             return
-        self._prune_locked()
-        path = self._path()
-        blob = self._dump_locked()
+        blob = self._prune_locked()
         if blob is None:
             return
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(blob, encoding="utf-8")
-            tmp.replace(path)
-        except OSError:
-            return
+        self._write_blob(self._path(), blob)
         self._dirty_since = time.time()
 
     def _touch_locked(self, rec: dict[str, Any]) -> None:
         rec["updatedAt"] = _now()
 
     # ------------------------------------------------------------- retention
-    def _prune_locked(self) -> None:
-        """Count first, then bytes. A run that is still `running` is never dropped."""
+    def _prune_locked(self) -> Optional[str]:
+        """Count first, then bytes. A run that is still `running` is never dropped.
+
+        Returns the serialised file it settled on, because measuring the byte cap IS serialising it:
+        dumping again in the caller doubled the most expensive thing a save does.
+        """
         def droppable() -> list[dict[str, Any]]:
             return sorted((r for r in self._runs.values() if r["state"] in TERMINAL),
                           key=_order_key)
@@ -194,22 +243,24 @@ class HistoryStore:
             self._runs.pop(rows[0]["id"], None)
 
         # the byte cap is what stops ONE enormous run from blowing the file up: measure, drop, re-measure
+        blob = self._dump_locked()
         for _ in range(MAX_RUNS + 2):
-            blob = self._dump_locked()
             if blob is None or len(blob) <= MAX_FILE_BYTES:
-                return
+                return blob
             rows = droppable()
             if not rows:
                 # a single running conversation is over budget on its own — clamp its transcript rather
                 # than lose the run, so the file still cannot grow without bound
                 biggest = max(self._runs.values(), key=lambda r: len(r.get("transcript") or []), default=None)
                 if biggest is None or not biggest.get("transcript"):
-                    return
+                    return blob
                 keep = max(20, len(biggest["transcript"]) // 2)
                 biggest["transcript"] = biggest["transcript"][-keep:]
                 biggest["transcriptTruncated"] = True
-                continue
-            self._runs.pop(rows[0]["id"], None)
+            else:
+                self._runs.pop(rows[0]["id"], None)
+            blob = self._dump_locked()
+        return blob
 
     # ------------------------------------------------------------------ writes
     def start(self, run_id: str, prompt: str, model: str, *, focus: str = "",
@@ -390,8 +441,15 @@ class HistoryStore:
             n = len(self._runs)
             self._runs = {}
             self._stop.clear()
+            # A throttled save may already be in flight on the writer thread; without this it would
+            # take the lock the moment this returns and write `{"runs": []}` straight back, leaving a
+            # file behind that "clear all data" said it had removed.
+            self._suppress_write = True
+            self._wake.clear()
             try:
                 self._path().unlink(missing_ok=True)
+                for tmp in self._dir().glob("history.*.tmp"):
+                    tmp.unlink(missing_ok=True)
                 self._path().with_suffix(".tmp").unlink(missing_ok=True)
             except OSError:
                 pass
