@@ -126,18 +126,32 @@ def graph(scope: str = Query("all", pattern="^(all|case)$"),
     # `q` goes INTO select, never applied to its result: the payload is already capped at `limit`, so
     # post-filtering it searched the top-N ranked nodes only and answered "nothing" for every entity
     # outside them (measured: q=claude -> 0 nodes on a graph holding 21,676).
+    files = _files_for(sources)
     nodes, edges, stats = gb.select(types=tset, relations=rset, min_count=minCount, focus=focus, hops=hops,
-                                    limit=limit, in_case=in_case, files=_files_for(sources), query=q,
+                                    limit=limit, in_case=in_case, files=files, query=q,
                                     min_degree=minDegree, max_edges=maxEdges, lean=lean)
     if q.strip():
         stats = {**stats, "query": q.strip()}
     # Authored nodes and links are OVERLAYS: exempt from minCount/minDegree (they carry no event count
     # to be strong or weak by) and added after the ranking, so an investigation the agent drew cannot be
     # ranked out of its own case's graph.
-    authored = _case_nodes({n.id for n in nodes})
-    if authored:
-        nodes = nodes + authored
-    edges = edges + _links_as_edges(gb, {n.id for n in authored})
+    #
+    # But they belong to the CASE, and they are drawn only where the case is what is being looked at:
+    # scope=case, or the whole pool with no source filter. Reported: an already-built case "showed up
+    # in the graph even when I didn't have it selected and was looking at other unrelated log events".
+    # A source selection asks what THOSE FILES say — exact on both sides, never inferred — and an
+    # authored node is what someone concluded, not what any file says. Drawing it over an unrelated
+    # selection puts a conclusion next to evidence that does not support it. The omission is REPORTED
+    # (`stats.hiddenCaseLinks`) so the screen can say where the picture went, never silently.
+    overlay_on = scope == "case" or files is None
+    hidden_case_links = 0
+    if overlay_on:
+        authored = _case_nodes({n.id for n in nodes})
+        if authored:
+            nodes = nodes + authored
+        edges = edges + _links_as_edges(gb, {n.id for n in authored})
+    else:
+        hidden_case_links = len(STORE.graph_links)
     # Closing invariant, asserted by tests/test_graph_edges.py: the payload is a CLOSED graph — every edge
     # endpoint is one of the nodes returned above. A persisted graph_link whose ends survived `add_link`
     # but were later ranked out by `limit`/`types` is dropped here rather than drawn to a phantom node.
@@ -158,7 +172,8 @@ def graph(scope: str = Query("all", pattern="^(all|case)$"),
     # and says how many are still to come. An analyst reading a graph must know it is over PART of
     # the workspace — that is the silent-omission class of bug this project keeps fighting.
     stats = {**stats, "edges": len(edges), "status": status, "maxEdges": maxEdges,
-             "sourcesIncluded": included, "sourcesPending": pending}
+             "sourcesIncluded": included, "sourcesPending": pending,
+             "hiddenCaseLinks": hidden_case_links}
     # Serialised HERE: handing FastAPI the model makes it validate 22,000 GraphEdge/GraphNode objects a
     # second time (they were validated on construction) before it serialises them. `response_model`
     # stays on the decorator for the OpenAPI schema; a Response return bypasses the re-validation.

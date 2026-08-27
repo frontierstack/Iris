@@ -124,6 +124,9 @@ export interface GraphStats { nodes: number; edges: number; truncated: boolean; 
   hiddenByDegree?: number;
   /** Edges the strongest-first cap (`maxEdges`, default 20 000) left out, and the cap itself. */
   hiddenEdges?: number; maxEdges?: number;
+  /** Case-authored links withheld because a source selection is active (they draw under scope=case or
+   *  with no selection). Reported so a case picture that is not on screen is never a silent absence. */
+  hiddenCaseLinks?: number;
   /** The graph covers `sourcesIncluded` sources; `sourcesPending` are still being interpreted and join
    *  it the moment they land — it no longer waits for the queue to drain. */
   sourcesIncluded?: number; sourcesPending?: number }

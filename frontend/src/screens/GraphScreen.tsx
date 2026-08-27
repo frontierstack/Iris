@@ -768,7 +768,8 @@ export function GraphScreen() {
         <span className="graph__count">
           {g.isFetching && !g.data ? <span className="spinner" style={{ width: 10, height: 10, display: 'inline-block' }} /> : null}
           {stats ? <>{fmtInt(stats.nodes)} of {fmtInt(stats.totalNodes ?? stats.nodes)} nodes · {fmtInt(stats.edges)} links{stats.truncated ? ' · capped' : ''}
-            {stats.hiddenEdges ? <span className="graph__hidden" title="Raise “max links” to draw more of them. The strongest links by event count are the ones kept."> · {fmtInt(stats.hiddenEdges)} weaker links not drawn</span> : null}</> : ''}
+            {stats.hiddenEdges ? <span className="graph__hidden" title="Raise “max links” to draw more of them. The strongest links by event count are the ones kept."> · {fmtInt(stats.hiddenEdges)} weaker links not drawn</span> : null}
+            {stats.hiddenCaseLinks ? <span className="graph__hidden" title="Links drawn on the case by the analyst or the assistant are shown only when the case set is what is graphed, or when no source selection is active — they are conclusions, not lines in the selected files."> · {fmtInt(stats.hiddenCaseLinks)} case-drawn link{stats.hiddenCaseLinks === 1 ? '' : 's'} not shown (pick the case set)</span> : null}</> : ''}
         </span>
         {activeFilters > 0 && <button className="btn btn--sm btn--ghost" onClick={clearFilters}>clear {activeFilters} filter{activeFilters === 1 ? '' : 's'}</button>}
         <button className={cx('btn btn--sm', reviewing && 'btn--accent')} onClick={runReview} disabled={reviewing || !g.data?.nodes.length}

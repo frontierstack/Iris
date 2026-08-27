@@ -611,7 +611,13 @@ interface GraphStats { hiddenEdges?:number; maxEdges?:number;  // edges dropped 
   byType:Record<EntityType,number>; byRelation:Record<Relation,number>;
   /* How many nodes `minDegree` removed. Reported so the screen can say the FILTER did it rather than
      showing a thinner graph with no explanation. 0 when minDegree is 1. */
-  hiddenByDegree:number; status?:DerivedState }
+  hiddenByDegree:number; status?:DerivedState;
+  /* The case's AUTHORED nodes/links (`graph_links` / `graph_nodes`) are overlaid only where the case is
+     what is being looked at: `scope=case`, or the whole pool with no `sources` filter. Under a source
+     selection they are LEFT OUT — a selection asks what those files say, and an authored node is a
+     conclusion, not a line in any of them — and this counts the links withheld, so the screen can say
+     where the picture went. 0 when the overlay was drawn. */
+  hiddenCaseLinks?:number }
 ```
 - `GET /api/graph?scope=all|case&types=ip,user&relations=auth_from,ran&minCount=1&minDegree=1&focus=<nodeId>&hops=1&limit=50` → GraphV2
    `focus`+`hops` returns the neighbourhood of one node — the way to explore a big case without a 5,000-node hairball.

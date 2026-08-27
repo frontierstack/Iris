@@ -2728,7 +2728,7 @@ def _annotate_one(store: Any, eid: str, labels_arg: Any, note_arg: Any) -> dict[
         if not isinstance(labels_arg, list):
             raise ToolError("labels must be a list of strings")
         labels = [_s(l, 60).strip() for l in labels_arg[:12] if _s(l, 60).strip()]
-    note = before["note"] if note_arg is None else _prose(note_arg, 800)
+    note = before["note"] if note_arg is None else _prose(note_arg, 1200)   # a full sentence or two, not a label
     if labels == before["labels"] and note == before["note"]:
         return {"eventId": eid, "before": before, "labels": labels, "note": note, "unchanged": True}
     entry = store.add_to_case(eid, labels, note)     # add_to_case is an upsert — same path the UI uses
@@ -2745,7 +2745,9 @@ def _annotate_one(store: Any, eid: str, labels_arg: Any, note_arg: Any) -> dict[
       {"eventId": {"type": "string", "description": "an event already in the case set"},
        "labels": {"type": "array", "items": {"type": "string"},
                   "description": "the complete label list for this entry (replaces what is there)"},
-       "note": {"type": "string", "description": "why this event matters at this point in the timeline"}},
+       "note": {"type": "string", "description": "a full, specific sentence: who (IP/account/host/process) did "
+                "what to what, at what UTC time, with what outcome, observed in which log file - and why it "
+                "matters here. Never a restated label such as 'IP was seen'."}},
       ["eventId"], writes=True)
 def _annotate_case_event(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
     _budget(ctx)
@@ -2763,7 +2765,11 @@ def _annotate_case_event(args: dict[str, Any], ctx: RunContext) -> dict[str, Any
 @tool("annotate_case_events",
       "Write a WHOLE case timeline in one call: label and annotate many case-set events at once. Each "
       "entry is {eventId, labels, note}, so every step of the sequence gets its own label and its own "
-      "sentence of context. Annotating twenty events one at a time spends twenty steps of the budget and "
+      "note. The note is what the analyst reads down the timeline, so it must be a full, specific "
+      "sentence or two: who (the IP, account, host or process) did what to what, at what UTC time, with "
+      "what outcome, observed in which log file, and why it matters at this point - e.g. 'The IP "
+      "10.0.0.1 authenticated as svc_deploy over SSH at 2026-08-21 10:14:02 UTC after 41 failed attempts, "
+      "observed in auth.log'. Never 'IP was seen'. Annotating twenty events one at a time spends twenty steps of the budget and "
       "is never the right way to build a timeline. Every event must already be in the case set (add them "
       "with add_events_to_case first). Entries that fail are reported individually — the rest still "
       "apply — and the whole batch is undone as one action.",
@@ -2772,7 +2778,9 @@ def _annotate_case_event(args: dict[str, Any], ctx: RunContext) -> dict[str, Any
                    "items": {"type": "object",
                              "properties": {"eventId": {"type": "string"},
                                             "labels": {"type": "array", "items": {"type": "string"}},
-                                            "note": {"type": "string"}},
+                                            "note": {"type": "string",
+                                                     "description": "actor, action, target, UTC time, "
+                                                     "outcome, log file, why it matters - a full sentence"}},
                              "required": ["eventId"]}}},
       ["entries"], writes=True)
 def _annotate_case_events(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
