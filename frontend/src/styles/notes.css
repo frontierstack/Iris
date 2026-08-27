@@ -43,6 +43,30 @@
   background: var(--panel-inset);
   color: var(--text-bright);
 }
+/* Data inside prose (utils/markdown.tsx `proseRun`): a moment, an address, a file, a hash. Quieter
+   than `.md-code` — these are marked by the RENDERER, not by the author, so they must read as part of
+   the sentence, not as a quotation: same face, no border, a tint instead of a box. */
+.md-data {
+  font-family: var(--font-mono); font-size: var(--fs-sm);
+  padding: 0 3px;
+  border-radius: var(--radius-xs);
+  background: var(--panel-inset);
+  color: var(--text-bright);
+  white-space: nowrap;
+}
+.md-data--ip { color: var(--accent-hover, var(--accent)); }
+.md-data--file { color: var(--text-bright); }
+.md-data--hash { font-size: var(--fs-xs); letter-spacing: -.01em; }
+.md-time {
+  font-family: var(--font-mono); font-size: var(--fs-sm);
+  color: var(--text-bright);
+  white-space: nowrap;
+  text-decoration: underline dotted var(--muted-3);
+  text-underline-offset: 3px;
+}
+/* On a timeline row the title is one ellipsised line; the marks must not wrap it or grow it. */
+.tl__title .md-data, .tl__title .md-time, .tl__title .md-code { font-size: var(--fs-sm); vertical-align: baseline; }
+
 .md-pre {
   margin: 0 0 10px;
   padding: 9px 11px;

@@ -2642,6 +2642,13 @@
 .case-notes {
   margin-bottom: 26px;
 }
+/* The investigation log reads as a document, not a table: centred on a wide screen, with the
+   composer and the entries sharing one column so what you post lands under the box you typed in. */
+.case-notes .notes {
+  max-width: 1240px;
+  width: 100%;
+  margin-inline: auto;
+}
 .case-notes__area {
   width: 100%;
   font-size: var(--fs-base);
@@ -2770,8 +2777,11 @@ mark.hl {
   overflow-wrap: anywhere;
   margin-top: 7px;
   /* A note is prose and is read as prose. On a wide case screen an unbounded column runs to 150+
-     characters and the eye loses the line; a table or a code block inside it is exempt below. */
-  max-width: 86ch;
+     characters and the eye loses the line; a table or a code block inside it is exempt below.
+     86ch was reported as "confined into a narrow box" — the assistant's notes carry tables and
+     full sentences with timestamps and file names, so the measure is wider now, and the feed as a
+     whole is centred on the page (`.case-notes .notes`) rather than pinned to the left edge. */
+  max-width: 118ch;
 }
 /* the blocks that legitimately want the whole width back */
 .note__text > .md-tablewrap, .note__text > .md-pre, .note__text > .md-img { max-width: 100%; }

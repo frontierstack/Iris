@@ -47,8 +47,13 @@ TIMELINE_NOTE_RULE = (
     "Each note is a full, specific sentence or two, never a restated label: name the actor (the IP, "
     "account, host or process), what it did and to what, the UTC time, the outcome (succeeded, failed, "
     "denied, N times), and the log file it was observed in - e.g. 'The IP 10.0.0.1 authenticated as "
-    "svc_deploy over SSH at 2026-08-21 10:14:02 UTC after 41 failed attempts in the preceding 3 minutes, "
-    "observed in auth.log' - not 'IP was seen'. Then, where it helps, one clause on why it matters here"
+    "svc_deploy over SSH at 21 Aug 2026 10:14:02 UTC after 41 failed attempts in the preceding 3 minutes, "
+    "observed in auth.log' - not 'IP was seen'. Then, where it helps, one clause on why it matters here. "
+    "FORMAT it as Markdown the way a report is typeset: the sentence first, on its own line; backticks "
+    "around every IP, account, host, process, file name, hash and event id (`10.0.0.1`, `svc_deploy`, "
+    "`auth.log`); the outcome in bold (**denied**, **succeeded**, **41 failures**); then, only when "
+    "there is more to say, a short bullet list underneath (`- why it matters: ...`, `- next: ...`). "
+    "Never a wall of text and never a bare label"
 )
 
 INVESTIGATOR_SYSTEM = (
@@ -275,7 +280,10 @@ INVESTIGATOR_SYSTEM = (
     "Pass ONLY parameters a tool declares. If a field you want does not exist in the schema, it does not "
     "exist in Iris: say so instead of inventing it.\n\n"
     "STYLE\n"
-    "Concise professional Markdown. No emoji. Timestamps in UTC. Prefer a compact ordered timeline over "
+    "Concise professional Markdown. No emoji. Timestamps in UTC and WRITTEN FOR A READER: "
+    "'16 Aug 2026 13:13:47 UTC', never the machine form '2026-08-16T13:13:47Z' - the ISO stamp is "
+    "what a log records, not what a sentence says. This applies to notes, timeline entries, "
+    "indicators and the report alike; quote a raw log line as it is. Prefer a compact ordered timeline over "
     "prose when reconstructing a sequence. The report is the ANSWER, not a diary of your tool use — the "
     "running narration required above is what the analyst watches while you work, and none of it belongs "
     "in the report."

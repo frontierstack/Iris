@@ -30,8 +30,8 @@ import { api } from '../api/client';
 import type { CaseSetEntry, Event, Source } from '../api/types';
 import { useAddToCase, useCaseSet, useRemoveFromCase } from '../hooks/queries';
 import { useToast } from '../hooks/useToast';
-import { cx, fmtClock, fmtDay, fmtInt, fmtTs, sevVar } from '../utils/format';
-import { renderMarkdown, unescapeBreaks } from '../utils/markdown';
+import { cx, fmtClock, fmtDay, fmtInt, fmtTs, humanizeStamps, sevVar } from '../utils/format';
+import { inlineMd, renderMarkdown, unescapeBreaks } from '../utils/markdown';
 import { LabelEditor } from './CaseSet';
 import { Icon } from './icons';
 import { Drawer, EmptyState, Loading, SevTag } from './ui';
@@ -113,13 +113,16 @@ function AddFromSource({ sources, inSet }: { sources: Source[]; inSet: Set<strin
 
 /** How many parsed fields an entry shows before it has to be asked for the rest. */
 const FIELDS_SHOWN = 8;
+/** localStorage: '1' = newest first. Oldest first is the default — a timeline reads forward. */
+const SORT_KEY = 'iris.timeline.newestFirst';
 
-/** The pace of the sequence: how long after the previous entry this one happened.
+/** The pace of the sequence: how long after the entry that happened just before it in time this
+ *  one happened (`older` is the neighbouring row — above when oldest-first, below when newest-first).
  *  A chronology whose entries are four seconds apart and one whose entries are four days apart look
  *  identical in a list of timestamps, and the difference is usually the finding. */
-function gapLabel(prev: string | undefined, cur: string | undefined): string {
-  if (!prev || !cur) return '';
-  const ms = Date.parse(cur) - Date.parse(prev);
+function gapLabel(older: string | undefined, cur: string | undefined): string {
+  if (!older || !cur) return '';
+  const ms = Date.parse(cur) - Date.parse(older);
   if (!Number.isFinite(ms) || ms <= 0) return '';
   const s = Math.round(ms / 1000);
   if (s < 60) return `+${s}s`;
@@ -137,7 +140,10 @@ function gapLabel(prev: string | undefined, cur: string | undefined): string {
  *  line is taken, with heading and bullet markers stripped, because `## Finding` is not a sentence. */
 function noteLine(note: string): string {
   const first = unescapeBreaks(note).split('\n').map((l) => l.trim()).find(Boolean) ?? '';
-  return first.replace(/^#{1,6}\s+/, '').replace(/^[-*+]\s+/, '').replace(/^>\s*/, '');
+  const bare = first.replace(/^#{1,6}\s+/, '').replace(/^[-*+]\s+/, '').replace(/^>\s*/, '');
+  // The same stamp repair the renderer applies, and with the same exception: text between backticks
+  // is a quoted value and keeps the form the log gave it.
+  return bare.split('`').map((seg, i) => (i % 2 === 0 ? humanizeStamps(seg) : seg)).join('`');
 }
 
 /** Everything behind one entry, revealed by clicking the row.
@@ -297,9 +303,19 @@ export function CaseTimeline({ sources }: { sources: Source[] }) {
     () => new Map((caseSet.data?.events ?? []).map((e) => [e.id, e])),
     [caseSet.data],
   );
-  // Chronological, because that is what a timeline is. An entry whose event has no parsed timestamp
-  // sorts last rather than silently claiming a position in the sequence it cannot support.
-  const ordered = useMemo(() => {
+  // Chronological — oldest first — because that is what a timeline is; a "Newest first" toggle
+  // flips it, remembered per browser. An entry whose event has no parsed timestamp sorts LAST in
+  // BOTH directions rather than silently claiming a position in the sequence it cannot support.
+  const [newestFirst, setNewestFirst] = useState<boolean>(() => {
+    try { return localStorage.getItem(SORT_KEY) === '1'; } catch { return false; }
+  });
+  const toggleSort = () => {
+    setNewestFirst((v) => {
+      try { localStorage.setItem(SORT_KEY, v ? '0' : '1'); } catch { /* private mode */ }
+      return !v;
+    });
+  };
+  const chronological = useMemo(() => {
     const entries = caseSet.data?.entries ?? [];
     return [...entries].sort((a, b) => {
       const ta = byId.get(a.eventId)?.ts ?? '';
@@ -310,12 +326,18 @@ export function CaseTimeline({ sources }: { sources: Source[] }) {
       return ta.localeCompare(tb);
     });
   }, [caseSet.data, byId]);
+  const ordered = useMemo(() => {
+    if (!newestFirst) return chronological;
+    const stamped = chronological.filter((en) => byId.get(en.eventId)?.ts);
+    const blank = chronological.filter((en) => !byId.get(en.eventId)?.ts);
+    return [...stamped.reverse(), ...blank];
+  }, [chronological, newestFirst, byId]);
   const inSet = useMemo(() => new Set(ordered.map((e) => e.eventId)), [ordered]);
   /* What the sequence covers, stated once above it. Not a row of stat tiles — the case screen
      deliberately has none — just the two facts a chronology is asked for first: how long it spans, and
      how much of it the analyst has actually written up. */
   const span = useMemo(() => {
-    const stamped = ordered.map((en) => byId.get(en.eventId)?.ts).filter(Boolean) as string[];
+    const stamped = chronological.map((en) => byId.get(en.eventId)?.ts).filter(Boolean) as string[];
     if (!stamped.length) return '';
     const a = stamped[0]!;
     const b = stamped[stamped.length - 1]!;
@@ -323,7 +345,7 @@ export function CaseTimeline({ sources }: { sources: Source[] }) {
     return a.slice(0, 10) === b.slice(0, 10)
       ? `${fmtTs(a)} → ${fmtClock(b)} UTC`
       : `${fmtTs(a)} → ${fmtTs(b)} UTC`;
-  }, [ordered, byId]);
+  }, [chronological, byId]);
   const annotated = useMemo(() => ordered.filter((en) => en.note || en.labels.length).length, [ordered]);
 
   const drop = (en: CaseSetEntry, e?: Event) =>
@@ -331,6 +353,10 @@ export function CaseTimeline({ sources }: { sources: Source[] }) {
 
   const actions = (
     <>
+      <button className="btn btn--sm" onClick={toggleSort} aria-pressed={newestFirst}
+        title={newestFirst ? 'Showing the latest entry first — click for oldest first' : 'Showing the earliest entry first — click for newest first'}>
+        {newestFirst ? 'Newest first' : 'Oldest first'}
+      </button>
       <AddFromSource sources={sources} inSet={inSet} />
       <button className="btn btn--sm" onClick={() => nav('/search')} title="Find events anywhere in the pool and add them">
         <Icon.Search /> Add from search
@@ -383,8 +409,13 @@ export function CaseTimeline({ sources }: { sources: Source[] }) {
           const prevTs = i > 0 ? byId.get(ordered[i - 1]!.eventId)?.ts : undefined;
           const prevDay = i > 0 ? (prevTs ?? '').slice(0, 10) : null;
           const newDay = day !== prevDay;
-          // Only within a day: "+19h" across a date heading restates what the heading already says.
-          const gap = newDay ? '' : gapLabel(prevTs, e?.ts);
+          // The gap is measured against the entry that happened just BEFORE this one in time — the
+          // row above when oldest-first, the row below when newest-first — and only within a day:
+          // "+19h" across a date heading restates what the heading already says.
+          const olderIdx = newestFirst ? i + 1 : i - 1;
+          const olderTs = olderIdx >= 0 && olderIdx < ordered.length ? byId.get(ordered[olderIdx]!.eventId)?.ts : undefined;
+          const olderDay = (olderTs ?? '').slice(0, 10);
+          const gap = olderTs && olderDay === day ? gapLabel(olderTs, e?.ts) : '';
           // THE ROW IS THE CLAIM, NOT THE EVIDENCE. The analyst's own sentence leads when there is one;
           // a log line is what they wrote it about, and it lives in the opened entry. An entry with no
           // note yet still needs to be identifiable, so it falls back to the normalized message —
@@ -417,12 +448,16 @@ export function CaseTimeline({ sources }: { sources: Source[] }) {
                               en.addedAt ? `added to the case ${fmtTs(en.addedAt)} UTC` : ''].filter(Boolean).join(' · ')}>
                       {e?.ts ? fmtClock(e.ts) : '--:--:--'}
                     </span>
-                    {gap && <span className="tl__gap" title="time since the previous entry">{gap}</span>}
+                    {gap && <span className="tl__gap" title="how long after the entry just before it in time">{gap}</span>}
                     {e && <SevTag sev={e.sev} />}
                     {en.labels.map((l) => <span key={l} className="tag tag--label">{l}</span>)}
-                    <span className={cx('tl__title', !said && 'tl__title--log')}>
+                    <span className={cx('tl__title', !said && 'tl__title--log')} title={said || undefined}>
                       {said && <Icon.Note className="tl__noteglyph" aria-hidden />}
-                      {summary}
+                      {/* The analyst's sentence is MARKUP: inline code, emphasis and the data marks
+                          (`proseRun`) render on the row itself, so an address or a file name reads as
+                          one at a glance instead of vanishing into the line. The log fallback stays
+                          a plain string — those are the log's words, shown as the log wrote them. */}
+                      {said ? inlineMd(said, `tl-${en.eventId}`) : summary}
                     </span>
                     {/* The FILE, not the parser. `source` is what the line was parsed AS (nginx,
                         delimited, jsonl) and several files share one; a timeline entry has to name the

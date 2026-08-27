@@ -235,8 +235,14 @@ function Newer-Than([datetime]$Since, [string[]]$Paths) {
 # When the named image was built, as UTC, or $null when that cannot be read.
 function Image-BuiltUtc([string]$Tag) {
   $created = (& docker image inspect -f '{{.Created}}' $Tag 2>$null | Select-Object -First 1)
-  if ($LASTEXITCODE -ne 0 -or -not $created) { return $null }
-  try { return ([datetime]::Parse($created)).ToUniversalTime() } catch { return $null }
+  # Judged on the OUTPUT, not on $LASTEXITCODE: PowerShell 5.1 reported -1 here for a docker inspect
+  # that had just printed the timestamp, and a null return starts the OLD container (see below).
+  if (-not $created -or [string]$created -notmatch '^\d{4}-\d{2}-\d{2}T') { return $null }
+  # Docker writes NINE fractional-second digits (2026-08-27T19:53:14.804705528Z) and .NET parses at
+  # most seven, so [datetime]::Parse threw on every image and the launcher started the OLD container
+  # behind a one-line warning - exactly the 'it still looks the same' failure. Trim the fraction.
+  $created = [regex]::Replace($created, '(\.\d{1,7})\d*(?=Z|[+-]\d{2}:?\d{2}$)', '$1')
+  try { return ([datetime]::Parse($created, [cultureinfo]::InvariantCulture, 'AdjustToUniversal')).ToUniversalTime() } catch { return $null }
 }
 
 # ── local (no Docker) ────────────────────────────────────────────────────────

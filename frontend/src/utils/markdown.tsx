@@ -14,6 +14,7 @@
  *  silently rewritten by its renderer.
  */
 import type { ReactNode } from 'react';
+import { humanizeStamps } from './format';
 
 const URL_OK = /^(?:https?:\/\/|mailto:|\/(?!\/)|\.{1,2}\/)/i;
 
@@ -32,7 +33,7 @@ export function inlineMd(src: string, key = 'i'): ReactNode[] {
   let n = 0;
   for (const m of src.matchAll(INLINE)) {
     const at = m.index ?? 0;
-    if (at > last) out.push(src.slice(last, at));
+    if (at > last) out.push(...proseRun(src.slice(last, at), `${key}-t${n}`));
     const k = `${key}-${n++}`;
     if (m[2] !== undefined) out.push(<code key={k} className="md-code">{m[2]}</code>);
     else if (m[3] !== undefined && m[4] !== undefined) {
@@ -49,8 +50,55 @@ export function inlineMd(src: string, key = 'i'): ReactNode[] {
     else if (m[9] !== undefined) out.push(<del key={k} className="md-del">{inlineMd(m[9], k)}</del>);
     last = at + m[0].length;
   }
+  if (last < src.length) out.push(...proseRun(src.slice(last), `${key}-t${n}`));
+  return out;
+}
+
+/* ───────── data inside prose ─────────
+   A note and a timeline entry are sentences ABOUT data — an address, an account, a file, a hash, a
+   moment — and the first build rendered that data as undifferentiated text. Reported as "modernize the
+   look of the writing … add the html tagging … make sure that data is nicely parsed". Every text run
+   between markdown spans now goes through `proseRun`: machine timestamps are rewritten for a reader
+   (`humanizeStamps`) and then the data the eye should land on is wrapped in its own element — a
+   <time> for a moment, <code class="md-data"> for an address, a file, a hash. Never inside a code span
+   or a fence: there the text is a quoted value and keeps exactly the form the log gave it.
+   The patterns are deliberately CONSERVATIVE — an IPv4 with an optional port or prefix, a file name by
+   extension, a hex digest of a known length, the humanised stamp — because a false mark on an ordinary
+   word is worse than a missed one; a domain is NOT matched here (too many ordinary tokens look like one). */
+const PROSE_DATA = new RegExp([
+  String.raw`(\d{1,2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} UTC)`,                                   // 1 stamp
+  String.raw`((?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5}|/\d{1,2})?)`,                                    // 2 ipv4
+  String.raw`([0-9a-fA-F]{64}|[0-9a-fA-F]{40}|[0-9a-fA-F]{32})`,                          // 3 hash
+  String.raw`((?:[\w][\w .-]{0,80})?\.(?:csv|tsv|log|jsonl?|ndjson|evtx|pcapng?|cap|txt|xlsx|xlsm|docx|pdf|eml|msg|mbox|db|sqlite|sqlite3|gz|zip|7z|tar|tgz))`, // 4 file
+].join('|'), 'g');
+
+export function proseRun(text: string, key = 'p'): ReactNode[] {
+  const src = humanizeStamps(text);
+  const out: ReactNode[] = [];
+  let last = 0;
+  let n = 0;
+  for (const m of src.matchAll(PROSE_DATA)) {
+    const at = m.index ?? 0;
+    if (at > last) out.push(src.slice(last, at));
+    const k = `${key}-${n++}`;
+    if (m[1] !== undefined) out.push(<time key={k} className="md-time" dateTime={isoOf(m[1])}>{m[1]}</time>);
+    else if (m[2] !== undefined) out.push(<code key={k} className="md-data md-data--ip">{m[2]}</code>);
+    else if (m[3] !== undefined) out.push(<code key={k} className="md-data md-data--hash">{m[3]}</code>);
+    else out.push(<code key={k} className="md-data md-data--file">{m[4]!.trim()}</code>);
+    last = at + m[0].length;
+  }
   if (last < src.length) out.push(src.slice(last));
   return out;
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+/** `16 Aug 2026 13:13:47 UTC` → `2026-08-16T13:13:47Z`, for the <time> element's machine attribute. */
+function isoOf(human: string): string {
+  const m = /^(\d{1,2}) ([A-Z][a-z]{2}) (\d{4}) (\d{2}:\d{2}:\d{2}) UTC$/.exec(human);
+  if (!m) return '';
+  const mon = MONTHS.indexOf(m[2]!);
+  if (mon < 0) return '';
+  return `${m[3]}-${String(mon + 1).padStart(2, '0')}-${m[1]!.padStart(2, '0')}T${m[4]}Z`;
 }
 
 const FENCE = /^\s*```/;

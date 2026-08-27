@@ -93,6 +93,26 @@ export function fmtDate(ts: string | undefined | null): string {
   const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   return `${d.getUTCDate()} ${months[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
 }
+/** 16 Aug 2026 13:13:47 UTC — the form for a timestamp inside PROSE. `fmtTs` is for a column of
+ *  stamps, where a fixed width aligns; a sentence wants the date spelled. */
+export function fmtTsProse(ts: string | undefined | null): string {
+  const d = parseTs(ts);
+  if (!d) return ts ?? '—';
+  return `${fmtDate(ts)} ${fmtClock(ts)} UTC`;
+}
+
+const ISO_STAMP = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})\b/g;
+
+/** Rewrite machine timestamps in a run of PROSE — `2026-08-16T13:13:47Z` → `16 Aug 2026 13:13:47 UTC`.
+ *  Reported as "hard to read": the assistant writes ISO 8601 into notes and timeline entries, and that
+ *  is what the analyst then reads down the case. Applied at READ time, to text runs only — a stamp
+ *  inside a code span or a quoted log line is DATA and is left exactly as the log recorded it. An
+ *  offset stamp is converted to UTC, which is what every other stamp in Iris is. */
+export function humanizeStamps(text: string): string {
+  if (!text || text.indexOf('T') < 0) return text;
+  return text.replace(ISO_STAMP, (m) => (parseTs(m) ? fmtTsProse(m) : m));
+}
+
 export function fmtRange(range: [string, string] | null | undefined): string {
   if (!range) return '—';
   const [a, b] = range;
