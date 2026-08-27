@@ -107,12 +107,29 @@
   font-weight: 600;
   background: var(--panel-2);
   border-bottom-color: var(--border-strong);
-  white-space: nowrap;
+  /* NOT nowrap. "Source file" and "What the line shows" are ordinary headers, and holding them on one
+     line set a floor under every column that carried one. See the measurement below. */
+  white-space: normal;
 }
 .md-table tbody tr:nth-child(even) { background: color-mix(in srgb, var(--panel-2) 45%, transparent); }
-/* a cell holding an event id or a URL wraps rather than forcing the whole table wider than the panel */
+/* A cell holding an event id or a URL WRAPS rather than forcing the whole table wider than the column
+   it sits in — reported as "text is not fitting properly in tables, sometimes it does and sometimes it
+   doesn't". The "sometimes" was the column count: `td` already wrapped, but `white-space: nowrap` on
+   inline CODE did not, and an id, a file name and a rule id are exactly what the assistant puts in a
+   table, in code spans. Each one set a minimum width the table could not go below.
+
+   Measured in the docked panel (483px of table column, headless Edge), a six-column table:
+     shipped                          overflows by 260px   — a third of it behind a scrollbar
+     headers wrap, code still nowrap  overflows by  49px   — but 1,385px TALL: the code cells still
+                                                             hold the width and the headers are
+                                                             squeezed to a letter a line. A trap.
+     headers wrap + code may break    overflows by   0px   — fits, and 186px tall against 164.
+   So the two go together or neither does. Outside a table an inline code span stays unbroken (an id
+   split across lines is harder to read and to copy); inside one, fitting wins. The wrapper's
+   overflow-x stays as the fallback for a table that genuinely cannot fit. */
 .md-table td { overflow-wrap: anywhere; }
-.md-table td .md-code { white-space: nowrap; }
+.md-table th .md-code,
+.md-table td .md-code { white-space: normal; overflow-wrap: anywhere; }
 
 /* ── editor ── */
 .md-editor { position: relative; display: flex; flex-direction: column; gap: 4px; }
