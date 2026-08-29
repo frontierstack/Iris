@@ -136,6 +136,15 @@ function AnomaliesSection() {
           ))}
           {sevs.length > 0 && <button className="btn btn--sm btn--ghost" onClick={() => setSevs([])}>clear</button>}
         </div>
+        {/* The two numbers that decide what to look at first, stated once instead of counted off the
+            table — and IN the filter bar, because they describe what the filters left. */}
+        {!building && (all.data?.total ?? 0) > 0 && (
+          <div className="anom__count">
+            <span><b>{fmtInt(list.length)}</b> of {fmtInt(all.data!.total)} rule{all.data!.total === 1 ? '' : 's'}</span>
+            <span className="anom__count-sep">·</span>
+            <span><b>{fmtInt(totalHits)}</b> total hit{totalHits === 1 ? '' : 's'}</span>
+          </div>
+        )}
         <div className="anom__search">
           <Icon.Search className="anom__search-icon" aria-hidden />
           <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Filter by rule name or id"
@@ -143,14 +152,6 @@ function AnomaliesSection() {
           {text && <button className="anom__search-x" onClick={() => setText('')} aria-label="Clear filter">×</button>}
         </div>
       </div>
-      {/* The two numbers that decide what to look at first, stated once instead of counted off the table. */}
-      {!building && (all.data?.total ?? 0) > 0 && (
-        <div className="anom__summary">
-          <span><b>{fmtInt(list.length)}</b> of {fmtInt(all.data!.total)} rule{all.data!.total === 1 ? '' : 's'}</span>
-          <span className="anom__summary-sep">·</span>
-          <span><b>{fmtInt(totalHits)}</b> total hit{totalHits === 1 ? '' : 's'}</span>
-        </div>
-      )}
       {q.isError ? (
         <ErrorState title="Could not load anomalies" error={q.error} onRetry={() => void q.refetch()} />
       ) : building ? (
@@ -1046,6 +1047,13 @@ function RulesSection() {
             </button>
           )}
         </div>
+        {/* Only when the filters have actually narrowed it: the chips already carry every total, so an
+            unfiltered "104 of 104" would be the same number twice on one line. */}
+        {filter !== 'removed' && list.length !== live.length && (
+          <div className="anom__count">
+            <span><b>{fmtInt(list.length)}</b> of {fmtInt(live.length)} rule{live.length === 1 ? '' : 's'} shown</span>
+          </div>
+        )}
         {/* 33 built-ins plus your own: finding "the SSH brute force one" by scrolling is the cost this
             removes. Matches name, id and tags. */}
         <div className="anom__search">
@@ -1259,13 +1267,17 @@ function GraphFindingsSection() {
                 const n = counts[s] ?? 0;
                 return (
                   <button key={s} type="button" disabled={n === 0}
-                    className={cx('chip', sev.includes(s) && 'chip--on')}
+                    className={cx('chip', sev.includes(s) && 'on')} aria-pressed={sev.includes(s)}
                     onClick={() => setSev((cur) => (cur.includes(s) ? cur.filter((x) => x !== s) : [...cur, s]))}>
+                    <span className="sev__bar" style={{ background: sevVar(s), width: 3, height: 10, display: 'inline-block' }} />
                     {s}<span className="chip__count">{n}</span>
                   </button>
                 );
               })}
               {sev.length > 0 && <button className="linklike" onClick={() => setSev([])}>clear</button>}
+            </div>
+            <div className="anom__count">
+              <span><b>{fmtInt(rows.length)}</b> of {fmtInt(q.data.findings.length)} finding{q.data.findings.length === 1 ? '' : 's'}</span>
             </div>
           </div>
           <div className="table">

@@ -1930,8 +1930,8 @@
 }
 .anom-grid {
   grid-template-columns:
-    minmax(88px, 0.7fr) minmax(200px, 2fr) minmax(76px, 0.6fr) minmax(58px, 0.4fr)
-    minmax(120px, 0.9fr) minmax(120px, 0.9fr) minmax(120px, 1fr) 20px;
+    minmax(72px, 0.4fr) minmax(200px, 2.2fr) minmax(76px, 0.5fr) minmax(58px, 0.35fr)
+    minmax(120px, 0.85fr) minmax(120px, 0.85fr) minmax(120px, 1fr) 20px;
 }
 .anom__name {
   display: flex;
@@ -2002,7 +2002,7 @@
    say that. The two links are the point of the row, so they are dimmed, never hover-hidden. */
 .gfind-grid {
   grid-template-columns:
-    minmax(88px, 0.7fr) minmax(160px, 1.2fr) minmax(280px, 3fr) minmax(58px, 0.4fr) minmax(150px, 0.9fr);
+    minmax(72px, 0.4fr) minmax(160px, 1.1fr) minmax(280px, 3.2fr) minmax(58px, 0.35fr) minmax(150px, 0.8fr);
 }
 .gfind__what {
   display: flex;
@@ -2077,8 +2077,8 @@
 
 .rules-grid {
   grid-template-columns:
-    minmax(34px, 0.3fr) minmax(88px, 0.7fr) minmax(190px, 1.8fr) minmax(86px, 0.7fr)
-    minmax(180px, 1.6fr) minmax(52px, 0.4fr) minmax(110px, 0.8fr) minmax(120px, auto);
+    minmax(34px, 0.25fr) minmax(74px, 0.45fr) minmax(190px, 2fr) minmax(86px, 0.6fr)
+    minmax(180px, 1.7fr) minmax(52px, 0.35fr) minmax(110px, 0.7fr) minmax(120px, auto);
 }
 .rules__row--off {
   opacity: 0.55;
@@ -3601,22 +3601,48 @@ mark.hl {
    Two lists on one page (rules that FIRED, and the rule catalogue), both long. The toolbar is shared:
    filter chips that carry their own counts on the left, a text filter on the right. A chip that cannot
    say how many it would show is a guess the analyst has to click to resolve. */
+/* One BAR: the severity chips, what the filters left, and the text filter, on a single line inside a
+   surface of their own. They used to be a chip row with the search pinned to the far right and the
+   counts orphaned on a third line underneath, in a different alignment and a much heavier type — three
+   bands of controls for one question ("which of these rules am I looking at?"). Bounded by its own
+   border so the table below reads as the answer to it rather than as more of the same list. */
 .anom__toolbar {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px 14px;
   flex-wrap: wrap;
-  margin-bottom: 12px;
+  margin-bottom: 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
 }
 .anom__toolbar .chip-row { flex: 1 1 auto; }
+/* the numbers the filters produced, stated where the filters are */
+.anom__count {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  flex: 0 0 auto;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.anom__count b {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-brightest);
+}
+.anom__count-sep { color: var(--muted-3); }
 .anom__search {
   position: relative;
-  flex: 0 1 280px;
+  flex: 0 1 260px;
   min-width: 180px;
 }
 .anom__search input {
   width: 100%;
-  height: 32px;
+  height: 30px;
   padding-left: 30px;
   padding-right: 26px;
 }
@@ -3641,21 +3667,13 @@ mark.hl {
   cursor: pointer;
 }
 .anom__search-x:hover { color: var(--text-bright); }
-.anom__summary {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
-  font-size: var(--fs-xs);
-  color: var(--muted);
-}
-.anom__summary b {
-  font-family: var(--font-mono);
-  font-size: var(--fs-lg);
+.num {
+  text-align: right;
   font-variant-numeric: tabular-nums;
-  color: var(--text-brightest);
+  /* a right-aligned number sitting 12px from the next column's left-aligned text reads as one field:
+     "16 2026-08-26 14:54:20". The gap is the column's, not the table's. */
+  padding-right: 8px;
 }
-.anom__summary-sep { color: var(--muted-3); }
 /* a disabled severity chip means "no rule has fired at this level" — readable, not invisible */
 .chip:disabled { opacity: 0.45; cursor: default; }
 

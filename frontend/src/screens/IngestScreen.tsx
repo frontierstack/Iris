@@ -1191,7 +1191,7 @@ export function IngestScreen() {
         )}
         <div className="table">
           <div className="table__head sources-grid">
-            <div>File</div><div>Detected parser</div><div>Events</div><div className="num">Size</div><div>Time range</div><div>Confidence</div><div>State</div>
+            <div>File</div><div>Detected parser</div><div className="num">Events</div><div className="num">Size</div><div>Time range</div><div>Confidence</div><div>State</div>
             <div title="Whether the file has been parsed and normalized (phase 2), or is still raw text in the pool">Interpreted</div>
             <div title="Delete this log and its events">Delete</div>
           </div>
@@ -1224,7 +1224,7 @@ export function IngestScreen() {
               <div style={{ fontSize: 'var(--fs-md)' }} className="ellipsis">{s.parser}</div>
               {/* A parsing source has a real, rising event count in the tracker — an ellipsis threw it away
                   and left the one column that proves the parse is producing something blank. */}
-              <div className="cell-mono">
+              <div className="cell-mono num">
                 {s.state === 'PARSING'
                   ? (s.progress?.events ? <span title="events parsed so far">{fmtInt(s.progress.events)}</span>
                                         : <span className="muted">…</span>)
