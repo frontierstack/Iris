@@ -1163,7 +1163,8 @@ interface AiRun { id:string; prompt:string; focus:string; model:string;
   caseId:string; caseName:string;                  // the case active when the run STARTED ('' = case-less)
   startedAt:string; endedAt:string; updatedAt:string;
   state:'running'|'done'|'stopped'|'error';
-  reason:string /*complete|max_steps|timeout|stopped|budget|interrupted|error*/;
+  reason:string /*complete|max_steps|timeout|stopped|budget|tool_arguments|unfinished|interrupted|error*/;
+  /* tool_arguments: the provider could not parse the model's own tool-call arguments MAX_ARG_FAILURES turns running, so the tool channel was abandoned; unfinished: the model kept describing calls it never made. Both take the wrap-up turn, so `state` is 'done' and there IS a report — the nuance is in `reason`. */
   steps:number; toolCalls:number; answer:string; error:string;
   interrupted:boolean;                             // the server restarted while this run was going
   actions:AiAction[]; unverifiedCitations:string[];

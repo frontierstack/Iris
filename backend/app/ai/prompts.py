@@ -423,6 +423,37 @@ WRAP_UP = ("Your budget for this investigation is spent. Stop calling tools and 
            "now from what you have already established, citing the event ids you actually saw. State "
            "plainly what you did not get to.")
 
+# WRAP_UP without the budget claim. A run can reach the wrap-up turn for reasons that have nothing to
+# do with its budget — the provider could not parse the model's arguments often enough to make the tool
+# channel usable (`tool_arguments`), or the model kept narrating calls it never made (`unfinished`).
+# Telling it "your budget is spent" in those cases is simply false, and a false premise in the last
+# instruction of a run is how a report ends up apologising for a limit that was never reached.
+REPORT_NOW = ("Stop calling tools and write your final report now from what you have already "
+              "established, citing the event ids you actually saw. State plainly what you did not get "
+              "to and why.")
+
+# Injected when a turn DESCRIBED the call it was about to make and then sent no tool call at all
+# ("No summary note exists yet. Let me write one and update the case:"). An empty turn is how the loop
+# recognises that the model is finished, so without this that half-sentence became the final report and
+# the work it announced was never done. Bounded (MAX_CONTINUE_NUDGES) and answerable either way: the
+# model may say the work is finished, which is a legitimate reply and must stay one.
+CONTINUE_WORK = (
+    "YOU DID NOT MAKE THAT CALL — your last message says what you were about to do but contains no "
+    "tool call, so nothing happened. Make the call now, in this turn. If the work is genuinely "
+    "finished, say so in one line and give your final report instead — but do not describe an action "
+    "again without taking it.")
+
+# Injected into the TRANSCRIPT after the middle of the conversation has been folded into a running
+# brief. Only the panel used to be told; the model was handed a re-shaped conversation with no
+# explanation and had to infer what had happened from the brief itself. On a small-window provider that
+# is exactly the moment it starts over, or narrates instead of acting.
+COMPACTED_CONTINUE = (
+    "NOTE — the earlier part of this conversation was folded into the running brief above to fit the "
+    "model's context window. The objective, every verified event id, your findings and everything "
+    "already written to the case are preserved there. CONTINUE from where you left off — do not start "
+    "the investigation over, and do not repeat calls the brief says you have already made. Keep new "
+    "tool results narrow from here (tighter queries, counts and aggregates rather than rows).")
+
 
 def investigator_user_prompt(objective: str, context: str, prior: str = "") -> str:
     """The one user message. `prior` is the earlier-turns brief (ai/continuation.py) on a follow-up.

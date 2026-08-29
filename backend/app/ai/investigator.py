@@ -69,6 +69,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 from typing import Any, AsyncIterator, Callable, Optional
 
@@ -81,8 +82,9 @@ from .client import (AIError, BadToolArguments, ContextTooLong, LLMClient, Provi
                      absorb_text_calls, has_tool_call_syntax, parse_text_tool_calls)
 from .history import HISTORY
 from .system_prompts import PROMPTS
-from .prompts import (ARG_TOO_BIG, BUDGET_NOTICE, CHECK_IN, DOCUMENT_CHECK, NO_CASE_LINE, run_budget,
-                      RECORD_NUDGE, SUMMARY_CHECK, WRAP_UP, investigator_user_prompt)
+from .prompts import (ARG_TOO_BIG, BUDGET_NOTICE, CHECK_IN, COMPACTED_CONTINUE, CONTINUE_WORK,
+                      DOCUMENT_CHECK, NO_CASE_LINE, run_budget, RECORD_NUDGE, REPORT_NOW,
+                      SUMMARY_CHECK, WRAP_UP, investigator_user_prompt)
 from .tools import (REGISTRY, RunContext, ToolError, tool_budget_seconds, tool_schemas,
                     unverified_citations)
 
@@ -139,8 +141,19 @@ DOCUMENT_MIN_CALLS = 3
 # the run fails. The client already re-sends such a turn once (client.stream_chat); this is the next
 # layer — the model is TOLD its call did not run and asked for a smaller one, which is the only thing
 # that actually changes the outcome, since the failure is a call too long to finish in one reply.
-# Bounded because a model that cannot write a parsable call will not learn to on the tenth attempt.
+# Bounded because a model that cannot write a parsable call will not learn to on the tenth attempt —
+# but exhausting it is NOT the end of the run: the tool channel is unusable, so the loop stops calling
+# tools and takes the wrap-up turn. Ending a 37-call investigation with `state: error` and no report,
+# which is what a bare re-raise did, throws away every finding for a sampling accident. The count is
+# CONSECUTIVE: any turn the provider parses resets it, so three unrelated accidents spread across a
+# long run are not treated as one escalating failure.
 MAX_ARG_FAILURES = 3
+# How many times the loop may ask for a call the model DESCRIBED and then did not make. An empty turn
+# is how the loop recognises "finished", so a turn that trails off into the call it was about to make
+# ("Let me write one and update the case:") used to be published as the final report with the work
+# undone. Bounded, because a model that narrates twice will narrate a third time; the run then takes
+# the wrap-up turn instead of shipping the fragment.
+MAX_CONTINUE_NUDGES = 2
 # ---- the provider's OWN context window, which Iris cannot see and which is often SMALLER than
 # IRIS_AI_MAX_CONTEXT_TOKENS. Reported live as `openai HTTP 400 at .../chat/completions` and a dead
 # run: the analyst's llama.cpp gateway (context shift on — which only helps GENERATED tokens) refused
@@ -308,6 +321,56 @@ def _fit_context(messages: list[dict[str, Any]], actions: list[dict[str, Any]],
     if after >= before:
         folded, elided = 0, 0
     return messages, folded, elided, after < ceiling
+
+
+def _tell_compacted(messages: list[dict[str, Any]]) -> bool:
+    """Tell the MODEL, in the transcript, that the middle of the conversation was folded.
+
+    Only the panel was told. The model was handed a re-shaped conversation and had to work out from the
+    brief alone what had happened to it — and on the run this was written for, the very next turn was
+    "No summary note exists yet. Let me write one and update the case:" with no call attached, which the
+    loop read as completion.
+
+    Idempotent: a single turn can fold several times (`_fit_context` tries progressively shorter tails),
+    and repeating the note once per fold would itself be transcript to carry.
+    """
+    for m in reversed(messages):
+        if m.get("role") != "user":
+            continue
+        if str(m.get("content") or "").startswith(COMPACTED_CONTINUE[:40]):
+            return False
+        break
+    messages.append({"role": "user", "content": COMPACTED_CONTINUE})
+    return True
+
+
+# An action the model announced in the first person. Deliberately a small, closed list of openings: the
+# cost of a MISS is the original bug (a dangling sentence published as the report), and the cost of a
+# false positive is one wasted turn, but a detector that fires on ordinary report prose would waste one
+# on every run.
+_PROMISE_RE = re.compile(
+    r"\b(let me\b|let's\b|i'?ll\b|i will\b|i'?m going to\b|i am going to\b|"
+    r"going to (?:add|write|record|create|update|call|check|search|query|build|annotate)\b|"
+    r"now i(?:'?ll| will)?\b|next,? i\b)",
+    re.I)
+
+
+def _promises_action(text: str) -> bool:
+    """Did this turn narrate the call it was about to make, instead of making it?
+
+    Both conditions have to hold, because the phrase alone appears in perfectly good reports ("I will
+    note that the account was disabled"):
+      • an action phrase in the LAST 400 characters — where a trailing announcement lives;
+      • and either the text ends on a colon (a real report does not trail off into one) or it is under
+        300 characters (too short to be the report a run owes the analyst).
+    """
+    body = (text or "").strip()
+    if not body:
+        return False
+    tail = body[-400:]
+    if not _PROMISE_RE.search(tail):
+        return False
+    return body.endswith(":") or len(body) < 300
 
 
 def _has_summary(actions: list[dict[str, Any]]) -> bool:
@@ -742,7 +805,9 @@ async def investigate(store: Any, objective: str, run_id: str,
     tool_calls = 0
     compactions = 0
     check_ins = 0            # scope nudges sent (see CHECK_IN_MIN_CALLS)
-    arg_failures = 0         # turns the provider refused for unparsable tool arguments
+    arg_failures = 0         # CONSECUTIVE turns the provider refused for unparsable tool arguments
+    provider_args_exhausted = False   # the tool channel is unusable — go to the wrap-up, not to an error
+    continue_nudges = 0      # times the model was asked for a call it described but never made
     barren = 0               # consecutive tool calls that returned nothing new (cached / refused / empty)
     next_check_in = CHECK_IN_MIN_CALLS
     budget_noticed = False   # the "leave room for the report" nudge has been sent once
@@ -815,6 +880,14 @@ async def investigate(store: Any, objective: str, run_id: str,
                     break
                 messages = candidate
                 compactions += 1
+                _tell_compacted(messages)
+                # A fold can swallow the very message carrying DOCUMENT_CHECK / SUMMARY_CHECK — that is
+                # how a run ended having been asked for its summary note and never seeing the request.
+                # Re-armed only while the work is still outstanding, so neither can be asked twice.
+                if documented and ctx.writes == 0:
+                    documented = False
+                if summarised and not _has_summary(ctx.actions):
+                    summarised = False
                 note = (f"compacted {dropped} earlier steps into a running brief "
                         f"(compaction {compactions} of {lim['maxCompactions']}) — the objective, the "
                         f"verified event ids and everything already written to the case were kept")
@@ -901,7 +974,17 @@ async def investigate(store: Any, objective: str, run_id: str,
                     # for a sampling accident. Tell the model instead, and let it send a smaller call.
                     arg_failures += 1
                     if arg_failures > MAX_ARG_FAILURES:
-                        raise
+                        # The tool channel is unusable, but the investigation is not: 37 calls and 16
+                        # writes were on the case when this used to `raise`. Stop calling tools and take
+                        # the wrap-up turn, which is exactly what a budget stop does.
+                        provider_args_exhausted = True
+                        note = (f"the provider could not parse the tool-call arguments the model wrote "
+                                f"{MAX_ARG_FAILURES} turns running; no further tool calls will be made. "
+                                f"Writing the report from what the run already established. Provider "
+                                f"said: {str(exc)[:200]}")
+                        HISTORY.append(run_id, {"kind": "warning", "text": note})
+                        yield {"type": "warning", "message": note, "ids": []}
+                        break
                     note = (f"the provider could not parse the tool-call arguments the model wrote "
                             f"(attempt {arg_failures} of {MAX_ARG_FAILURES}); nothing ran. Asked it to "
                             f"send a smaller call. Provider said: {str(exc)[:200]}")
@@ -932,6 +1015,11 @@ async def investigate(store: Any, objective: str, run_id: str,
                             f"{'' if folded or elided else ' (nothing left to fold: the system prompt, the tool definitions and the objective alone are over the limit)'}"
                             f" — give the model a larger context window (n_ctx / max context) or continue "
                             f"in a new conversation. Everything written to the case so far is kept.") from exc
+                    _tell_compacted(messages)
+                    if documented and ctx.writes == 0:
+                        documented = False
+                    if summarised and not _has_summary(ctx.actions):
+                        summarised = False
                     note = (f"the provider refused the request because the conversation no longer fits the "
                             f"model's context window (estimated ~{est:,} tokens). Folded {folded} earlier "
                             f"message(s) into a running brief"
@@ -939,10 +1027,16 @@ async def investigate(store: Any, objective: str, run_id: str,
                             + f"; this run now compacts at ~{ceiling:,} tokens. Retrying the same turn — "
                             f"the objective, the verified event ids and everything already written to the "
                             f"case were kept"
-                            + ("" if fits else ". It may still not fit"))
-                    HISTORY.append(run_id, {"kind": "warning", "text": note})
-                    yield {"type": "warning", "message": note, "ids": [], "contextCeiling": ceiling,
-                           "compactions": compactions}
+                            + (", and the assistant continues from where it was" if fits
+                               else ". It may still not fit"))
+                    # A RECOVERED fold is the mechanism working, not a failure — and it was the last
+                    # line on screen when a run ended for an unrelated reason, which is what made the
+                    # fold look like the cause. A fold that may still not fit stays a warning: that one
+                    # genuinely may end the run.
+                    kind = "warning" if not fits else "status"
+                    HISTORY.append(run_id, {"kind": kind, "text": note})
+                    yield {"type": kind, "message": note, "text": note, "ids": [],
+                           "contextCeiling": ceiling, "compactions": compactions}
                     continue
                 except ProviderUnavailable as exc:
                     prov_tries += 1
@@ -963,8 +1057,14 @@ async def investigate(store: Any, objective: str, run_id: str,
                     if runs.stop_requested(run_id):
                         break
                     continue
+            if provider_args_exhausted:
+                reason = "tool_arguments"
+                break
             if retry_turn:
                 continue
+            # CONSECUTIVE, not cumulative: the provider parsed this turn, so whatever went wrong before
+            # was a sampling accident and not an escalating failure.
+            arg_failures = 0
             if runs.stop_requested(run_id):
                 answer = final_msg.get("content") or "".join(buf)
                 reason, state = "stopped", "stopped"
@@ -1046,6 +1146,23 @@ async def investigate(store: Any, objective: str, run_id: str,
                     HISTORY.append(run_id, {"kind": "status", "text": note})
                     yield {"type": "status", "text": note, "summaryCheck": True}
                     continue
+                # AN EMPTY TURN IS HOW THE LOOP KNOWS THE MODEL IS FINISHED — and a model handed a
+                # freshly folded transcript answered "No summary note exists yet. Let me write one and
+                # update the case:" with no call attached. That half-sentence became the final report
+                # and the summary note was never written. Ask for the call; past the bound, take the
+                # wrap-up turn so the analyst gets a real report rather than the fragment.
+                if _promises_action(answer) and not runs.stop_requested(run_id):
+                    if continue_nudges < MAX_CONTINUE_NUDGES:
+                        continue_nudges += 1
+                        messages.append({"role": "user", "content": CONTINUE_WORK})
+                        note = ("the assistant described a tool call and did not make it — asked it to "
+                                f"make the call or say the work is finished (nudge {continue_nudges} of "
+                                f"{MAX_CONTINUE_NUDGES})")
+                        HISTORY.append(run_id, {"kind": "status", "text": note})
+                        yield {"type": "status", "text": note, "continueNudge": continue_nudges}
+                        continue
+                    reason = "unfinished"
+                    break
                 reason = "complete"
                 break
 
@@ -1061,8 +1178,10 @@ async def investigate(store: Any, objective: str, run_id: str,
                 # cost the run a turn and the analyst the write. Try strict JSON, then the mechanical
                 # repair in ai/argrepair.py — and if the repair DROPPED anything, say so loudly:
                 # a write that quietly lands nine of ten links is the silent-omission bug.
+                writes = bool(getattr(REGISTRY.get(name), "writes", False))
                 repairs: list[str] = []
                 parse_err = ""
+                blocked_write = False
                 try:
                     args = orjson.loads(raw_args) if raw_args.strip() else {}
                     if not isinstance(args, dict):
@@ -1074,9 +1193,28 @@ async def investigate(store: Any, objective: str, run_id: str,
                         parse_err = _bad_args_message(exc, finish)
                     else:
                         args = fixed
+                # A SALVAGED WRITE IS NOT A WRITE. `argrepair` closes a cut-off blob by dropping the
+                # incomplete trailing element, which is a reasonable trade for a read — the model can
+                # see what came back and ask again. For a write it is the silent-omission bug: an
+                # add_note whose `text` survived and whose trailing `citedEventIds` did not would land
+                # on the analyst's case as a finding with no evidence behind it. On the run this was
+                # written for, the salvage happened to come out `{}` and the schema check refused it —
+                # that was luck. Refuse it here instead, before the handler exists to be called.
+                if writes and any("CUT OFF" in r for r in repairs):
+                    blocked_write = True
+                    args, repairs = {}, []
+                    parse_err = ("your arguments were CUT OFF before they finished, and this tool WRITES "
+                                 "to the case — the call was refused whole rather than run with the "
+                                 "missing part guessed at. NOTHING was changed. Send it again smaller: "
+                                 "split a long `links` / `eventIds` / note into several calls and keep "
+                                 "prose short.")
                 tool_calls += 1
                 call_id = str(call.get("id") or f"{run_id}-c{tool_calls}")
-                writes = bool(getattr(REGISTRY.get(name), "writes", False))
+                # Stamped INTO the assistant message too (it is the same dict — `final_msg` is already
+                # on the transcript), so the tool result below answers an id the provider can match. A
+                # tool message whose `tool_call_id` names no call in the preceding assistant turn is
+                # rejected outright by an OpenAI-shaped API.
+                call["id"] = call_id
                 HISTORY.append(run_id, {"kind": "tool", "id": call_id, "name": name, "args": args,
                                         "writes": writes})
                 # `call_id`, NOT `call.get("id")`: a provider that omits the id (or repeats one) made
@@ -1084,7 +1222,14 @@ async def investigate(store: Any, objective: str, run_id: str,
                 # first null-id card and the rest span forever. The persisted transcript already used
                 # the stamped id; the stream now uses the same one, so live and reloaded agree.
                 yield {"type": "tool_call", "id": call_id, "name": name, "arguments": args, "step": step}
-                if repairs:
+                if blocked_write:
+                    note = (f"the model's arguments for {name} were CUT OFF mid-value (the reply hit its "
+                            f"token limit). {name} writes to the case, so the call was refused whole "
+                            f"rather than repaired — the write was blocked and nothing was changed. The "
+                            f"assistant was asked to send a smaller call.")
+                    HISTORY.append(run_id, {"kind": "warning", "text": note})
+                    yield {"type": "warning", "message": note, "ids": []}
+                elif repairs:
                     note = (f"the model's arguments for {name} were not valid JSON and were repaired "
                             f"before the call: {'; '.join(repairs)}. Check what this "
                             f"{'wrote to the case' if writes else 'returned'}.")
@@ -1101,7 +1246,10 @@ async def investigate(store: Any, objective: str, run_id: str,
                     # the model has to know what it actually sent, or it cannot re-send what was lost
                     payload = {**payload, "argumentsRepaired": repairs}
                 body = _clip(orjson.dumps(payload).decode(), result_chars)
-                messages.append({"role": "tool", "tool_call_id": call.get("id"), "name": name, "content": body})
+                # `call_id`, not `call.get("id")`: the live stream and the persisted transcript both
+                # use the stamped id, and a provider that omits or repeats ids otherwise desynchronises
+                # the message sent BACK to it from the two the analyst is looking at.
+                messages.append({"role": "tool", "tool_call_id": call_id, "name": name, "content": body})
                 productive = _returned_something(ok, result)
                 barren = 0 if productive else barren + 1
                 if writes and ok:
@@ -1122,11 +1270,20 @@ async def investigate(store: Any, objective: str, run_id: str,
         # This is also where raw tool-call syntax used to reach the analyst: the final turn is asked for
         # with tool_choice:'none', so a model that still wants to act writes the call out as prose. It is
         # stripped here and reported as what it was — an attempted call after the budget ran out.
-        if reason in ("max_steps", "timeout", "budget") and not runs.stop_requested(run_id):
-            note = f"budget reached ({reason}) — writing the final report"
+        # `tool_arguments` and `unfinished` are not budget stops: the run is being taken off the tool
+        # channel because that channel is unusable, or because the model kept describing calls without
+        # making them. Both still owe the analyst the report the work earned — which is the whole reason
+        # this turn exists — so they route here too, with a prompt that does not claim a spent budget.
+        if reason in ("max_steps", "timeout", "budget", "tool_arguments", "unfinished") and not runs.stop_requested(run_id):
+            budget_stop = reason in ("max_steps", "timeout", "budget")
+            note = (f"budget reached ({reason}) — writing the final report" if budget_stop else
+                    ("the provider could not parse the assistant's tool calls — writing the final report "
+                     "from what it established" if reason == "tool_arguments" else
+                     "the assistant kept describing calls without making them — asking it for the final "
+                     "report"))
             HISTORY.append(run_id, {"kind": "status", "text": note})
             yield {"type": "status", "text": note}
-            messages.append({"role": "user", "content": WRAP_UP})
+            messages.append({"role": "user", "content": WRAP_UP if budget_stop else REPORT_NOW})
             buf = []
             wrap_msg: dict[str, Any] = {}
             async for item in client.stream_chat(messages, tools=None, temperature=0.1,
@@ -1155,8 +1312,13 @@ async def investigate(store: Any, objective: str, run_id: str,
         if has_tool_call_syntax(answer):
             answer, attempted = parse_text_tool_calls(answer)
             names = ", ".join(sorted({str((c.get("function") or {}).get("name") or "?") for c in attempted})) or "a tool"
-            note = (f"the model tried to call {names} after its budget ran out; the call was NOT executed and "
-                    "its markup was removed from the report")
+            # The wrap-up turn is reached for reasons other than a spent budget now (`tool_arguments`,
+            # `unfinished`), and telling the analyst a budget ran out when it did not is a false claim
+            # about their run.
+            note = (f"the model tried to call {names} "
+                    + ("after its budget ran out" if reason in ("max_steps", "timeout", "budget")
+                       else "in its final report")
+                    + "; the call was NOT executed and its markup was removed from the report")
             HISTORY.append(run_id, {"kind": "warning", "text": note})
             yield {"type": "warning", "message": note, "ids": []}
 
