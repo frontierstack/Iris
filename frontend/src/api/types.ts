@@ -138,7 +138,10 @@ export interface GraphQuery { scope?: Scope; types?: EntityType[]; relations?: R
   /** Keep the strongest N edges (by event count); overlays are never dropped. Default 20 000. */
   maxEdges?: number;
   /** Omit per-edge event ids and first/last stamps — the canvas never reads them. */
-  lean?: boolean }
+  lean?: boolean;
+  /** Node ids that must survive the `limit` cap — the entity a link arrived asking for. Reorders the
+   *  ranking only; never overrules types/sources/minCount. */
+  pin?: string[] }
 export interface GraphNodeDetail extends GraphNode {
   neighbours: GraphEdge[]; timeline: { ts: string; eventId: string; msg: string; sev: Severity }[];
   /** Which rules fired on this entity's events and how often — exact, over the node's own query. */
@@ -845,6 +848,10 @@ export interface GraphFinding {
   metric: number; metricLabel: string;
   /** neighbour node ids that make up the fan-out (capped) */
   related: string[];
+  /** The other end, when the finding is about ONE RELATION rather than a node's fan-out ('' for
+   *  fan-out rules). Without it the row could only offer everything the node ever did — which is
+   *  not what was flagged. See GraphFinding.peerId in backend/app/graph_rules.py. */
+  peerId: string;
   citedEventIds: string[];
   first: string; last: string;
 }

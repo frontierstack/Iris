@@ -89,11 +89,16 @@ def graph(scope: str = Query("all", pattern="^(all|case)$"),
           minDegree: int = Query(1, ge=1, le=100),
           focus: Optional[str] = None, hops: int = Query(1, ge=0, le=4),
           limit: int = Query(DEFAULT_LIMIT, ge=10, le=2000), q: str = "", sources: str = "",
-          maxEdges: int = Query(DEFAULT_MAX_EDGES, ge=100, le=500_000), lean: bool = False) -> GraphV2:
+          maxEdges: int = Query(DEFAULT_MAX_EDGES, ge=100, le=500_000), lean: bool = False,
+          pin: str = "") -> GraphV2:
     """The typed graph.
 
     `q` is a free-text filter over node values/labels (case-insensitive substring) — the graph's own
     query bar. Combine with `types`, `relations`, `minCount`, and `focus`+`hops` for a neighbourhood.
+
+    `pin` is a comma-separated list of node ids that must survive the `limit` cap — the node a link
+    arrived asking for. It only reorders the ranking; it never overrules `types`, `sources` or
+    `minCount`.
 
     `minCount` is RELATIONSHIP STRENGTH: drop every edge supported by fewer than that many events, and
     then every node left with no edge. It does NOT filter how many events mention an entity. Analyst-added
@@ -129,7 +134,8 @@ def graph(scope: str = Query("all", pattern="^(all|case)$"),
     files = _files_for(sources)
     nodes, edges, stats = gb.select(types=tset, relations=rset, min_count=minCount, focus=focus, hops=hops,
                                     limit=limit, in_case=in_case, files=files, query=q,
-                                    min_degree=minDegree, max_edges=maxEdges, lean=lean)
+                                    min_degree=minDegree, max_edges=maxEdges, lean=lean,
+                                    pin={p for p in (pin or "").split(",") if p.strip()})
     if q.strip():
         stats = {**stats, "query": q.strip()}
     # Authored nodes and links are OVERLAYS: exempt from minCount/minDegree (they carry no event count

@@ -654,7 +654,7 @@ export function SearchScreen() {
           <span className="chip-row__label">Severity</span>
           {SEVERITIES.map((s) => (
             <button key={s} className={cx('chip', sevs.includes(s) && 'on')} onClick={() => toggleSev(s)} aria-pressed={sevs.includes(s)}>
-              <span className="sev__bar" style={{ background: `var(--sev-${s})`, width: 3, height: 10, display: 'inline-block' }} />
+              <span className="sev-dot" style={{ background: `var(--sev-${s})` }} />
               {s}
             </button>
           ))}

@@ -1049,7 +1049,8 @@ class GraphBuilder:
                files: Optional[set[str]] = None,
                query: str = "",
                max_edges: int = 0, lean: bool = False,
-               min_degree: int = 1) -> tuple[list[GraphNode], list[GraphEdge], dict[str, Any]]:
+               min_degree: int = 1,
+               pin: Optional[set[str]] = None) -> tuple[list[GraphNode], list[GraphEdge], dict[str, Any]]:
         """`files` restricts the view to entities and relations SEEN IN those log files.
 
         Both sides are exact: a node keeps a per-file tally of every event it appeared in, and an edge
@@ -1104,6 +1105,17 @@ class GraphBuilder:
                         keep.add(i)
                         break
             ranked = [i for i in ranked if i in keep]
+        # 1c. PINNED nodes are moved to the front of the rank order so the cap cannot drop them. A link
+        # that names an entity has already said which one matters — the graph findings on Anomalies
+        # arrive as focus=<node>&entity=<the flagged peer> — and being ranked out of a 50-node cap makes
+        # the screen answer "that node is not in the current view" about the very thing it was asked to
+        # show. Same shape as the search box above, where a MATCH outranks a neighbour.
+        # It only ever REORDERS: a node already removed by types/files/min_count stays removed, because
+        # those are filters the analyst set and a pin is not a licence to overrule them.
+        if pin:
+            head = [i for i in ranked if i in pin]
+            if head:
+                ranked = head + [i for i in ranked if i not in pin]
         # 2. cap
         truncated = len(ranked) > limit
         # 3. emit the nodes FIRST, then derive the id set the edges are allowed to reference. An edge whose

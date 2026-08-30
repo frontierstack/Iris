@@ -4047,6 +4047,66 @@ mark.hl {
   margin-left: -2px;
 }
 
+/* ── The COLLAPSED card ────────────────────────────────────────────────────
+   Closed is the state this page is usually in — four of these stack into the overview — so it has to
+   be the state that looks composed, and it did not: each card was as tall as its prose ran, so the
+   four heads sat at four different heights with their controls scattered down the right edge, and a
+   three-line paragraph was doing the work of a caption.
+
+   Closed: the summary is clamped to ONE line, the padding tightens and every card shares a minimum
+   height, so the four are the same height and read as one set — two lines was tried first and left
+   the cards at three different heights, which is the thing that looked wrong. Open: the clamp lifts
+   and the full text is there beside the body it describes. Nothing is lost, it is deferred to the
+   moment it is worth reading, and the numbers that a closed card must still carry are in the
+   figures, not in the prose.
+
+   The whole head is the target. It used to look inert until the pointer reached the Expand pill on
+   the far right, a long way from the title anyone is actually aiming at. */
+.anomalies .sec--closed { padding-top: 14px; padding-bottom: 14px; min-height: 74px; }
+.anomalies .sec--closed .sec__summary {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+  overflow: hidden;
+}
+.anomalies .sec--closed:hover {
+  background: var(--surface-2);
+  box-shadow: inset 2px 0 0 var(--accent-border);
+}
+.anomalies .sec--closed:hover .sec__title { color: var(--accent); }
+.anomalies .sec--closed:hover .sec__eyebrow { color: var(--text-4); }
+.anomalies .sec--closed:hover .sec__idx { border-color: var(--accent-border); color: var(--text-3); }
+/* the toggle's focus ring has to trace the CARD, not a rectangle floating inside it */
+.anomalies .sec--card .sec__toggle:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--accent-border);
+  border-radius: var(--radius-md);
+}
+/* Expand/Collapse is a STATE control, so it reads as text with a glyph rather than as a button
+   competing with the real actions beside it — and it keeps the same width in both states, or the
+   head twitches sideways every time a card opens. */
+.anomalies .sec__state {
+  justify-content: center;
+  min-width: 104px;
+  padding: 6px 12px;
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  letter-spacing: 0;
+  color: var(--muted-2);
+  background: var(--panel-2);
+}
+.anomalies .sec-card > .sec--card:hover .sec__state {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+.anomalies .sec-card { transition: border-color var(--t-fast); }
+.anomalies .sec-card:hover { border-color: var(--border-strong); }
+/* an OPEN card is the one being worked in: its head keeps its own surface and divider so the body
+   below reads as belonging to it */
+.anomalies .sec--open { background: var(--surface-1); }
+
 /* ── The filter bar ────────────────────────────────────────────────────────
    One control, one answer: a segmented group instead of four loose pills. Sized to the input
    beside it so the strip has a single height. */
@@ -4127,62 +4187,11 @@ mark.hl {
 .anomalies .anom__search { flex: 0 1 250px; }
 .anomalies .anom__search input { height: 28px; }
 
-/* ── Tables ────────────────────────────────────────────────────────────────
-   Column headings are labels, not signage: sentence case in the UI face, quiet, on the table's own
-   ground. */
-.anomalies .table__head {
-  padding-top: 8px;
-  padding-bottom: 8px;
-  background: transparent;
-  border-bottom: 1px solid var(--border);
-  font-family: var(--font-ui);
-  font-size: var(--fs-xs);
-  font-weight: 500;
-  letter-spacing: 0;
-  text-transform: none;
-  color: var(--muted-2);
-}
-.anomalies .table__row {
-  min-height: 42px;
-  border-bottom-color: var(--border-2);
-}
-/* the severity rail is a scanning aid beside a pill that already names the level — 2px, not 3 */
-.anomalies .table__row--sev { box-shadow: inset 2px 0 0 var(--row-sev, transparent); }
-.anomalies .table__row.clickable:focus-visible {
-  outline: none;
-  background: var(--hover);
-  box-shadow: inset 2px 0 0 var(--row-sev, transparent), inset 0 0 0 1px var(--accent-border);
-}
-.anomalies .num { font-variant-numeric: tabular-nums; }
-
-/* ── Severity ──────────────────────────────────────────────────────────────
-   One tinted pill with a dot, in the level's own colour, sentence case. `SevTag` already renders a
-   coloured bar element and that markup is shared app-wide, so the bar is restyled INTO the dot here
-   rather than forking the component — the inline colour it carries is what tints the dot. */
-.anomalies .sev-critical { --sev-c: var(--sev-critical); --sev-c-bg: var(--sev-critical-bg); }
-.anomalies .sev-high { --sev-c: var(--sev-high); --sev-c-bg: var(--sev-high-bg); }
-.anomalies .sev-medium { --sev-c: var(--sev-medium); --sev-c-bg: var(--sev-medium-bg); }
-.anomalies .sev-low { --sev-c: var(--sev-low); --sev-c-bg: var(--sev-low-bg); }
-.anomalies .sev-info { --sev-c: var(--sev-info); --sev-c-bg: var(--sev-info-bg); }
-.anomalies .sev {
-  gap: 6px;
-  padding: 2px 9px 2px 7px;
-  border-radius: var(--radius-pill);
-  border: 1px solid color-mix(in srgb, var(--sev-c, var(--border-strong)) 30%, transparent);
-  background: var(--sev-c-bg, var(--surface-2));
-  color: var(--sev-c, var(--text-3));
-  font-family: var(--font-ui);
-  font-size: var(--fs-xs);
-  font-weight: 500;
-  letter-spacing: 0;
-  text-transform: capitalize;
-}
-.anomalies .sev__bar {
-  width: 5px;
-  height: 5px;
-  flex: 0 0 5px;
-  border-radius: 50%;
-}
+/* The table head, the row floor and focus ring, the severity pill and tabular numerals all moved to
+   components.css and now apply to every table in the app — on request, after this page proved them.
+   A second copy scoped to `.anomalies` would be the thing that drifts. What stays below is only what
+   is genuinely this page's. Rows here carry a two-line name cell, so they get a taller floor. */
+.anomalies .table__row { min-height: 42px; }
 
 /* ── Timestamps ────────────────────────────────────────────────────────────
    A stamp is read as a date first and a time second, and the column an analyst runs their eye down

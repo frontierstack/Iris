@@ -672,19 +672,52 @@
 }
 
 /* ───────── Severity ───────── */
+/* Severity was stated twice on a row — a coloured rail AND an uppercase mono word. It is one pill
+   now: a dot in the level's own colour, the level in sentence case, on a tint of itself. `SevTag`
+   already rendered a coloured bar element carrying that colour inline, so the bar becomes the dot
+   and no component had to be forked. */
+.sev-critical { --sev-c: var(--sev-critical); --sev-c-bg: var(--sev-critical-bg); }
+.sev-high { --sev-c: var(--sev-high); --sev-c-bg: var(--sev-high-bg); }
+.sev-medium { --sev-c: var(--sev-medium); --sev-c-bg: var(--sev-medium-bg); }
+.sev-low { --sev-c: var(--sev-low); --sev-c-bg: var(--sev-low-bg); }
+.sev-info { --sev-c: var(--sev-info); --sev-c-bg: var(--sev-info-bg); }
 .sev {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-family: var(--font-mono);
-  font-size: var(--fs-xxs);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  padding: 2px 9px 2px 7px;
+  border-radius: var(--radius-pill);
+  border: 1px solid color-mix(in srgb, var(--sev-c, var(--border-strong)) 30%, transparent);
+  background: var(--sev-c-bg, var(--surface-2));
+  color: var(--sev-c, var(--text-3));
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: capitalize;
 }
 .sev__bar {
-  width: 3px;
-  height: 12px;
-  flex: 0 0 3px;
+  width: 5px;
+  height: 5px;
+  flex: 0 0 5px;
+  border-radius: 50%;
+}
+/* A severity dot outside a pill — filter chips on Search and the case screen. It exists because
+   those two hard-coded `width: 3, height: 10` INLINE for the old bar, and an inline size wins over
+   any stylesheet: rounding `.sev__bar` into a dot turned them into thin ovals instead. */
+.sev-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+}
+/* Event detail states severity as one of a row of labelled facts, and each fact is ALREADY a chip.
+   A pill inside a chip is a box in a box, so there the pill unwinds back to a dot and a word. */
+.detail__fact .sev {
+  padding: 0;
+  border: 0;
+  background: none;
 }
 .sev-chip {
   font-family: var(--font-mono);
@@ -731,16 +764,20 @@
   padding: var(--row-pad-y) var(--row-pad-x);
   align-items: center;
 }
+/* A column heading is a LABEL, not signage. Uppercase letter-spaced mono is the treatment this UI
+   already dropped for pills and badges (sentence case is the UI face here) and the tables were the
+   last place still using it — quiet, in the page's own type, on the table's own ground. */
 .table__head {
-  padding-top: 9px;
-  padding-bottom: 9px;
-  background: var(--panel-2);
+  padding-top: 8px;
+  padding-bottom: 8px;
+  background: transparent;
   border-bottom: 1px solid var(--border);
-  font-family: var(--font-mono);
-  font-size: var(--fs-xxs);
-  letter-spacing: 0.12em;
-  color: var(--muted);
-  text-transform: uppercase;
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--muted-2);
+  text-transform: none;
   /* not sticky: sticky heads inside clipped/rounded containers hide rows on some browsers */
 }
 .table__row {
@@ -750,9 +787,13 @@
   text-align: left;
   width: 100%;
   position: relative;
+  /* a floor, not a height: a one-line row already clears this, so nothing gets taller and a row with
+     an unusually short cell stops collapsing below its neighbours */
+  min-height: 36px;
 }
+/* 2px, not 3: the rail is a scanning aid beside a severity pill that already names the level */
 .table__row--sev {
-  box-shadow: inset 3px 0 0 var(--row-sev, transparent);
+  box-shadow: inset 2px 0 0 var(--row-sev, transparent);
 }
 /* severity column: keep the label on one line so the grid track never stretches */
 .sev-cell {
@@ -767,9 +808,15 @@
 .table__row.clickable {
   cursor: pointer;
 }
-.table__row.clickable:hover,
-.table__row.clickable:focus-visible {
+.table__row.clickable:hover {
   background: var(--hover);
+}
+/* a keyboard user has to be able to SEE the row they are on; a background tint alone is not enough
+   next to the hover tint, so focus draws a ring and keeps the severity rail */
+.table__row.clickable:focus-visible {
+  outline: none;
+  background: var(--hover);
+  box-shadow: inset 2px 0 0 var(--row-sev, transparent), inset 0 0 0 1px var(--accent-border);
 }
 .table__row.selected {
   background: var(--selected);
@@ -781,6 +828,8 @@
   font-family: var(--font-mono);
   font-size: var(--fs-md);
 }
+.table__head .num,
+.table__row .num { font-variant-numeric: tabular-nums; }
 .cell-dim {
   color: var(--muted-2);
 }

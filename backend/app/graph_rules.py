@@ -62,12 +62,19 @@ class GraphFinding:
     citedEventIds: list[str]
     first: str = ""
     last: str = ""
+    # The OTHER END, when the finding is about one RELATION rather than about a node's fan-out.
+    # A fan-out finding ("this account was used on nine hosts") is a property of the node and
+    # `related` is the nine; a relation finding ("A to B is 99% failures") is a property of the
+    # PAIR, and without naming B the screen can only offer everything A ever did — which is what
+    # "the graph and events do not show the specific flagged items" meant. Empty for fan-out rules.
+    peerId: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {"ruleId": self.ruleId, "name": self.name, "sev": self.sev, "nodeId": self.nodeId,
                 "nodeType": self.nodeType, "nodeValue": self.nodeValue, "summary": self.summary,
                 "metric": self.metric, "metricLabel": self.metricLabel, "related": self.related,
-                "citedEventIds": self.citedEventIds, "first": self.first, "last": self.last}
+                "citedEventIds": self.citedEventIds, "first": self.first, "last": self.last,
+                "peerId": self.peerId}
 
 
 # --------------------------------------------------------------------------- the catalogue
@@ -291,16 +298,47 @@ def _cite(builder: Any, node: Any) -> list[str]:
     return out
 
 
+def _cite_edge(edge: Any) -> list[str]:
+    """Event ids for one RELATION — these are already ids, kept by the aggregator (capped at 20).
+
+    Newest last in insertion order, so the newest-first convention `_cite` uses is reproduced by
+    reversing. No pool lookup is needed and none is done: an edge stores ids, a node stores indices.
+    """
+    out: list[str] = []
+    for eid in reversed(getattr(edge, "events", ()) or ()):
+        if eid and eid not in out:
+            out.append(eid)
+            if len(out) >= MAX_CITATIONS:
+                break
+    return out
+
+
 def _finding(rule: Rule, node_id: str, node: Any, summary: str, metric: int, label: str,
              related: Iterable[str], builder: Any, sev: Optional[str] = None,
-             overrides: Optional[dict[str, dict]] = None) -> GraphFinding:
+             overrides: Optional[dict[str, dict]] = None,
+             peer: str = "", edge: Any = None) -> GraphFinding:
+    """`edge` is the relation the finding is ABOUT, when it is about one.
+
+    Citations then come from that relation's own events instead of the node's most recent ones. The
+    difference is not cosmetic: 10.0.0.134 has a failing relation to 103.156.38.160 AND one to
+    103.156.9.160, and citing the node gave both findings the SAME eight event ids — neither set
+    being events of the relation being claimed. A citation that resolves cleanly to the wrong
+    evidence is the worst failure available here, so an edge finding cites its edge.
+    """
     t, v = _split(node_id)
     ov = (overrides or {}).get(rule.id) or {}
+    # The edge is preferred and the node is the fallback, never the other way round: the aggregator
+    # keeps at most 20 ids per relation and an event with no id contributes none, so an edge CAN come
+    # back with nothing. "A finding you cannot open is an assertion" outranks the precision here —
+    # the node's events are still genuinely this node's, and this is the behaviour that shipped
+    # before. Every real relation has ids, so the exact path is the one that runs.
+    cited = (_cite_edge(edge) if edge is not None else []) or _cite(builder, node)
+    first, last = (edge.first, edge.last) if edge is not None else (node.first, node.last)
     return GraphFinding(ruleId=rule.id, name=str(ov.get("name") or rule.name),
                         sev=str(ov.get("sev") or sev or rule.level),
                         nodeId=node_id, nodeType=t, nodeValue=v, summary=summary, metric=metric,
                         metricLabel=label, related=list(related)[:MAX_RELATED],
-                        citedEventIds=_cite(builder, node), first=node.first, last=node.last)
+                        citedEventIds=cited, first=first, last=last, peerId=peer)
 
 
 def _neighbours_by_type(builder: Any) -> dict[str, dict[str, dict[str, set[str]]]]:
@@ -525,7 +563,10 @@ def evaluate(builder: Any) -> list[GraphFinding]:
                 if total and (bad * 100) // total >= a30_ratio:
                     node = builder.nodes.get(src)
                     if node is not None:
-                        rows30.append((bad, src, node, dst, rel, (bad * 100) // total, total))
+                        # `ed` rides along so the finding can cite the RELATION rather than the node.
+                        # Appended LAST: `emit` sorts on r[0] only, so the tuple's shape is free to
+                        # grow at the end without moving a single survivor.
+                        rows30.append((bad, src, node, dst, rel, (bad * 100) // total, total, ed))
             if r42 and ed.count <= a42_rare:
                 st = src.partition(":")[0]
                 dt = dst.partition(":")[0]
@@ -538,21 +579,22 @@ def evaluate(builder: Any) -> list[GraphFinding]:
                     host = builder.nodes.get(host_id)
                     user = builder.nodes.get(user_id)
                     if host is not None and user is not None and host.count >= a42_busy:
-                        rows42.append((host.count, user_id, user, host_id, host, ed.count))
+                        rows42.append((host.count, user_id, user, host_id, host, ed.count, ed))
 
     def make30(r: tuple) -> GraphFinding:
-        bad, src, node, dst, rel, pct, total = r
+        bad, src, node, dst, rel, pct, total, ed = r
         return _finding(r30, src, node,
                         f"{src.partition(':')[2]} → {dst.partition(':')[2]}: "
                         f"{pct}% of {total} {rel.replace('_', ' ')} events failed or were denied",
-                        bad, "failed events", [dst], builder, overrides=ovs)
+                        bad, "failed events", [dst], builder, overrides=ovs, peer=dst, edge=ed)
 
     def make42(r: tuple) -> GraphFinding:
-        hcount, user_id, user, host_id, host, count = r
+        hcount, user_id, user, host_id, host, count, ed = r
         return _finding(r42, user_id, user,
                         f"{user.value} appears {count} time(s) on {host.value}, a host "
                         f"carrying {hcount:,} events",
-                        hcount, "host events", [host_id], builder, overrides=ovs)
+                        hcount, "host events", [host_id], builder, overrides=ovs,
+                        peer=host_id, edge=ed)
 
     emit(rows30, make30)
     emit(rows42, make42)

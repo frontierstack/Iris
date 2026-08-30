@@ -509,12 +509,20 @@ Detections that read the **entity graph** rather than one event at a time (`app/
 <- { findings: GraphFinding[], rules: <graph rules enabled>, evaluated: bool,
      status?: DerivedState, tookMs }
 GraphFinding = { ruleId, name, sev, nodeId, nodeType, nodeValue, summary, metric, metricLabel,
-                 related: string[], citedEventIds: string[], first, last }
+                 related: string[], peerId: string, citedEventIds: string[], first, last }
 ```
 * A finding names an **entity**, not an event: a fan-out is a property of a node, so these never appear
   in `Event.detections` and never in `GET /api/anomalies`.
-* `citedEventIds` are real ids from that node's own events, resolved against the pool the graph was
-  built from — a finding that cannot be opened is an assertion.
+* **`peerId` is the other end when the finding is about ONE RELATION** rather than a node's fan-out
+  (`''` for fan-out rules). A relation finding is a property of the PAIR, so the screen opens the pair:
+  Search gets `entity:"<nodeValue>" entity:"<peer>"` — `entity:` is the one exact field in the DSL, so
+  that is the relation's own events, all of them — and the graph link carries `&entity=<peerId>` so the
+  flagged neighbour is selected rather than left somewhere in the node's neighbourhood.
+* `citedEventIds` are real ids from **that relation's** events when `peerId` is set, and from the node's
+  otherwise — a finding that cannot be opened is an assertion, and one that cites the wrong evidence is
+  worse. (Before this, every finding cited the node: two failing relations of one address came back with
+  byte-identical citations, neither of them events of the relation being claimed.) An edge keeps at most
+  20 ids, so a relation that kept none falls back to the node's rather than citing nothing.
 * **`evaluated: false` means the graph is not built and nobody has looked.** The endpoint NEVER builds
   one. Render the state; an empty `findings` list under `evaluated: false` is not "the graph is clean".
 * The rules are ordinary built-ins on `GET /api/rules` with `mechanism: "graph"` — same toggle, same

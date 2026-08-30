@@ -143,7 +143,7 @@ export function CaseDetailScreen() {
           <div className="case-detail__sev-legend">
             {SEVERITIES.filter((s) => (snap.sev[s] ?? 0) > 0).map((s) => (
               <span key={s} className="case-detail__sev-item">
-                <span className="sev__bar" style={{ background: sevVar(s), width: 3, height: 10, display: 'inline-block' }} />
+                <span className="sev-dot" style={{ background: sevVar(s) }} />
                 {s} <b>{fmtInt(snap.sev[s] ?? 0)}</b>
               </span>
             ))}

@@ -435,6 +435,7 @@ export const api = {
     if (gq.sources?.length) p.set('sources', gq.sources.join(','));
     if (gq.maxEdges) p.set('maxEdges', String(gq.maxEdges));
     if (gq.lean) p.set('lean', '1');
+    if (gq.pin?.length) p.set('pin', gq.pin.join(','));
     const qs = p.toString();
     return request<GraphV2>(`/api/graph${qs ? `?${qs}` : ''}`);
   },

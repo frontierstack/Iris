@@ -177,9 +177,20 @@ export function GraphScreen() {
     if (rels.length) return rels;
     return showCoOccur ? undefined : RELATIONS.filter((r) => r !== 'co_occurred');
   }, [rels, showCoOccur]);
+  /* A FOCUS is its own answer to "which sources?".
+     The screen starts with nothing selected on purpose — a graph over every source at once is a
+     hairball and the request is expensive, so with no selection it is skipped entirely. But a link
+     that arrives carrying `focus` has already named one node and one hop count: that is a bounded
+     request, not the whole graph, and it is how the graph findings on Anomalies open the entity they
+     flagged. Gating it on a source selection meant those links landed on an empty canvas asking the
+     analyst to pick sources — the finding said "open this" and the screen showed nothing. */
   const g = useGraph({ scope, q: qDeb || undefined, types: types.length ? types : undefined, relations: relParam,
                        minCount, minDegree, limit, focus: focus ?? undefined, hops: focus ? hops : undefined,
-                       sources: srcSel, maxEdges, lean: true }, srcSel.length > 0);
+                       sources: srcSel, maxEdges, lean: true,
+                       // the entity a link asked for must survive the node cap, or the panel answers
+                       // "that node is not in the current view" about the thing it was sent to show
+                       pin: selected ? [selected] : undefined },
+                     srcSel.length > 0 || !!focus);
 
   const nodesData = useMemo(() => g.data?.nodes ?? [], [g.data]);
   const edgesData = useMemo(() => g.data?.edges ?? [], [g.data]);
@@ -823,7 +834,10 @@ export function GraphScreen() {
           contributes nothing to it, and an entity that is missing for that reason is indistinguishable
           from an entity that is not in the evidence — so say which it is, above the canvas. */}
 
-      {srcSel.length === 0 ? (
+      {/* `focus` is the exception, for the same reason the request above is: the link that carried it
+          already named the entity to draw, so asking "which logs?" first answers a question the
+          analyst did not ask and hides the thing they clicked. Everything else still asks. */}
+      {srcSel.length === 0 && !focus ? (
         <div className="graph__pick">
           <Icon.Graph />
           <div>

@@ -1221,6 +1221,10 @@ class GraphFindingOut(BaseModel):
     citedEventIds: list[str] = Field(default_factory=list)
     first: str = ""
     last: str = ""
+    # The other end, when the finding is about one RELATION rather than a node's fan-out. Empty for
+    # fan-out rules. It is what lets the screen offer the flagged relation itself rather than
+    # everything the node has ever done — see GraphFinding.peerId in app/graph_rules.py.
+    peerId: str = ""
 
 
 class GraphFindings(BaseModel):

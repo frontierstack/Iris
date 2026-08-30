@@ -1064,7 +1064,7 @@ function RulesSection() {
         eyebrow={<><span className="sec__idx">03</span>Rules</>}
         open={secOpen} onToggle={toggleSec}
         title="Detection rules"
-        hint="The catalogue the pool is evaluated against — Sigma-like built-ins you can tune, plus your own regex and condition rules."
+        hint="The catalogue every event is evaluated against — Sigma-like built-ins you can tune, plus your own."
         meta={rules.data ? (
           <>
             <Fig value={fmtInt(nBuiltin)} label="built-in" />
@@ -1234,7 +1234,21 @@ function RulesSection() {
  * carries the way through to the thing it is about: the graph, focused on that node, and the events it
  * was derived from. A finding you cannot open is an assertion. */
 function GraphFindingRow({ f }: { f: GraphFinding }) {
-  const q = `entity:"${f.nodeValue.replace(/"/g, '\\"')}"`;
+  /* Both controls have to open THE FLAGGED THING, not the entity it happens to involve.
+     Reported as "the graph and events does not show the specific flagged items": a relation finding
+     ("10.0.0.134 → 103.156.38.160 is 100% failures") sent Events to entity:"10.0.0.134", i.e. that
+     address's entire life in the logs, and sent Graph to a node with no indication of which of its
+     neighbours was the one being claimed. Two findings about two DIFFERENT destinations of the same
+     address produced byte-identical links.
+     `peerId` is the other end when there is one. `entity:` is the one EXACT field in the DSL, so two
+     entity terms are precisely "events where both of these appear" — the relation itself, all of it,
+     not the eight sampled citations. A fan-out finding has no peer and keeps the node query, which
+     is correct there: the fan-out IS a property of the node. */
+  const esc = (v: string) => v.replace(/"/g, '\\"');
+  const peer = f.peerId ? f.peerId.slice(f.peerId.indexOf(':') + 1) : '';
+  const q = peer ? `entity:"${esc(f.nodeValue)}" entity:"${esc(peer)}"` : `entity:"${esc(f.nodeValue)}"`;
+  const graphTo = `/graph?focus=${encodeURIComponent(f.nodeId)}`
+    + (f.peerId ? `&entity=${encodeURIComponent(f.peerId)}` : '');
   return (
     <div className="table__row table__row--sev gfind-grid" style={{ ['--row-sev' as string]: sevVar(f.sev) }}>
       <div className="sev-cell"><SevTag sev={f.sev} /></div>
@@ -1253,10 +1267,12 @@ function GraphFindingRow({ f }: { f: GraphFinding }) {
       </div>
       <div className="cell-mono num" title={f.metricLabel}>{fmtInt(f.metric)}</div>
       <div className="gfind__go">
-        <Link className="btn btn--sm btn--ghost" to={`/graph?focus=${encodeURIComponent(f.nodeId)}`}
-          title="Open the entity graph focused on this node"><Icon.Graph /> Graph</Link>
+        <Link className="btn btn--sm btn--ghost" to={graphTo}
+          title={peer ? `Open the graph around ${f.nodeValue} with ${peer} selected`
+            : `Open the entity graph focused on ${f.nodeValue}`}><Icon.Graph /> Graph</Link>
         <Link className="btn btn--sm btn--ghost" to={`/search?q=${encodeURIComponent(q)}`}
-          title="Every event this entity appears in"><Icon.Search /> Events</Link>
+          title={peer ? `Every event where ${f.nodeValue} and ${peer} appear together — the relation this finding is about`
+            : `Every event ${f.nodeValue} appears in`}><Icon.Search /> Events</Link>
       </div>
     </div>
   );
