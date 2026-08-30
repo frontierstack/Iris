@@ -606,8 +606,25 @@ export function GraphScreen() {
     queryFn: () => api.graphPath(pathFrom!, selected!),
     enabled: !!pathFrom && !!selected && pathFrom !== selected,
   });
-  const pathIds = useMemo(() => new Set(pathQ.data?.found ? pathQ.data.path.map((n) => n.id) : []), [pathQ.data]);
-  const pathEdgeIds = useMemo(() => new Set(pathQ.data?.found ? pathQ.data.edges.map((e) => e.id) : []), [pathQ.data]);
+  const foundIds = useMemo(() => new Set(pathQ.data?.found ? pathQ.data.path.map((n) => n.id) : []), [pathQ.data]);
+  const foundEdgeIds = useMemo(() => new Set(pathQ.data?.found ? pathQ.data.edges.map((e) => e.id) : []), [pathQ.data]);
+
+  /* ── the relation a link arrived asking for ──
+     A graph finding opens as focus=<node>&entity=<the flagged peer>. Getting both nodes on screen was
+     only half the job: the focus node here has 49 neighbours, so the flagged relation was ONE line in
+     a 49-spoke star drawn exactly like the other 48 — "I select graph and it's not linking those
+     events". The canvas already knows how to make a chain unmistakable (that is what the path finder
+     draws), so the pair is handed to it as a one-edge path. Derived, never stored: select another
+     node and it is gone, because it is no longer the relation being asked about. An explicit path
+     search wins — that is a question the analyst asked just now, over one the link asked on arrival. */
+  const flagged = useMemo(() => {
+    if (!focus || !selected || focus === selected || pathQ.data?.found) return null;
+    const edge = edgesData.find((e) => (e.source === focus && e.target === selected)
+      || (e.source === selected && e.target === focus));
+    return edge ? { nodes: [focus, selected], edge: edge.id } : null;
+  }, [focus, selected, edgesData, pathQ.data]);
+  const pathIds = useMemo(() => (flagged ? new Set(flagged.nodes) : foundIds), [flagged, foundIds]);
+  const pathEdgeIds = useMemo(() => (flagged ? new Set([flagged.edge]) : foundEdgeIds), [flagged, foundEdgeIds]);
 
   /* ── AI review ── */
   const [reviewing, setReviewing] = useState(false);
@@ -823,7 +840,14 @@ export function GraphScreen() {
         <label className="graph__num" title="Keeps the strongest N links by event count; analyst and AI links are never dropped. Fewer links draw faster.">max links <input type="number" min={100} max={200000} step={1000} value={maxEdges} onChange={(e) => setMaxEdges(Math.min(200000, Math.max(100, Number(e.target.value) || DEFAULT_MAX_EDGES)))} /></label>
         {focus && (
           <span className="graph__focus">
-            focused on <b>{displayName(byId.get(focus) ?? ({ value: focus, type: 'other' } as GraphNode))}</b> ·
+            {/* Naming only the focus was the whole of what this said, so a link that arrived about a
+                RELATION reported half of itself: "it put focused on ip:10.0.0.104" and nothing about
+                the other end. When a flagged pair is on screen the chip states the pair. */}
+            focused on <b>{displayName(byId.get(focus) ?? ({ value: focus, type: 'other' } as GraphNode))}</b>
+            {flagged && selected && (
+              <> <span className="graph__focus-arrow">→</span> <b>{displayName(byId.get(selected) ?? ({ value: selected, type: 'other' } as GraphNode))}</b></>
+            )}
+            {' · '}
             <label className="graph__num" style={{ marginLeft: 6 }}>hops <input type="number" min={1} max={4} value={hops} onChange={(e) => setHops(Math.min(4, Math.max(1, Number(e.target.value) || 1)))} /></label>
             <button className="btn btn--sm btn--ghost" onClick={() => setFocus(null)}>whole graph</button>
           </span>

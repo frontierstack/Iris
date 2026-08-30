@@ -529,3 +529,7 @@ button.link-item__name:hover { color: var(--accent); }
 .graph__det-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .graph__det-id { font-family: var(--font-mono); color: var(--muted); font-size: 11px; }
 .graph__det-n { font-family: var(--font-mono); color: var(--text-2); }
+
+/* The pair a graph finding arrived about, stated in the focus chip: naming only the focus reported
+   half of the link that was clicked. */
+.graph__focus-arrow { color: var(--accent); margin: 0 2px; }
