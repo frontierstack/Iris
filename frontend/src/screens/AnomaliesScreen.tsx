@@ -5,7 +5,7 @@ import { api } from '../api/client';
 import { SEVERITIES, type Anomaly, type Event, type Exclusion, type ExclusionInput, type ExclusionSuggestion, type GraphFinding, type Rule, type RuleCondition, type RuleField, type RuleInput, type RuleOp, type RuleParamKind, type RuleSuggestResult, type RuleTestResult, type Severity } from '../api/types';
 import { DerivedPauseActions } from '../components/Enrichment';
 import { Icon } from '../components/icons';
-import { BuildingState, ConfirmDialog, Drawer, EmptyState, ErrorState, SectionHead, SevTag, SkeletonRows, Toggle } from '../components/ui';
+import { BuildingState, ConfirmDialog, Drawer, EmptyState, ErrorState, Fig, SectionHead, SevTag, SkeletonRows, Toggle } from '../components/ui';
 import { qk, useAnomalies, useInvalidateCaseData, useRules, useSettings } from '../hooks/queries';
 import { useSectionOpen as useSharedSectionOpen } from '../hooks/useSectionOpen';
 import { useDebounce } from '../hooks/useDebounce';
@@ -22,6 +22,66 @@ import { cx, fmtInt, fmtTs, sevVar } from '../utils/format';
 const OPEN_KEY = 'iris.anomalies.open';
 function useSectionOpen(key: string): [boolean, () => void] {
   return useSharedSectionOpen(OPEN_KEY, key);
+}
+
+/* ── The filter bar, shared by all four cards ──
+ * Three lists on this page ask the same question ("which of these am I looking at?") and each used to
+ * answer it with a loose row of pill chips. Loose pills read as four independent buttons; a SEGMENTED
+ * group reads as one control with one answer, which is what a filter is. Each segment carries its own
+ * count, because a filter that cannot say how many it would show is a guess the analyst has to click
+ * to resolve, and a segment with nothing behind it is disabled rather than hidden — "no rule has fired
+ * at this level" is an answer. */
+function Seg({ on, disabled, onClick, title, dot, count, children }: {
+  on: boolean; disabled?: boolean; onClick: () => void; title?: string; dot?: string;
+  count?: number; children: ReactNode;
+}) {
+  return (
+    <button type="button" className={cx('seg', on && 'seg--on')} onClick={onClick}
+      disabled={disabled} aria-pressed={on} title={title}>
+      {dot && <span className="seg__dot" style={{ background: dot }} aria-hidden />}
+      <span className="seg__label">{children}</span>
+      {count !== undefined && <span className="seg__n">{fmtInt(count)}</span>}
+    </button>
+  );
+}
+
+function SevSegs({ counts, on, onToggle }: {
+  counts: Partial<Record<Severity, number>>; on: Severity[]; onToggle: (s: Severity) => void;
+}) {
+  return (
+    <div className="segbar" role="group" aria-label="Filter by severity">
+      {SEVERITIES.map((s) => {
+        const n = counts[s] ?? 0;
+        return (
+          <Seg key={s} on={on.includes(s)} disabled={n === 0 && !on.includes(s)} onClick={() => onToggle(s)}
+            dot={sevVar(s)} count={n}
+            title={n ? `${n} at ${s}` : `nothing at ${s}`}>{s}</Seg>
+        );
+      })}
+    </div>
+  );
+}
+
+/** A text filter with its own icon and clear control, sized to the segment bar beside it. */
+function FilterInput({ value, onChange, placeholder, label }: {
+  value: string; onChange: (v: string) => void; placeholder: string; label: string;
+}) {
+  return (
+    <div className="anom__search">
+      <Icon.Search className="anom__search-icon" aria-hidden />
+      <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder}
+        aria-label={label} spellCheck={false} />
+      {value && <button className="anom__search-x" onClick={() => onChange('')} aria-label="Clear filter">×</button>}
+    </div>
+  );
+}
+
+/** A stamp reads as a date FIRST and a time second; splitting them lets the eye run down the times,
+ *  which is the column an analyst actually scans. One string, two weights — not two fields. */
+function TsCell({ ts }: { ts?: string | null }) {
+  if (!ts) return <span className="cell-mono cell-dim">—</span>;
+  const [d, t] = fmtTs(ts).split(' ');
+  return <span className="tscell cell-mono" title={fmtTs(ts) + ' UTC'}><span className="tscell__d">{d}</span>{t && <span className="tscell__t">{t}</span>}</span>;
 }
 
 function AnomalyRow({ a, open, onToggle }: { a: Anomaly; open: boolean; onToggle: () => void }) {
@@ -44,8 +104,8 @@ function AnomalyRow({ a, open, onToggle }: { a: Anomaly; open: boolean; onToggle
         </div>
         <div><span className={cx('badge', a.kind !== 'builtin' && 'badge--ok')}>{a.kind === 'builtin' ? 'built-in' : a.kind}</span></div>
         <div className="cell-mono num">{fmtInt(a.hits)}</div>
-        <div className="cell-mono cell-dim" style={{ fontSize: 'var(--fs-xs)' }}>{a.firstSeen ? fmtTs(a.firstSeen) : '—'}</div>
-        <div className="cell-mono cell-dim" style={{ fontSize: 'var(--fs-xs)' }}>{a.lastSeen ? fmtTs(a.lastSeen) : '—'}</div>
+        <div><TsCell ts={a.firstSeen} /></div>
+        <div><TsCell ts={a.lastSeen} /></div>
         <div className="anom__sources ellipsis" title={[...(a.cases ?? []).map((c) => `${c.caseId ? `${c.caseId} · ${c.caseName}` : 'library (not filed in a case)'}: ${fmtInt(c.hits)} hit${c.hits === 1 ? '' : 's'}`), ...a.sources].join('\n')}>
           {/* WHICH CASE first — with many cases on disk "hits in the active case" says nothing about which
               one, and a screenshot read later needs the id. Library hits are said to be unfiled. */}
@@ -112,45 +172,37 @@ function AnomaliesSection() {
   const building = q.data?.status?.state === 'building' && list.length === 0;
   return (
     <section className={cx('sec-card', secOpen && 'sec-card--open')}>
+      {/* No figures when nothing has fired: "0 rules fired · 0 detections" is a column of zeros
+          saying what the body below already says in a sentence, and on a workspace that is still
+          loading it reads as a finding rather than as an empty pool. */}
       <SectionHead
-        eyebrow="01 · Anomalies"
+        eyebrow={<><span className="sec__idx">01</span>Anomalies</>}
         open={secOpen} onToggle={toggleSec}
         title="Rules with hits in the active case"
-        hint={building ? 'aggregating rule hits across the pool…'
-          : q.data ? `${fmtInt(q.data.total)} rule${q.data.total === 1 ? '' : 's'} fired` : 'sorted by severity, then hits'}
+        hint={building ? 'Aggregating rule hits across the pool…'
+          : 'Every rule that matched something in the workspace, strongest first — sorted by severity, then by how often it fired.'}
+        meta={!building && q.data && q.data.total > 0 ? (
+          <>
+            <Fig value={fmtInt(q.data.total)} label={q.data.total === 1 ? 'rule fired' : 'rules fired'} />
+            <Fig value={fmtInt(totalHits)} label={totalHits === 1 ? 'detection' : 'detections'} />
+          </>
+        ) : undefined}
       />
       {secOpen && (<div className="sec-card__body">
       {/* Rules are evaluated against interpreted events. Until a source is enriched it has no parsed
           fields, no severity and no timestamp, so no rule has been given the chance to fire on it —
           and "no rule has fired" would be a false statement about that evidence. */}
       <div className="anom__toolbar">
-        <div className="chip-row">
-          <span className="chip-row__label">Severity</span>
-          {SEVERITIES.map((s) => (
-            <button key={s} className={cx('chip', sevs.includes(s) && 'on')} onClick={() => toggleSev(s)} aria-pressed={sevs.includes(s)}
-              disabled={!bySev[s] && !sevs.includes(s)}
-              title={bySev[s] ? `${bySev[s]} rule${bySev[s] === 1 ? '' : 's'} at ${s}` : `no ${s} rule has fired`}>
-              <span className="sev__bar" style={{ background: sevVar(s), width: 3, height: 10, display: 'inline-block' }} />
-              {s}<span className="chip__count">{bySev[s] ?? 0}</span>
-            </button>
-          ))}
-          {sevs.length > 0 && <button className="btn btn--sm btn--ghost" onClick={() => setSevs([])}>clear</button>}
-        </div>
-        {/* The two numbers that decide what to look at first, stated once instead of counted off the
-            table — and IN the filter bar, because they describe what the filters left. */}
-        {!building && (all.data?.total ?? 0) > 0 && (
-          <div className="anom__count">
-            <span><b>{fmtInt(list.length)}</b> of {fmtInt(all.data!.total)} rule{all.data!.total === 1 ? '' : 's'}</span>
-            <span className="anom__count-sep">·</span>
-            <span><b>{fmtInt(totalHits)}</b> total hit{totalHits === 1 ? '' : 's'}</span>
-          </div>
+        <span className="anom__toolbar-label">Severity</span>
+        <SevSegs counts={bySev} on={sevs} onToggle={toggleSev} />
+        {sevs.length > 0 && <button className="btn btn--sm btn--ghost" onClick={() => setSevs([])}>Clear</button>}
+        <div className="anom__toolbar-gap" />
+        {/* What the filters LEFT, stated where the filters are — and only once they have narrowed
+            anything, or it is the same number twice on one line. */}
+        {!building && list.length !== (all.data?.total ?? 0) && (
+          <div className="anom__count"><b>{fmtInt(list.length)}</b> of {fmtInt(all.data?.total ?? 0)} shown</div>
         )}
-        <div className="anom__search">
-          <Icon.Search className="anom__search-icon" aria-hidden />
-          <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Filter by rule name or id"
-            aria-label="Filter anomalies" spellCheck={false} />
-          {text && <button className="anom__search-x" onClick={() => setText('')} aria-label="Clear filter">×</button>}
-        </div>
+        <FilterInput value={text} onChange={setText} placeholder="Filter by rule name or id" label="Filter anomalies" />
       </div>
       {q.isError ? (
         <ErrorState title="Could not load anomalies" error={q.error} onRetry={() => void q.refetch()} />
@@ -1009,10 +1061,17 @@ function RulesSection() {
   return (
     <section className={cx('sec-card', secOpen && 'sec-card--open')}>
       <SectionHead
-        eyebrow="03 · Rules"
+        eyebrow={<><span className="sec__idx">03</span>Rules</>}
         open={secOpen} onToggle={toggleSec}
         title="Detection rules"
-        hint={rules.data ? `${nBuiltin} built-in · ${nCustom} custom` : 'built-in Sigma-like rules plus your regex rules'}
+        hint="The catalogue the pool is evaluated against — Sigma-like built-ins you can tune, plus your own regex and condition rules."
+        meta={rules.data ? (
+          <>
+            <Fig value={fmtInt(nBuiltin)} label="built-in" />
+            <Fig value={fmtInt(nCustom)} label={nCustom === 1 ? 'custom rule' : 'custom rules'} />
+            {nRemoved > 0 && <Fig value={fmtInt(nRemoved)} label="removed" tone="warn" />}
+          </>
+        ) : undefined}
         actions={
           <>
             {nRemoved > 0 && (
@@ -1033,35 +1092,28 @@ function RulesSection() {
       />
       {secOpen && (<div className="sec-card__body">
       <div className="anom__toolbar">
-        <div className="chip-row">
-          <span className="chip-row__label">Show</span>
+        <span className="anom__toolbar-label">Show</span>
+        <div className="segbar" role="group" aria-label="Filter the rule catalogue">
           {(['all', 'builtin', 'custom'] as const).map((f) => (
-            <button key={f} className={cx('chip', filter === f && 'on')} onClick={() => setFilter(f)} aria-pressed={filter === f}>
-              {f === 'builtin' ? 'built-in' : f}
-              <span className="chip__count">{f === 'all' ? live.length : f === 'builtin' ? nBuiltin : nCustom}</span>
-            </button>
+            <Seg key={f} on={filter === f} onClick={() => setFilter(f)}
+              count={f === 'all' ? live.length : f === 'builtin' ? nBuiltin : nCustom}>
+              {f === 'builtin' ? 'Built-in' : f === 'all' ? 'All' : 'Custom'}
+            </Seg>
           ))}
           {nRemoved > 0 && (
-            <button className={cx('chip', filter === 'removed' && 'on')} onClick={() => setFilter('removed')} aria-pressed={filter === 'removed'}>
-              removed <span className="chip__count">{nRemoved}</span>
-            </button>
+            <Seg on={filter === 'removed'} onClick={() => setFilter('removed')} count={nRemoved}
+              title="Built-ins taken out of the catalogue — restorable">Removed</Seg>
           )}
         </div>
-        {/* Only when the filters have actually narrowed it: the chips already carry every total, so an
-            unfiltered "104 of 104" would be the same number twice on one line. */}
+        <div className="anom__toolbar-gap" />
+        {/* Only when the filters have actually narrowed it: the segments already carry every total, so
+            an unfiltered "104 of 104" would be the same number twice on one line. */}
         {filter !== 'removed' && list.length !== live.length && (
-          <div className="anom__count">
-            <span><b>{fmtInt(list.length)}</b> of {fmtInt(live.length)} rule{live.length === 1 ? '' : 's'} shown</span>
-          </div>
+          <div className="anom__count"><b>{fmtInt(list.length)}</b> of {fmtInt(live.length)} shown</div>
         )}
-        {/* 33 built-ins plus your own: finding "the SSH brute force one" by scrolling is the cost this
+        {/* 104 built-ins plus your own: finding "the SSH brute force one" by scrolling is the cost this
             removes. Matches name, id and tags. */}
-        <div className="anom__search">
-          <Icon.Search className="anom__search-icon" aria-hidden />
-          <input value={ruleText} onChange={(e) => setRuleText(e.target.value)} placeholder="Filter rules by name, id or tag"
-            aria-label="Filter rules" spellCheck={false} />
-          {ruleText && <button className="anom__search-x" onClick={() => setRuleText('')} aria-label="Clear filter">×</button>}
-        </div>
+        <FilterInput value={ruleText} onChange={setRuleText} placeholder="Filter rules by name, id or tag" label="Filter rules" />
       </div>
       {rules.isError ? (
         <ErrorState title="Could not load rules" error={rules.error} onRetry={() => void rules.refetch()} />
@@ -1109,7 +1161,7 @@ function RulesSection() {
                   <><span className="cell-dim">{r.patterns[0].field}</span> <span className="cell-mono">{r.patterns[0].pattern}</span></>
                 ) : <span className="cell-dim">{r.logic ?? 'Sigma-like logic'}</span>}
               </div>
-              <div className="cell-mono num">{r.hits === undefined ? '—' : fmtInt(r.hits)}</div>
+              <div className={cx('cell-mono num', !r.hits && 'rules__hits--zero')}>{r.hits === undefined ? '—' : fmtInt(r.hits)}</div>
               <div className="rules__tags ellipsis">{(r.tags ?? []).slice(0, 3).map((t) => <span key={t} className="tag">{t}</span>)}{(r.tags?.length ?? 0) > 3 && <span className="tag">+{r.tags.length - 3}</span>}</div>
               <div className="rules__actions" onClick={(e) => e.stopPropagation()}>
                 {r.removed ? (
@@ -1186,20 +1238,25 @@ function GraphFindingRow({ f }: { f: GraphFinding }) {
   return (
     <div className="table__row table__row--sev gfind-grid" style={{ ['--row-sev' as string]: sevVar(f.sev) }}>
       <div className="sev-cell"><SevTag sev={f.sev} /></div>
+      {/* The SENTENCE is the finding and the rule name is only its label. They were the other way
+          round, and one rule producing twenty-six findings then rendered as twenty-six identical
+          bright headlines with the thing that actually differs — which entity, and how extreme —
+          set underneath in body text. Lead with what differs. */}
       <div className="gfind__what">
-        <span className="cell-bright">{f.name}</span>
-        <span className="cell-mono cell-dim" style={{ fontSize: 'var(--fs-xs)' }}>{f.ruleId}</span>
-      </div>
-      <div className="gfind__summary">
-        <span className="chip chip--mono chip--static">{f.nodeType}</span>{' '}
-        {f.summary}
+        <div className="gfind__line">
+          <span className="chip chip--mono chip--static">{f.nodeType}</span>
+          <span className="gfind__summary">{f.summary}</span>
+        </div>
+        <div className="gfind__rule">
+          {f.name}<span className="gfind__sep">·</span><span className="cell-mono">{f.ruleId}</span>
+        </div>
       </div>
       <div className="cell-mono num" title={f.metricLabel}>{fmtInt(f.metric)}</div>
       <div className="gfind__go">
         <Link className="btn btn--sm btn--ghost" to={`/graph?focus=${encodeURIComponent(f.nodeId)}`}
-          title="Open the entity graph focused on this node">Graph</Link>
+          title="Open the entity graph focused on this node"><Icon.Graph /> Graph</Link>
         <Link className="btn btn--sm btn--ghost" to={`/search?q=${encodeURIComponent(q)}`}
-          title="Every event this entity appears in">Events</Link>
+          title="Every event this entity appears in"><Icon.Search /> Events</Link>
       </div>
     </div>
   );
@@ -1208,6 +1265,7 @@ function GraphFindingRow({ f }: { f: GraphFinding }) {
 function GraphFindingsSection() {
   const [secOpen, toggleSec] = useSectionOpen('graph');
   const [sev, setSev] = useState<Severity[]>([]);
+  const [text, setText] = useState('');
   const q = useQuery({
     queryKey: ['graph-anomalies'],
     queryFn: () => api.graphAnomalies({ limit: 200 }),
@@ -1218,8 +1276,16 @@ function GraphFindingsSection() {
   });
   const rows = useMemo(() => {
     const all = q.data?.findings ?? [];
-    return sev.length ? all.filter((f) => sev.includes(f.sev)) : all;
-  }, [q.data, sev]);
+    const bySev = sev.length ? all.filter((f) => sev.includes(f.sev)) : all;
+    // The entity is what an analyst arrives here looking for ("what did 10.0.0.104 do") and it is
+    // only ever in the sentence, so the needle is matched against that as well as the rule.
+    const needle = text.trim().toLowerCase();
+    if (!needle) return bySev;
+    return bySev.filter((f) => f.nodeValue.toLowerCase().includes(needle)
+      || f.summary.toLowerCase().includes(needle)
+      || f.name.toLowerCase().includes(needle)
+      || f.ruleId.toLowerCase().includes(needle));
+  }, [q.data, sev, text]);
   const counts = useMemo(() => {
     const m: Partial<Record<Severity, number>> = {};
     for (const f of q.data?.findings ?? []) m[f.sev] = (m[f.sev] ?? 0) + 1;
@@ -1229,16 +1295,22 @@ function GraphFindingsSection() {
   return (
     <section className={cx('sec-card', secOpen && 'sec-card--open')}>
       <SectionHead
-        eyebrow="02 · Entity graph"
+        eyebrow={<><span className="sec__idx">02</span>Entity graph</>}
         open={secOpen} onToggle={toggleSec}
-        title={<>Graph findings {q.data?.evaluated && <span className="sec__count">{q.data.findings.length}</span>}</>}
+        title="Graph findings"
         hint={
           <>
             Detections that read the entity graph rather than one line at a time — fan-out, pivots and
-            failure-heavy relationships. {q.data ? `${q.data.rules} graph rule${q.data.rules === 1 ? '' : 's'} enabled` : ''}
-            {' '}· tune them in the rule catalogue below.
+            failure-heavy relationships. Every line behind one of these is unremarkable on its own; the
+            evidence is the shape. Tune their thresholds in the rule catalogue below.
           </>
         }
+        meta={q.data?.evaluated && q.data.findings.length > 0 ? (
+          <>
+            <Fig value={fmtInt(q.data.findings.length)} label={q.data.findings.length === 1 ? 'finding' : 'findings'} />
+            <Fig value={fmtInt(q.data.rules)} label={q.data.rules === 1 ? 'graph rule' : 'graph rules'} />
+          </>
+        ) : undefined}
       />
       {secOpen && (<div className="sec-card__body">
       {q.isError && <ErrorState error={q.error} onRetry={() => void q.refetch()} />}
@@ -1261,30 +1333,33 @@ function GraphFindingsSection() {
       {q.data?.evaluated && q.data.findings.length > 0 && (
         <>
           <div className="anom__toolbar">
-            <div className="chip-row">
-              <span className="chip-row__label">Severity</span>
-              {SEVERITIES.map((s) => {
-                const n = counts[s] ?? 0;
-                return (
-                  <button key={s} type="button" disabled={n === 0}
-                    className={cx('chip', sev.includes(s) && 'on')} aria-pressed={sev.includes(s)}
-                    onClick={() => setSev((cur) => (cur.includes(s) ? cur.filter((x) => x !== s) : [...cur, s]))}>
-                    <span className="sev__bar" style={{ background: sevVar(s), width: 3, height: 10, display: 'inline-block' }} />
-                    {s}<span className="chip__count">{n}</span>
-                  </button>
-                );
-              })}
-              {sev.length > 0 && <button className="linklike" onClick={() => setSev([])}>clear</button>}
-            </div>
-            <div className="anom__count">
-              <span><b>{fmtInt(rows.length)}</b> of {fmtInt(q.data.findings.length)} finding{q.data.findings.length === 1 ? '' : 's'}</span>
-            </div>
+            <span className="anom__toolbar-label">Severity</span>
+            <SevSegs counts={counts} on={sev}
+              onToggle={(s) => setSev((cur) => (cur.includes(s) ? cur.filter((x) => x !== s) : [...cur, s]))} />
+            {sev.length > 0 && <button className="btn btn--sm btn--ghost" onClick={() => setSev([])}>Clear</button>}
+            <div className="anom__toolbar-gap" />
+            {rows.length !== q.data.findings.length && (
+              <div className="anom__count"><b>{fmtInt(rows.length)}</b> of {fmtInt(q.data.findings.length)} shown</div>
+            )}
+            <FilterInput value={text} onChange={setText} placeholder="Filter by entity or rule" label="Filter graph findings" />
           </div>
           <div className="table">
             <div className="table__head gfind-grid">
-              <div>Sev</div><div>Rule</div><div>What the graph shows</div><div className="num">Size</div><div />
+              <div>Sev</div><div>What the graph shows</div><div className="num">Size</div><div />
             </div>
-            {rows.map((f) => <GraphFindingRow key={`${f.ruleId}|${f.nodeId}`} f={f} />)}
+            {rows.length === 0 && (
+              <div className="table__empty">
+                {text.trim() ? `No finding mentions “${text}”.` : 'No finding at the selected severities.'}
+              </div>
+            )}
+            {/* The index is part of the key because (ruleId, nodeId) IS NOT UNIQUE: one graph rule
+                reports one finding per RELATION, so all seventeen "almost always fails" findings on
+                ip:10.0.0.104 carried the same key. React does not error on duplicate keys — it
+                reconciles the first match and LEAVES THE STALE SIBLINGS IN THE DOM, so the moment
+                this list could shrink (the severity filter, the text filter) the table showed rows
+                that no longer matched, under a count that said 7. Rows hold no state, so keying by
+                position is safe here. */}
+            {rows.map((f, i) => <GraphFindingRow key={`${f.ruleId}|${f.nodeId}|${i}`} f={f} />)}
           </div>
         </>
       )}
@@ -1457,19 +1532,25 @@ function ExclusionsSection() {
   return (
     <section className={cx('sec-card', secOpen && 'sec-card--open')}>
       <SectionHead
-        eyebrow="04 · Exclusions"
+        eyebrow={<><span className="sec__idx">04</span>Exclusions</>}
         open={secOpen} onToggle={toggleSec}
-        title={<>Exclusions {rows.length > 0 && <span className="sec__count">{rows.length}</span>}</>}
+        title="Exclusions"
         hint={
           <>
             Known-benign things a rule should stop claiming — a public resolver, a monitoring probe, a
             machine account. An exclusion suppresses the <b>detection</b>, never the event: the line stays
             in the pool, in search and on the timeline.
-            {q.data && q.data.suppressed > 0 && (
-              <> Currently suppressing <b>{fmtInt(q.data.suppressed)}</b> detection{q.data.suppressed === 1 ? '' : 's'}.</>
-            )}
           </>
         }
+        meta={q.data && rows.length > 0 ? (
+          <>
+            <Fig value={fmtInt(rows.length)} label={rows.length === 1 ? 'exclusion' : 'exclusions'} />
+            {/* The number this section must never hide from itself: how much it is currently keeping
+                off the analyst's screen. */}
+            <Fig value={fmtInt(q.data.suppressed)} label="suppressed" tone={q.data.suppressed > 0 ? 'warn' : undefined}
+              title="Detections these exclusions dropped on the last pass" />
+          </>
+        ) : undefined}
         actions={
           <>
             {offered.length > 0 && (

@@ -3963,3 +3963,285 @@ mark.hl {
 .res-tile__n { font-family: var(--font-mono); font-size: 22px; font-weight: 600; color: var(--accent); min-width: 2ch; text-align: right; }
 .res-tile__l { font-size: var(--fs-sm); line-height: 1.3; }
 @media (max-width: 720px) { .res-grid { grid-template-columns: 1fr; } }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ANOMALIES — the restyle
+   ───────────────────────────────────────────────────────────────────────────
+   Everything here is SCOPED to `.anomalies`. The page was asked to look newer and more
+   professional, and the four things that made it not are the same mistake in different places:
+   a decorative signal drawn louder than the information it labels.
+
+     - the accent-green numbered eyebrow was the loudest thing on a closed card, above the title;
+     - table heads were uppercase letter-spaced mono, the treatment this UI already moved away
+       from for pills and badges (sentence case is the UI face here);
+     - severity was stated TWICE per row, as a rail and as an uppercase mono word;
+     - one rule producing twenty-six findings drew twenty-six identical bright headlines, with the
+       thing that actually differs set underneath in body text.
+
+   Nothing animates, nothing glows, no control is hover-hidden. Kept scoped rather than applied to
+   `.table` globally so Search / Sources / Cases are not restyled by a change nobody asked for.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Card heads ────────────────────────────────────────────────────────────
+   The index is a quiet ordinal, not a headline. The section NAME sits beside it in the page's own
+   type rather than terminal mono, and the title below is the brightest thing in the head — which
+   is the whole point of a head. */
+.anomalies .sec__eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  color: var(--muted-2);
+}
+.anomalies .sec__idx {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xxs);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-3);
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+}
+.anomalies .sec--card { padding: 16px 18px; gap: 24px; }
+.anomalies .sec--card .sec__title { font-size: var(--fs-4xl); letter-spacing: -0.01em; }
+.anomalies .sec__summary { margin-top: 5px; max-width: 88ch; }
+
+/* Figures live in the head so a CLOSED card still says how much is behind it. They replace the
+   counts the summary used to carry as prose — a sentence for what the section IS, figures for how
+   much of it there is — so nothing is stated twice. */
+.sec__meta {
+  display: flex;
+  align-items: flex-start;
+  gap: 22px;
+  padding-right: 4px;
+}
+.fig { text-align: right; line-height: 1.15; }
+.fig__v {
+  font-family: var(--font-mono);
+  font-size: var(--fs-stat);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  color: var(--text-brightest);
+}
+.fig__l {
+  margin-top: 3px;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.fig--warn .fig__v { color: var(--warn); }
+.fig--accent .fig__v { color: var(--accent); }
+.fig--quiet .fig__v { color: var(--text-3); }
+.anomalies .sec__right { align-items: flex-start; gap: 20px; padding-top: 2px; }
+/* figures are what the section IS, the buttons are what you can DO to it — a hairline keeps the two
+   from reading as one row of controls */
+.sec__meta + .sec__actions {
+  border-left: 1px solid var(--border);
+  padding-left: 20px;
+  margin-left: -2px;
+}
+
+/* ── The filter bar ────────────────────────────────────────────────────────
+   One control, one answer: a segmented group instead of four loose pills. Sized to the input
+   beside it so the strip has a single height. */
+.anomalies .anom__toolbar {
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--panel-2);
+  border-color: var(--border);
+}
+.anomalies .anom__toolbar-label {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+.anomalies .anom__toolbar-gap { flex: 1 1 auto; }
+
+.segbar {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+.seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  padding: 0 11px;
+  border: 0;
+  border-right: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-4);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.seg:last-child { border-right: 0; }
+.seg:hover:not(:disabled) { background: var(--hover); color: var(--text-bright); }
+.seg--on { background: var(--accent-bg); color: var(--accent); }
+.seg--on:hover { background: var(--accent-bg-hover); color: var(--accent); }
+.seg:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* disabled means "nothing at this level" — readable, not invisible: a filter that cannot say how
+   many it would show is a guess the analyst has to click to resolve. */
+.seg:disabled { opacity: 0.42; cursor: default; }
+/* The severity segments are fed the enum verbatim ("critical"), the rule segments a real label
+   ("Built-in"). `capitalize` would title-case the second into "Built-In", so the sentence case is
+   done the way English does it: lowercase the run, raise the first letter. ::first-letter needs a
+   block box, hence inline-block. */
+.seg__label { display: inline-block; text-transform: lowercase; }
+.seg__label::first-letter { text-transform: uppercase; }
+.seg__dot { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 6px; }
+.seg__n {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xxs);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-2);
+}
+.seg--on .seg__n { color: var(--accent); opacity: 0.8; }
+
+.anomalies .anom__count {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+.anomalies .anom__count b {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-bright);
+  font-weight: 500;
+  margin-right: 2px;
+}
+.anomalies .anom__search { flex: 0 1 250px; }
+.anomalies .anom__search input { height: 28px; }
+
+/* ── Tables ────────────────────────────────────────────────────────────────
+   Column headings are labels, not signage: sentence case in the UI face, quiet, on the table's own
+   ground. */
+.anomalies .table__head {
+  padding-top: 8px;
+  padding-bottom: 8px;
+  background: transparent;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--muted-2);
+}
+.anomalies .table__row {
+  min-height: 42px;
+  border-bottom-color: var(--border-2);
+}
+/* the severity rail is a scanning aid beside a pill that already names the level — 2px, not 3 */
+.anomalies .table__row--sev { box-shadow: inset 2px 0 0 var(--row-sev, transparent); }
+.anomalies .table__row.clickable:focus-visible {
+  outline: none;
+  background: var(--hover);
+  box-shadow: inset 2px 0 0 var(--row-sev, transparent), inset 0 0 0 1px var(--accent-border);
+}
+.anomalies .num { font-variant-numeric: tabular-nums; }
+
+/* ── Severity ──────────────────────────────────────────────────────────────
+   One tinted pill with a dot, in the level's own colour, sentence case. `SevTag` already renders a
+   coloured bar element and that markup is shared app-wide, so the bar is restyled INTO the dot here
+   rather than forking the component — the inline colour it carries is what tints the dot. */
+.anomalies .sev-critical { --sev-c: var(--sev-critical); --sev-c-bg: var(--sev-critical-bg); }
+.anomalies .sev-high { --sev-c: var(--sev-high); --sev-c-bg: var(--sev-high-bg); }
+.anomalies .sev-medium { --sev-c: var(--sev-medium); --sev-c-bg: var(--sev-medium-bg); }
+.anomalies .sev-low { --sev-c: var(--sev-low); --sev-c-bg: var(--sev-low-bg); }
+.anomalies .sev-info { --sev-c: var(--sev-info); --sev-c-bg: var(--sev-info-bg); }
+.anomalies .sev {
+  gap: 6px;
+  padding: 2px 9px 2px 7px;
+  border-radius: var(--radius-pill);
+  border: 1px solid color-mix(in srgb, var(--sev-c, var(--border-strong)) 30%, transparent);
+  background: var(--sev-c-bg, var(--surface-2));
+  color: var(--sev-c, var(--text-3));
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: capitalize;
+}
+.anomalies .sev__bar {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 5px;
+  border-radius: 50%;
+}
+
+/* ── Timestamps ────────────────────────────────────────────────────────────
+   A stamp is read as a date first and a time second, and the column an analyst runs their eye down
+   is the time. One string, two weights — not two fields. */
+.tscell { display: inline-flex; align-items: baseline; gap: 7px; font-size: var(--fs-xs); }
+.tscell__d { color: var(--muted-2); }
+.tscell__t { color: var(--text-2); font-variant-numeric: tabular-nums; }
+
+/* ── Anomaly rows ──────────────────────────────────────────────────────── */
+.anomalies .anom__name .cell-bright { font-weight: 500; }
+.anomalies .anom__sources { align-items: center; flex-wrap: nowrap; overflow: hidden; }
+.anomalies .anom__detail { background: var(--panel-inset); }
+.anomalies .anom__sample { border-radius: var(--radius-sm); padding-left: 6px; padding-right: 6px; }
+
+/* ── Graph findings ────────────────────────────────────────────────────────
+   Four columns, not five: the rule name is no longer a column of its own because it was the same
+   string twenty-six times. It is the label under the sentence that differs. */
+.gfind-grid {
+  grid-template-columns:
+    minmax(84px, 0.42fr) minmax(320px, 4fr) minmax(64px, 0.36fr) minmax(168px, 0.85fr);
+}
+.gfind__what { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.gfind__line { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.gfind__summary {
+  min-width: 0;
+  color: var(--text-bright);
+  font-size: var(--fs-base);
+  line-height: 1.45;
+}
+.gfind__rule {
+  font-size: var(--fs-xs);
+  color: var(--muted-2);
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.gfind__sep { color: var(--muted-3); }
+.gfind__rule .cell-mono { font-size: var(--fs-xxs); color: var(--muted-3); }
+/* the two links ARE the point of the row — dimmed, never hover-hidden (a control that exists only
+   on hover is unreachable by touch) */
+.anomalies .gfind__go,
+.anomalies .excl__go,
+.anomalies .rules__actions { opacity: 0.82; }
+.anomalies .table__row:hover .gfind__go,
+.anomalies .table__row:hover .excl__go,
+.anomalies .table__row:hover .rules__actions,
+.anomalies .table__row:focus-within .gfind__go,
+.anomalies .table__row:focus-within .excl__go,
+.anomalies .table__row:focus-within .rules__actions { opacity: 1; }
+.anomalies .gfind__go .btn svg { width: 12px; height: 12px; }
+
+/* ── Rule catalogue ────────────────────────────────────────────────────── */
+.anomalies .rules__name .cell-bright { font-weight: 500; }
+.anomalies .rules__pattern { color: var(--muted-2); }
+/* 104 rules, most of which have not fired: a column of bright zeros buries the handful that did.
+   The zero still has to be READABLE — "this rule found nothing" is an answer, not an absence. */
+.anomalies .rules__hits--zero { color: var(--muted-3); }
+
+/* ── Suggested exclusions ──────────────────────────────────────────────── */
+.anomalies .excl-suggest { border-radius: var(--radius-md); }
+.anomalies .excl-suggest__row { background: var(--panel-2); }

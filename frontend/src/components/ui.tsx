@@ -214,9 +214,25 @@ export function Toggle({ on, onChange, label, disabled }: { on: boolean; onChang
   );
 }
 
+/** One figure in a card head — the number, then what it counts. Tabular and right-weighted so a
+ *  column of them scans as numbers; the label is prose, never an uppercase mono legend. */
+export function Fig({ value, label, tone, title }: { value: ReactNode; label: string; tone?: 'accent' | 'warn' | 'quiet'; title?: string }) {
+  return (
+    <div className={cx('fig', tone && `fig--${tone}`)} title={title}>
+      <div className="fig__v">{value}</div>
+      <div className="fig__l">{label}</div>
+    </div>
+  );
+}
+
 /* ───── Section header with eyebrow ───── */
-export function SectionHead({ eyebrow, title, hint, actions, id, open, onToggle }: {
-  eyebrow?: string; title: ReactNode; hint?: ReactNode; actions?: ReactNode; id?: string;
+export function SectionHead({ eyebrow, title, hint, meta, actions, id, open, onToggle }: {
+  eyebrow?: ReactNode; title: ReactNode; hint?: ReactNode; actions?: ReactNode; id?: string;
+  /** The section's own figures, in the head, where they stay readable while the card is CLOSED.
+   *  They replace the counts the summary used to carry in prose rather than repeating them: a
+   *  sentence says what the section IS, and the figures say how much of it there is. Outside the
+   *  toggle button, so a number is never a control that collapses the thing it describes. */
+  meta?: ReactNode;
   /** When `onToggle` is given the head is a DISCLOSURE: the title toggles the section body. The hint
    *  stays visible either way (it carries the counts, which is what a collapsed section should still
    *  say); the actions only exist while the body they act on is on screen. */
@@ -246,6 +262,7 @@ export function SectionHead({ eyebrow, title, hint, actions, id, open, onToggle 
         {hint && <div className="sec__summary">{hint}</div>}
       </button>
       <div className="sec__right">
+        {meta && <div className="sec__meta">{meta}</div>}
         {open && actions && <div className="sec__actions">{actions}</div>}
         <button type="button" className="sec__state" aria-hidden="true" tabIndex={-1} onClick={onToggle}>
           {open ? <><Icon.Minus /> Collapse</> : <><Icon.Plus /> Expand</>}
