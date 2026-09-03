@@ -792,9 +792,21 @@ function HistoryCanvas({ runs, busy, full, filter, onFilter, onOpen, onDelete, o
  * PRIORITY is the point and the documented rule stands — warnings, then the ANSWER, then what it
  * changed in the case, then how it got there, collapsed.
  */
-function Turn({ run, entries, live, undoing, onUndo, onRetry }: {
+/** A run that ended on something other than its own conclusion — a limit, a provider that would
+ *  not parse its calls, a fold that could not fit, an error — can be picked up from where it stopped
+ *  with one click. The follow-up is seeded with the turn's record (ai/continuation.py marks a turn
+ *  cut short by a limit as such), so it resumes rather than re-answers. */
+const CONTINUE_PROMPT = 'Continue the investigation from where it stopped: pick up the lines of enquiry '
+  + 'left unfinished, record what you find in the case as you go, then report.';
+function canContinue(run: AiRun): boolean {
+  if (run.state === 'running') return false;
+  if (run.state === 'error' || run.state === 'stopped') return true;
+  return !!run.reason && run.reason !== 'complete';
+}
+
+function Turn({ run, entries, live, undoing, onUndo, onRetry, onContinue }: {
   run: AiRun; entries: AiTranscriptEntry[]; live: boolean; undoing: boolean;
-  onUndo: (id: string) => void; onRetry: (run: AiRun) => void;
+  onUndo: (id: string) => void; onRetry: (run: AiRun) => void; onContinue: (run: AiRun) => void;
 }) {
   const blocks = useMemo(() => toBlocks(entries), [entries]);
   const warnings = useMemo(
@@ -884,6 +896,10 @@ function Turn({ run, entries, live, undoing, onUndo, onRetry }: {
             <div className="aic-acts">
               {!!answer && <CopyMicro text={answer} what="the answer" />}
               <Micro label="⟳ Retry" title="Ask the same objective again" onClick={() => onRetry(run)} />
+              {canContinue(run) && (
+                <Micro label="→ Continue" title="Continue the investigation from where this turn stopped"
+                  onClick={() => onContinue(run)} />
+              )}
               <span className="aic-acts__spacer" />
               <span className={cx('aic-state', `aic-state--${run.state}`)}>{STATE_LABEL[run.state]}</span>
               {run.endedAt && (
@@ -1417,6 +1433,11 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
     if (live) return;
     startRun(r.prompt, r.parentId || undefined);
   }, [live, startRun]);
+  /** Pick the investigation up from where this turn stopped — a follow-up in the same thread. */
+  const continueRun = useCallback((r: AiRun) => {
+    if (live) return;
+    startRun(CONTINUE_PROMPT, r.id);
+  }, [live, startRun]);
 
   // The conversation's own identity in the header: named by the question that STARTED it, stamped
   // with when the latest turn moved. Relative here (the template's "edited 2m ago"); the absolute UTC
@@ -1513,10 +1534,10 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
             <>
               {thread.map((t) => (
                 <Turn key={t.id} run={t} entries={t.transcript} live={false}
-                      undoing={undoingId === t.id} onUndo={undoRun} onRetry={retry} />
+                      undoing={undoingId === t.id} onUndo={undoRun} onRetry={retry} onContinue={continueRun} />
               ))}
               <Turn run={run} entries={entries} live={live} undoing={undoingId === run.id}
-                    onUndo={undoRun} onRetry={retry} />
+                    onUndo={undoRun} onRetry={retry} onContinue={continueRun} />
             </>
           )}
 

@@ -57,6 +57,38 @@ BRIEF_HEADER = (
     "RUNNING BRIEF — the earlier part of this investigation was summarised to stay inside the context "
     "window. Everything below is established fact from tool results you already saw; treat the event "
     "ids as verified and cite them verbatim. Continue the objective from here.")
+# Section headers of the brief. Named because a SECOND compaction has to find them again: the previous
+# brief is an ordinary user-role message in the middle of the transcript, and folding it as prose
+# (ids only) is what made a long run forget everything before its first fold — the calls it had made
+# and the findings it had established were gone after the second compaction, so it repeated the
+# calls, came back barren, and finished early. A brief now carries its predecessor's sections forward.
+H_WORK = "\nWORK ALREADY DONE (do not repeat these calls — their answers are below):\n"
+H_FOUND = "\nWHAT YOU HAVE ESTABLISHED SO FAR:\n"
+H_IDS = "\nVERIFIED EVENT IDS seen in those results (cite these verbatim; they are real):\n"
+H_WRITTEN = "\nALREADY WRITTEN TO THE CASE (do not write these again):\n"
+H_CONTINUE = "\nCONTINUE the objective from here: what is still unanswered, answer it, then report."
+_HEADERS = (H_WORK, H_FOUND, H_IDS, H_WRITTEN, H_CONTINUE)
+
+
+def is_brief(msg: dict[str, Any]) -> bool:
+    return msg.get("role") == "user" and _text_of(msg).startswith(BRIEF_HEADER[:40])
+
+
+def _section(text: str, header: str) -> str:
+    """The body of one section of an earlier brief, '' when absent. Best-effort: a truncated brief
+    may have lost a header, and then that section is simply not carried."""
+    i = text.find(header)
+    if i < 0:
+        return ""
+    body = text[i + len(header):]
+    cut = len(body)
+    for h in _HEADERS:
+        if h == header:
+            continue
+        j = body.find(h)
+        if 0 <= j < cut:
+            cut = j
+    return body[:cut].strip("\n")
 
 
 def _text_of(msg: dict[str, Any]) -> str:
@@ -82,15 +114,37 @@ def safe_cut(messages: list[dict[str, Any]], keep_tail: int) -> int:
     return start
 
 
-def build_brief(middle: list[dict[str, Any]], actions: list[dict[str, Any]], objective: str) -> str:
-    """One user-role message standing in for `middle`. Deterministic and bounded."""
+def build_brief(middle: list[dict[str, Any]], actions: list[dict[str, Any]], objective: str,
+                max_chars: int = MAX_BRIEF_CHARS) -> str:
+    """One user-role message standing in for `middle`. Deterministic and bounded.
+
+    `max_chars` scales the brief to the window: a 60k-token run can afford a far fuller record than
+    the 6k-char default, and a run that has been told its window is small gets the floor. The line
+    caps scale with it.
+    """
     calls: list[str] = []
     findings: list[str] = []
     ids: list[str] = []
     seen_calls: set[str] = set()
     pending: dict[str, str] = {}
+    scale = max(1.0, min(4.0, max_chars / MAX_BRIEF_CHARS))
+    max_lines = int(MAX_LINES * scale)
     for msg in middle:
         role = msg.get("role")
+        if is_brief(msg):
+            # An EARLIER brief: carry its record forward instead of reading it as prose. Its calls
+            # go first (they are older), its findings first too; both are then capped from the tail,
+            # so the oldest material is what falls off — gradually, not all at once at fold two.
+            text = _text_of(msg)
+            for line in _section(text, H_WORK).splitlines():
+                if line and line not in seen_calls:
+                    seen_calls.add(line)
+                    calls.append(line)
+            prior_found = _section(text, H_FOUND)
+            if prior_found:
+                findings.append(prior_found)
+            _ids_in(_section(text, H_IDS), ids)
+            continue
         if role == "assistant":
             text = _text_of(msg).strip()
             if text:
@@ -117,22 +171,19 @@ def build_brief(middle: list[dict[str, Any]], actions: list[dict[str, Any]], obj
 
     parts = [BRIEF_HEADER, f"\nOBJECTIVE (unchanged): {objective[:600]}"]
     if calls:
-        parts.append("\nWORK ALREADY DONE (do not repeat these calls — their answers are below):\n" +
-                     "\n".join(calls[-MAX_LINES:]))
+        parts.append(H_WORK + "\n".join(calls[-max_lines:]))
     if findings:
-        joined = "\n".join(findings[-MAX_LINES:])
-        parts.append("\nWHAT YOU HAVE ESTABLISHED SO FAR:\n" + joined[-3000:])
+        joined = "\n".join(findings[-max_lines:])
+        parts.append(H_FOUND + joined[-(max_chars // 2):])
     if ids:
-        parts.append("\nVERIFIED EVENT IDS seen in those results (cite these verbatim; they are real):\n" +
-                     ", ".join(ids))
+        parts.append(H_IDS + ", ".join(ids))
     if actions:
-        parts.append("\nALREADY WRITTEN TO THE CASE (do not write these again):\n" +
-                     "\n".join(f"- {a.get('tool')}: {a.get('summary')}" for a in actions[-MAX_LINES:]))
-    parts.append("\nCONTINUE the objective from here: what is still unanswered, answer it, then report.")
+        parts.append(H_WRITTEN + "\n".join(f"- {a.get('tool')}: {a.get('summary')}" for a in actions[-max_lines:]))
+    parts.append(H_CONTINUE)
     brief = "\n".join(parts)
-    if len(brief) > MAX_BRIEF_CHARS:
+    if len(brief) > max_chars:
         # keep the head (objective, work done) and the tail (ids, writes, instruction) — the middle is prose
-        brief = brief[: MAX_BRIEF_CHARS // 2] + "\n… [brief truncated] …\n" + brief[-MAX_BRIEF_CHARS // 2:]
+        brief = brief[: max_chars // 2] + "\n… [brief truncated] …\n" + brief[-max_chars // 2:]
     return brief
 
 
@@ -157,7 +208,8 @@ def _result_gist(body: str) -> str:
 
 
 def compact(messages: list[dict[str, Any]], actions: list[dict[str, Any]], *,
-            keep_tail: int = TAIL_MESSAGES, force: bool = False) -> Optional[tuple[list[dict[str, Any]], int]]:
+            keep_tail: int = TAIL_MESSAGES, force: bool = False,
+            max_chars: int = MAX_BRIEF_CHARS) -> Optional[tuple[list[dict[str, Any]], int]]:
     """(new transcript, number of messages folded away) — or None when there is nothing worth folding.
 
     `force` folds even a short middle. Used when the PROVIDER has refused the transcript for its size
@@ -171,6 +223,6 @@ def compact(messages: list[dict[str, Any]], actions: list[dict[str, Any]], *,
     if len(middle) < (1 if force else MIN_COMPACTIBLE):
         return None
     objective = _text_of(messages[1])
-    brief = build_brief(middle, actions, objective)
+    brief = build_brief(middle, actions, objective, max_chars)
     out = [messages[0], messages[1], {"role": "user", "content": brief}] + messages[start:]
     return out, len(middle)

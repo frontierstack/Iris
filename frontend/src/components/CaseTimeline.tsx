@@ -115,6 +115,19 @@ function AddFromSource({ sources, inSet }: { sources: Source[]; inSet: Set<strin
 /** localStorage: '1' = newest first. Oldest first is the default — a timeline reads forward. */
 const SORT_KEY = 'iris.timeline.newestFirst';
 
+/** The marker that splits a note into its two views. The assistant is told to write it exactly
+ *  (`prompts.TIMELINE_NOTE_RULE`); an analyst's hand-written `Why it matters:` line, with or without
+ *  the bold and with a dash instead of a colon, splits the same way. */
+const WHY_RE = /(?:^|\n)[ \t]*(?:[-*]\s*)?\*{0,2}why it matters\*{0,2}\s*[:\u2014\u2013-]\s*/i;
+
+/** A note split into what happened (the technical view) and what it means (the high-level one). */
+function splitWhy(note: string): { what: string; matters: string } {
+  const src = unescapeBreaks(note);
+  const m = WHY_RE.exec(src);
+  if (!m) return { what: src, matters: '' };
+  return { what: src.slice(0, m.index).trim(), matters: src.slice(m.index + m[0].length).trim() };
+}
+
 /** The pace of the sequence: how long after the entry that happened just before it in time this
  *  one happened (`older` is the neighbouring row — above when oldest-first, below when newest-first).
  *  A chronology whose entries are four seconds apart and one whose entries are four days apart look
@@ -176,6 +189,27 @@ function RowSaid({ said, summary, arriving, id }: { said: string; summary: strin
  *  Deliberately NOT a second copy of the event detail page: no correlations (an O(pool) derived
  *  structure — see CLAUDE.md on why event detail itself must stay a dictionary lookup) and no file
  *  context. The page is one button away for those. */
+/** The note as TWO reading surfaces, side by side where there is room: the technical view (why this
+ *  line is on the timeline — actor, action, time, outcome, log) and the high-level one (why it
+ *  matters to the incident). They answer different readers and used to share one paragraph, with
+ *  the second buried as a bullet under the first. A note without the marker is one block. */
+function WhyBlocks({ note }: { note: string }) {
+  const { what, matters } = useMemo(() => splitWhy(note), [note]);
+  if (!matters) return <div className="tl__note md tlx__why-one">{renderMarkdown(what)}</div>;
+  return (
+    <div className="tlx__why">
+      <div className="tlx__whycol">
+        <div className="tlx__whylbl">What happened</div>
+        <div className="tl__note md">{renderMarkdown(what)}</div>
+      </div>
+      <div className="tlx__whycol tlx__whycol--matters">
+        <div className="tlx__whylbl">Why it matters</div>
+        <div className="tl__note md">{renderMarkdown(matters)}</div>
+      </div>
+    </div>
+  );
+}
+
 function EntryDetail({ en, e, editing, onEdit, onDone }: {
   en: CaseSetEntry; e: Event | undefined; editing: boolean; onEdit: () => void; onDone: () => void;
 }) {
@@ -205,7 +239,7 @@ function EntryDetail({ en, e, editing, onEdit, onDone }: {
               <div className="tlx__labels">{en.labels.map((l) => <span key={l} className="tag tag--label">{l}</span>)}</div>
             )}
             {en.note
-              ? <div className="tl__note md">{renderMarkdown(en.note)}</div>
+              ? <WhyBlocks note={en.note} />
               : <div className="tlx__empty">No label or note yet. Say what this moment was and the row reads as your sentence instead of the log&rsquo;s.</div>}
             <div className="tlx__acts">
               <button className="btn btn--sm" onClick={onEdit}>

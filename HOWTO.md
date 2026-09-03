@@ -318,8 +318,8 @@ start. Docker compose does **not** support inline comments in `.env` — keep co
 | `IRIS_CA_BUNDLE` | auto (`/data/ca.pem`) | CA bundle for TLS-inspecting proxies. |
 | `IRIS_AI_MAX_STEPS` | 40 (cap 120) | Tool-calling steps per investigation. |
 | `IRIS_AI_MAX_SECONDS` | 600 (cap 900) | Wall clock per run. |
-| `IRIS_AI_MAX_CONTEXT_TOKENS` | 60 000 | Estimated context ceiling; triggers compaction, not a stop. The model's OWN window is the real ceiling: when the provider refuses a request for its size (HTTP 400 naming the context), Iris folds the transcript, lowers this run's ceiling below what was refused and retries the same turn. |
-| `IRIS_AI_MAX_COMPACTIONS` | 6 (cap 20) | How many times a run may compact its transcript. |
+| `IRIS_AI_MAX_CONTEXT_TOKENS` | 60 000 | Estimated context ceiling; triggers compaction, not a stop. The estimate counts the tool schemas (~11k tokens) and the system prompt as well as the transcript. The model's OWN window is the real ceiling: when the provider refuses a request for its size (HTTP 400 naming the context), Iris folds the transcript, sets this run's ceiling from the limit the provider stated (or below what was refused) and retries the same turn. When folding cannot fit, the run restarts from its own record — the same recovery as typing "continue" — up to 3 times before it stops. |
+| `IRIS_AI_MAX_COMPACTIONS` | 6 (cap 20) | How many times a run may compact its transcript while the run limits are ON. With "Limit how far a run can go" OFF there is no cap — a fold that frees no room is still refused. |
 | `IRIS_AI_TOOL_SECONDS` | 90 (cap 600) | Wall clock ONE tool call gets. Past it (plus 5 s grace) a read is abandoned and reported to the model as a ToolError naming the narrower call; a write is always awaited. Also how long a stop can take to land inside a tool that never checks it. |
 | `IRIS_AI_DERIVED_WAIT` | 60 (cap 600) | How long a graph / timeline / detection-roll-up tool waits for its background build before refusing with its progress. Keep it below `IRIS_AI_TOOL_SECONDS` so that refusal wins. |
 

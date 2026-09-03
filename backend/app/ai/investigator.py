@@ -82,7 +82,7 @@ from .client import (AIError, BadToolArguments, ContextTooLong, LLMClient, Provi
                      absorb_text_calls, has_tool_call_syntax, parse_text_tool_calls)
 from .history import HISTORY
 from .system_prompts import PROMPTS
-from .prompts import (ARG_TOO_BIG, BUDGET_NOTICE, CHECK_IN, COMPACTED_CONTINUE, CONTINUE_WORK,
+from .prompts import (CONTINUE_OUTPUT, RESET_NOTE, ARG_TOO_BIG, BUDGET_NOTICE, CHECK_IN, COMPACTED_CONTINUE, CONTINUE_WORK,
                       DOCUMENT_CHECK, NO_CASE_LINE, run_budget, RECORD_NUDGE, REPORT_NOW,
                       SUMMARY_CHECK, WRAP_UP, investigator_user_prompt)
 from .tools import (REGISTRY, RunContext, ToolError, tool_budget_seconds, tool_schemas,
@@ -166,6 +166,19 @@ CONTEXT_SHRINK = 0.75         # the new ceiling, as a fraction of the estimate t
 MIN_CEILING = 3_000           # below this there is no room for a tool result at all
 ELIDE_RESULT_CHARS = 600      # a tool result in the kept tail is cut to this when folding was not enough
 TOOL_RESULT_CHARS_SMALL = 2500   # new tool results are clipped harder once the window is known to be small
+# ---- a reply CUT OFF at the provider's output limit (finish_reason 'length') with no tool call in it.
+# The loop reads "no tool call" as "finished", so a report truncated mid-sentence was published as the
+# final answer — on a local model with a small n_predict, most long reports. The model is asked to go
+# on from where it stopped and the pieces are joined; bounded, because a model that cannot finish in
+# four replies is not going to.
+MAX_OUTPUT_CONTINUES = 3
+# ---- an IN-RUN RESTART when folding cannot fit. The brief plus the kept tail plus the fixed cost of
+# the system prompt and the tool schemas can exceed a small window outright, and the run used to END
+# there — "budget" between steps, an AIError telling the analyst to raise n_ctx on a provider refusal.
+# The analyst's own remedy was to type "continue": a NEW run seeded from the record of the old one
+# (ai/continuation.py). `_reset_transcript` does exactly that inside the same run — the transcript is
+# rebuilt from the run's own persisted record, which ai/history.py has been writing as it went.
+MAX_RESETS = 3
 # ---- transient provider failures (5xx, 429, a dropped connection, a timeout): retried with a backoff
 # before the run is failed. Nothing of the turn has reached the transcript when they happen.
 PROVIDER_RETRIES = 3
@@ -232,7 +245,11 @@ def limits(max_steps: Optional[int] = None, max_seconds: Optional[int] = None) -
     if not enforced:
         # A sentinel rather than a branch at every checkpoint: `step >= NO_LIMIT` is simply never true,
         # so no comparison in the loop has to learn about this and none can be forgotten.
-        steps = secs = writes = NO_LIMIT
+        # The COMPACTION COUNT goes with them. The context CEILING is a fact about the provider and
+        # stays; how many times a run may fold to stay under it is policy, and with the switch off it
+        # was the one ceiling left — a long run hit its seventh fold and stopped on "budget" with the
+        # limits supposedly off. A fold that makes no progress is still refused (the floor below).
+        steps = secs = writes = compactions = NO_LIMIT
     return {"maxSteps": steps, "maxSeconds": secs, "maxContextTokens": ctx, "maxWrites": writes,
             "maxCompactions": compactions, "enforced": int(enforced),
             # a FIFTH bound, per CALL rather than per run: without it one tool could eat the whole
@@ -282,7 +299,8 @@ def _clip(text: str, limit: int = TOOL_RESULT_CHARS) -> str:
 
 
 def _fit_context(messages: list[dict[str, Any]], actions: list[dict[str, Any]],
-                 ceiling: int) -> tuple[list[dict[str, Any]], int, int, bool]:
+                 ceiling: int, overhead: int = 0,
+                 brief_chars: int = compaction.MAX_BRIEF_CHARS) -> tuple[list[dict[str, Any]], int, int, bool]:
     """Make the transcript fit under `ceiling` after the PROVIDER refused it: (messages, folded, elided, fits).
 
     Folds first (progressively shorter tails, forced), then — if the kept tail is itself too big, which
@@ -291,13 +309,18 @@ def _fit_context(messages: list[dict[str, Any]], actions: list[dict[str, Any]],
     and the objective are never touched; if those two alone do not fit, nothing here can help and the
     caller says so.
     """
-    target = ceiling * COMPACT_FLOOR
+    # `overhead` is what every request carries that is NOT in `messages`: the tool schemas (~11k
+    # tokens for the full registry) and the estimate's measured bias. The FLOOR is measured on the
+    # room above the fixed cost (overhead + system message + objective), not on the ceiling: on a
+    # small window 80 % of the ceiling can sit BELOW the fixed cost, and then no fold can ever pass
+    # it — every fold was refused and the run went straight to restarts.
+    target = _floor_target(messages, ceiling, overhead) - overhead
     before = _est_tokens(messages)
     folded = 0
     for tail in (compaction.TAIL_MESSAGES, 4, 2):
         if _est_tokens(messages) < target:
             break
-        attempt = compaction.compact(messages, actions, keep_tail=tail, force=True)
+        attempt = compaction.compact(messages, actions, keep_tail=tail, force=True, max_chars=brief_chars)
         if attempt is None:
             continue
         messages, d = attempt
@@ -320,7 +343,39 @@ def _fit_context(messages: list[dict[str, Any]], actions: list[dict[str, Any]],
     # is reported as no progress, so the caller stops retrying instead of re-sending the same size.
     if after >= before:
         folded, elided = 0, 0
-    return messages, folded, elided, after < ceiling
+    return messages, folded, elided, after + overhead < ceiling
+
+
+def _floor_target(messages: list[dict[str, Any]], ceiling: int, overhead: int) -> int:
+    """What a fold has to get the estimate (messages + overhead) under to count as progress."""
+    fixed = overhead + _est_tokens(messages[:2])
+    return int(fixed + max(0, ceiling - fixed) * COMPACT_FLOOR)
+
+
+def _brief_chars(ceiling: int) -> int:
+    """How big a running brief this run can afford: ~15 % of the ceiling, 6k-24k characters."""
+    return max(compaction.MAX_BRIEF_CHARS, min(24_000, int(ceiling * 4 * 0.15)))
+
+
+def _reset_transcript(messages: list[dict[str, Any]], run_id: str) -> Optional[list[dict[str, Any]]]:
+    """The transcript REBUILT from this run's own persisted record — an in-run "continue".
+
+    ai/history.py records every call, result summary, write and line of prose as the run goes, and
+    ai/continuation.py already turns such a record into the brief a follow-up turn starts from. The
+    same brief, built from the CURRENT run's record, replaces everything after the objective: the
+    system message and the objective (messages[0] and [1] — the latter already carrying the earlier
+    turns' brief on a follow-up) are kept verbatim.
+
+    Returns None when there is no record to build from (a run that has not persisted anything yet
+    has nothing to lose to a fold either).
+    """
+    rec = runs.get(run_id)
+    if not rec:
+        return None
+    brief = continuation.build([rec])
+    if not brief:
+        return None
+    return [messages[0], messages[1], {"role": "user", "content": RESET_NOTE + "\n\n" + brief}]
 
 
 def _tell_compacted(messages: list[dict[str, Any]]) -> bool:
@@ -818,6 +873,17 @@ async def investigate(store: Any, objective: str, run_id: str,
     ceiling = lim["maxContextTokens"]   # lowered when the provider refuses the transcript (ContextTooLong)
     result_chars = TOOL_RESULT_CHARS
     context_recoveries = 0
+    # THE FIXED COST OF EVERY REQUEST. `_est_tokens` measures the messages and nothing else, but the
+    # provider counts the tool schemas too — ~11k tokens for the full registry, on top of a ~5.5k
+    # system prompt — so the estimate the loop compacted on was short by more than a 16k window holds.
+    # On a 32k model the loop believed it had half the window it did not have. `est_bias` is the
+    # remaining measured error, learned from the provider's own "limit N, requested M" the first time
+    # it refuses a request.
+    tools_tokens = len(orjson.dumps(tools)) // 4
+    est_bias = 0
+    resets = 0               # in-run restarts from the run's own record (see _reset_transcript)
+    output_continues = 0     # replies cut off at the output limit and continued (CONTINUE_OUTPUT)
+    partial_answer = ""      # the pieces of a cut-off final reply, joined when it finishes
     text_mode = False        # the provider is not doing native tool calling; we parsed the text form
     answer = ""
     reason = "complete"
@@ -826,6 +892,23 @@ async def investigate(store: Any, objective: str, run_id: str,
 
     def elapsed() -> float:
         return time.monotonic() - started
+
+    def est(msgs: Optional[list[dict[str, Any]]] = None) -> int:
+        """What the NEXT request will cost the provider: the messages plus the fixed overhead."""
+        return _est_tokens(messages if msgs is None else msgs) + tools_tokens + est_bias
+
+    def floor() -> int:
+        return _floor_target(messages, ceiling, tools_tokens + est_bias)
+
+    def re_arm() -> None:
+        # A fold or a reset can swallow the very message carrying DOCUMENT_CHECK / SUMMARY_CHECK —
+        # that is how a run ended having been asked for its summary note and never seeing the
+        # request. Re-armed only while the work is still outstanding, so neither is asked twice.
+        nonlocal documented, summarised
+        if documented and ctx.writes == 0:
+            documented = False
+        if summarised and not _has_summary(ctx.actions):
+            summarised = False
 
     try:
         # The old line read "up to 40 steps, 600s, 46 tools", which the analyst reasonably took as a
@@ -851,48 +934,59 @@ async def investigate(store: Any, objective: str, run_id: str,
             if elapsed() >= lim["maxSeconds"]:
                 reason = "timeout"
                 break
-            if _est_tokens(messages) >= ceiling:
+            if est() >= ceiling:
                 # The context ceiling is not a reason to abandon an investigation: fold the earlier turns
-                # into a running brief and carry on. Bounded by maxCompactions and by the floor below —
-                # if compacting cannot buy room, the run stops on the budget exactly as it used to.
+                # into a running brief and carry on. Bounded by maxCompactions (NO_LIMIT with the limits
+                # off) and by the floor below; when folding cannot buy room the run RESTARTS from its own
+                # record (`_reset_transcript`), and only past MAX_RESETS does it stop on the budget.
                 folded = None
                 if compactions < lim["maxCompactions"]:
                     # Try progressively shorter tails: on a run whose individual tool results are large,
                     # six recent messages can be over the ceiling on their own, and giving up there would
                     # stop an investigation that a two-message tail could have carried on.
                     for tail in (compaction.TAIL_MESSAGES, 4, 2):
-                        attempt = compaction.compact(messages, ctx.actions, keep_tail=tail)
+                        attempt = compaction.compact(messages, ctx.actions, keep_tail=tail,
+                                                     max_chars=_brief_chars(ceiling))
                         if attempt is None:
                             continue
                         folded = attempt
-                        if _est_tokens(attempt[0]) < ceiling * COMPACT_FLOOR:
+                        if est(attempt[0]) < floor():
                             break
+                if folded is not None and est(folded[0]) >= floor():
+                    folded = None      # it fits no better than before: not a fold worth taking
                 if folded is None:
-                    reason = "budget"
-                    break
-                candidate, dropped = folded
-                if _est_tokens(candidate) >= ceiling * COMPACT_FLOOR:
-                    note = ("context is full and summarising the earlier steps did not free enough room — "
-                            "stopping and reporting what is established")
-                    HISTORY.append(run_id, {"kind": "warning", "text": note})
-                    yield {"type": "warning", "message": note, "ids": []}
-                    reason = "budget"
-                    break
-                messages = candidate
-                compactions += 1
-                _tell_compacted(messages)
-                # A fold can swallow the very message carrying DOCUMENT_CHECK / SUMMARY_CHECK — that is
-                # how a run ended having been asked for its summary note and never seeing the request.
-                # Re-armed only while the work is still outstanding, so neither can be asked twice.
-                if documented and ctx.writes == 0:
-                    documented = False
-                if summarised and not _has_summary(ctx.actions):
-                    summarised = False
-                note = (f"compacted {dropped} earlier steps into a running brief "
-                        f"(compaction {compactions} of {lim['maxCompactions']}) — the objective, the "
-                        f"verified event ids and everything already written to the case were kept")
-                HISTORY.append(run_id, {"kind": "status", "text": note})
-                yield {"type": "status", "text": note, "compactions": compactions, "droppedMessages": dropped}
+                    reset = _reset_transcript(messages, run_id) if resets < MAX_RESETS else None
+                    if reset is None or est(reset) >= floor() or est(reset) >= est():
+                        note = ("context is full and neither summarising the earlier steps nor restarting "
+                                "from the run's own record frees enough room — stopping and reporting "
+                                "what is established. A model with a larger context window would not "
+                                "stop here.")
+                        HISTORY.append(run_id, {"kind": "warning", "text": note})
+                        yield {"type": "warning", "message": note, "ids": []}
+                        reason = "budget"
+                        break
+                    messages = reset
+                    resets += 1
+                    re_arm()
+                    note = (f"context is full and folding could not free enough room — restarted the "
+                            f"conversation from this run's own record (restart {resets} of {MAX_RESETS}): "
+                            f"the objective, every tool call made, the findings so far, the verified "
+                            f"event ids and everything written to the case were carried over. The "
+                            f"assistant continues from where it was.")
+                    HISTORY.append(run_id, {"kind": "status", "text": note})
+                    yield {"type": "status", "text": note, "reset": resets, "compactions": compactions}
+                else:
+                    candidate, dropped = folded
+                    messages = candidate
+                    compactions += 1
+                    _tell_compacted(messages)
+                    re_arm()
+                    of = "" if lim["maxCompactions"] >= NO_LIMIT else f" of {lim['maxCompactions']}"
+                    note = (f"compacted {dropped} earlier steps into a running brief "
+                            f"(compaction {compactions}{of}) — the objective, the "
+                            f"verified event ids and everything already written to the case were kept")
+                    HISTORY.append(run_id, {"kind": "status", "text": note})
+                    yield {"type": "status", "text": note, "compactions": compactions, "droppedMessages": dropped}
 
             # SCOPE CHECK-IN. Injected as a user turn between steps, and ONLY when the last
             # CHECK_IN_STREAK calls each returned nothing new — a repeat, a refusal or an empty
@@ -1002,26 +1096,54 @@ async def investigate(store: Any, objective: str, run_id: str,
                     # "openai HTTP 400 ... the assistant stops working after that".
                     ctx_tries += 1
                     context_recoveries += 1
-                    est = _est_tokens(messages)
-                    ceiling = max(MIN_CEILING, min(ceiling, int(est * CONTEXT_SHRINK)))
+                    base = _est_tokens(messages) + tools_tokens
+                    if exc.requested and exc.requested > base:
+                        # The provider said what it counted; the difference is the estimate's error,
+                        # and every later comparison is corrected by it.
+                        est_bias = exc.requested - base
+                    est_now = base + est_bias
+                    # The new ceiling: below the provider's OWN limit when it stated one — that is the
+                    # exact figure, and it makes the between-step compaction fire before the next
+                    # refusal instead of after it — else below what was just refused.
+                    real = exc.limit if exc.limit else est_now
+                    ceiling = max(MIN_CEILING, min(ceiling, int(real * CONTEXT_SHRINK)))
                     result_chars = min(result_chars, TOOL_RESULT_CHARS_SMALL)
-                    messages, folded, elided, fits = _fit_context(messages, ctx.actions, ceiling)
+                    messages, folded, elided, fits = _fit_context(
+                        messages, ctx.actions, ceiling, overhead=tools_tokens + est_bias,
+                        brief_chars=_brief_chars(ceiling))
                     if folded:
                         compactions += 1
-                    if ctx_tries > CONTEXT_RETRIES or context_recoveries > CONTEXT_RECOVERIES or (
-                            not folded and not elided):
+                    exhausted = (ctx_tries > CONTEXT_RETRIES
+                                 or (lim.get("enforced", 1) and context_recoveries > CONTEXT_RECOVERIES)
+                                 or (not folded and not elided))
+                    if exhausted:
+                        # Folding is not enough: RESTART from the run's own record, the recovery the
+                        # analyst would otherwise perform by hand with "continue" in a new turn.
+                        reset = _reset_transcript(messages, run_id) if resets < MAX_RESETS else None
+                        if reset is not None and est(reset) < est_now:
+                            messages = reset
+                            resets += 1
+                            ctx_tries = 0
+                            re_arm()
+                            note = (f"the provider refused the request because the conversation no longer "
+                                    f"fits the model's context window (estimated ~{est_now:,} tokens) and "
+                                    f"folding could not make it fit — restarted the conversation from this "
+                                    f"run's own record (restart {resets} of {MAX_RESETS}): every tool call "
+                                    f"made, the findings so far, the verified event ids and everything "
+                                    f"written to the case were carried over. Retrying the same turn.")
+                            HISTORY.append(run_id, {"kind": "status", "text": note})
+                            yield {"type": "status", "text": note, "reset": resets,
+                                   "contextCeiling": ceiling, "compactions": compactions}
+                            continue
                         raise AIError(
                             f"{exc}. Folding the transcript could not make it fit"
                             f"{'' if folded or elided else ' (nothing left to fold: the system prompt, the tool definitions and the objective alone are over the limit)'}"
                             f" — give the model a larger context window (n_ctx / max context) or continue "
                             f"in a new conversation. Everything written to the case so far is kept.") from exc
                     _tell_compacted(messages)
-                    if documented and ctx.writes == 0:
-                        documented = False
-                    if summarised and not _has_summary(ctx.actions):
-                        summarised = False
+                    re_arm()
                     note = (f"the provider refused the request because the conversation no longer fits the "
-                            f"model's context window (estimated ~{est:,} tokens). Folded {folded} earlier "
+                            f"model's context window (estimated ~{est_now:,} tokens). Folded {folded} earlier "
                             f"message(s) into a running brief"
                             + (f" and elided {elided} large tool result(s)" if elided else "")
                             + f"; this run now compacts at ~{ceiling:,} tokens. Retrying the same turn — "
@@ -1105,8 +1227,26 @@ async def investigate(store: Any, objective: str, run_id: str,
                 if said:
                     HISTORY.append_text(run_id, said)
                     yield {"type": "delta", "text": said, "step": step}
+            if calls:
+                partial_answer = ""     # the prose before a call was narration, not the report
             if not calls:
-                answer = final_msg.get("content") or "".join(buf)
+                piece = final_msg.get("content") or "".join(buf)
+                # A REPLY CUT OFF AT THE OUTPUT LIMIT IS NOT THE REPORT. finish_reason 'length' with no
+                # call in it means the model was still writing; ask it to go on and join the pieces.
+                if (finish == "length" and output_continues < MAX_OUTPUT_CONTINUES
+                        and not runs.stop_requested(run_id)):
+                    output_continues += 1
+                    partial_answer += piece
+                    messages.append({"role": "user", "content": CONTINUE_OUTPUT})
+                    note = (f"the model's reply was cut off at its output limit — asked it to continue "
+                            f"from where it stopped ({output_continues} of {MAX_OUTPUT_CONTINUES})")
+                    HISTORY.append(run_id, {"kind": "status", "text": note})
+                    yield {"type": "status", "text": note, "outputContinue": output_continues}
+                    continue
+                if partial_answer and piece.strip().upper() == "DONE":
+                    piece = ""
+                answer = partial_answer + piece
+                partial_answer = ""
                 # THE CASE IS THE POINT. A run that investigated and wrote nothing down leaves the
                 # analyst to re-key every finding by hand — reported as "didn't interact with the case
                 # at all when it should, that include everything in the case from the timeline to
@@ -1123,7 +1263,7 @@ async def investigate(store: Any, objective: str, run_id: str,
                         # budget, and the report it had ALREADY WRITTEN is replaced by whatever
                         # the wrap-up manages. Losing the answer to ask for a write-up is a much
                         # worse trade than finishing with an unwritten case.
-                        and _est_tokens(messages) < ceiling):
+                        and est() < ceiling):
                     documented = True
                     messages.append({"role": "user", "content": DOCUMENT_CHECK.format(case=_case_line(store))})
                     note = ("nothing recorded in the case yet — asking the assistant to write up what it found"
@@ -1139,7 +1279,7 @@ async def investigate(store: Any, objective: str, run_id: str,
                         and not _has_summary(ctx.actions)
                         and not runs.stop_requested(run_id)
                         and elapsed() < lim["maxSeconds"] and step < lim["maxSteps"]
-                        and _est_tokens(messages) < ceiling):
+                        and est() < ceiling):
                     summarised = True
                     messages.append({"role": "user", "content": SUMMARY_CHECK})
                     note = "findings were recorded as the run went — asking the assistant for the case summary"
@@ -1284,27 +1424,45 @@ async def investigate(store: Any, objective: str, run_id: str,
             HISTORY.append(run_id, {"kind": "status", "text": note})
             yield {"type": "status", "text": note}
             messages.append({"role": "user", "content": WRAP_UP if budget_stop else REPORT_NOW})
-            buf = []
-            wrap_msg: dict[str, Any] = {}
-            async for item in client.stream_chat(messages, tools=None, temperature=0.1,
-                                                 tool_choice="none"):
-                if runs.stop_requested(run_id):
+            pieces: list[str] = []
+            for _n in range(MAX_OUTPUT_CONTINUES + 1):
+                buf = []
+                wrap_msg: dict[str, Any] = {}
+                wrap_finish = ""
+                async for item in client.stream_chat(messages, tools=None, temperature=0.1,
+                                                     tool_choice="none"):
+                    if runs.stop_requested(run_id):
+                        break
+                    if item["type"] == "text":
+                        buf.append(item["text"])
+                        HISTORY.append_text(run_id, item["text"])
+                        yield {"type": "delta", "text": item["text"], "step": step}
+                    elif item["type"] == "message":
+                        wrap_msg = item["message"]
+                        wrap_finish = str(item.get("finish") or "")
+                # The assembled message is the fallback, exactly as in the main loop. Collecting ONLY the
+                # `text` deltas meant that a provider which streams no prose deltas — perfectly legal, the
+                # client always yields the assembled `message` — produced an EMPTY report after a run had
+                # spent its entire budget. That is the "it ran for ages and gave me no answer" case, and the
+                # report the model actually wrote was sitting in the message the whole time.
+                piece = "".join(buf) or str(wrap_msg.get("content") or "")
+                if piece and not buf:
+                    HISTORY.append_text(run_id, piece)       # deltas never carried it into the transcript
+                    yield {"type": "delta", "text": piece, "step": step}
+                if pieces and piece.strip().upper() == "DONE":
+                    piece = ""
+                pieces.append(piece)
+                # The report itself can be cut off at the output limit — the same continuation as
+                # in the main loop, or a budget stop hands the analyst half a report.
+                if wrap_finish != "length" or runs.stop_requested(run_id) or _n >= MAX_OUTPUT_CONTINUES:
                     break
-                if item["type"] == "text":
-                    buf.append(item["text"])
-                    HISTORY.append_text(run_id, item["text"])
-                    yield {"type": "delta", "text": item["text"], "step": step}
-                elif item["type"] == "message":
-                    wrap_msg = item["message"]
-            # The assembled message is the fallback, exactly as in the main loop. Collecting ONLY the
-            # `text` deltas meant that a provider which streams no prose deltas — perfectly legal, the
-            # client always yields the assembled `message` — produced an EMPTY report after a run had
-            # spent its entire budget. That is the "it ran for ages and gave me no answer" case, and the
-            # report the model actually wrote was sitting in the message the whole time.
-            wrapped = "".join(buf) or str(wrap_msg.get("content") or "")
-            if wrapped and not buf:
-                HISTORY.append_text(run_id, wrapped)       # deltas never carried it into the transcript
-                yield {"type": "delta", "text": wrapped, "step": step}
+                messages.append({"role": "assistant", "content": piece})
+                messages.append({"role": "user", "content": CONTINUE_OUTPUT})
+                note = (f"the report was cut off at the model's output limit — asked it to continue "
+                        f"from where it stopped ({_n + 1} of {MAX_OUTPUT_CONTINUES})")
+                HISTORY.append(run_id, {"kind": "status", "text": note})
+                yield {"type": "status", "text": note, "outputContinue": _n + 1}
+            wrapped = "".join(pieces)
             # never let an empty wrap-up erase what the run had already established
             if wrapped:
                 answer = wrapped
@@ -1336,7 +1494,8 @@ async def investigate(store: Any, objective: str, run_id: str,
                "toolCalls": tool_calls, "writes": ctx.writes, "actions": ctx.actions,
                "unverifiedCitations": unverified, "answer": answer, "elapsedSec": round(elapsed(), 1),
                "compactions": compactions, "cachedToolCalls": ctx.cache_hits, "textToolCalls": text_mode,
-               "contextCeiling": ceiling, "recordNudges": record_nudges}
+               "contextCeiling": ceiling, "recordNudges": record_nudges, "resets": resets,
+               "outputContinues": output_continues}
     except AIError as exc:
         error = _kept_note(str(exc), tool_calls, ctx.writes)
         runs.finish(run_id, "error", "error", step, tool_calls, answer, ctx.actions, [], error)

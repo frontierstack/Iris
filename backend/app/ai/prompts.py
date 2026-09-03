@@ -44,16 +44,21 @@ SYNTH_SYSTEM = (
 # the whole sentence: who, did what, to what, when, with what outcome, in which log. Shared by the
 # system prompt, DOCUMENT_CHECK and RECORD_NUDGE so the three cannot ask for different things.
 TIMELINE_NOTE_RULE = (
-    "Each note is a full, specific sentence or two, never a restated label: name the actor (the IP, "
-    "account, host or process), what it did and to what, the UTC time, the outcome (succeeded, failed, "
-    "denied, N times), and the log file it was observed in - e.g. 'The IP 10.0.0.1 authenticated as "
-    "svc_deploy over SSH at 21 Aug 2026 10:14:02 UTC after 41 failed attempts in the preceding 3 minutes, "
-    "observed in auth.log' - not 'IP was seen'. Then, where it helps, one clause on why it matters here. "
-    "FORMAT it as Markdown the way a report is typeset: the sentence first, on its own line; backticks "
-    "around every IP, account, host, process, file name, hash and event id (`10.0.0.1`, `svc_deploy`, "
-    "`auth.log`); the outcome in bold (**denied**, **succeeded**, **41 failures**); then, only when "
-    "there is more to say, a short bullet list underneath (`- why it matters: ...`, `- next: ...`). "
-    "Never a wall of text and never a bare label"
+    "Each note has TWO parts, in this order, and the screen shows them side by side:\n"
+    "(1) WHY IT IS ON THE TIMELINE — the technical view, one or two full, specific sentences, never a "
+    "restated label: name the actor (the IP, account, host or process), what it did and to what, the "
+    "UTC time, the outcome (succeeded, failed, denied, N times), and the log file it was observed in - "
+    "e.g. 'The IP `10.0.0.1` authenticated as `svc_deploy` over SSH at 21 Aug 2026 10:14:02 UTC after "
+    "**41 failed attempts** in the preceding 3 minutes, observed in `auth.log`' - not 'IP was seen'. "
+    "Backticks around every IP, account, host, process, file name, hash and event id; the outcome in "
+    "bold.\n"
+    "(2) WHY IT MATTERS — on its own line starting exactly `**Why it matters:**`, the HIGH-LEVEL "
+    "understanding for someone who does not read logs: what this moment means for the incident as a "
+    "whole (a foothold gained, credentials now in the attacker's hands, the first sign of lateral "
+    "movement, data leaving), in one or two plain sentences with no identifiers and no jargon - e.g. "
+    "'**Why it matters:** the attacker now has a working account on the build server; everything after "
+    "this is done with legitimate credentials.'\n"
+    "Never a wall of text, never a bare label, and never the same sentence twice in different words"
 )
 
 INVESTIGATOR_SYSTEM = (
@@ -453,6 +458,31 @@ COMPACTED_CONTINUE = (
     "already written to the case are preserved there. CONTINUE from where you left off — do not start "
     "the investigation over, and do not repeat calls the brief says you have already made. Keep new "
     "tool results narrow from here (tighter queries, counts and aggregates rather than rows).")
+
+
+# Injected when the model's reply was CUT OFF at the provider's output limit (finish_reason
+# 'length') with no tool call attached. An empty turn is how the loop recognises "finished", so a
+# report truncated mid-sentence used to be published as the final answer — on a local model with a
+# small n_predict that is most long reports. Bounded (MAX_OUTPUT_CONTINUES); the pieces are joined.
+CONTINUE_OUTPUT = (
+    "YOUR REPLY WAS CUT OFF at the output limit before it finished. Continue EXACTLY from where it "
+    "stopped, mid-sentence if that is where it stopped — do not repeat anything you already wrote, do "
+    "not restart the message, do not apologise. If it was in fact complete, reply with the single word "
+    "DONE.")
+
+# Injected when folding the transcript could not make it fit the model's window — the brief plus the
+# kept tail plus the fixed cost of the system prompt and the tool schemas is simply too big. The run
+# used to END here ("budget"), or fail with "give the model a larger context window". Instead the
+# transcript is REBUILT from the run's own persisted record (ai/history.py records as it goes, and
+# ai/continuation.py already knows how to brief a follow-up from such a record) — the same recovery
+# the analyst would get by typing "continue", taken automatically and inside the same run.
+RESET_NOTE = (
+    "NOTE — this conversation was RESTARTED from its own record: folding it could not fit the model's "
+    "context window. You are the same assistant on the same objective. Below is what THIS run has "
+    "already done — its tool calls and what they returned, its findings so far, every verified event "
+    "id and everything already written to the case. None of that is lost and none of it is to be "
+    "repeated. CONTINUE from where it stopped. Keep every new tool result NARROW from here: counts and "
+    "aggregates over rows, small limits, tight queries — the window is small.")
 
 
 def investigator_user_prompt(objective: str, context: str, prior: str = "") -> str:

@@ -1233,7 +1233,9 @@ type AiRunEvent =
   | { type:'done'; runId:string; threadId:string; parentId:string; reason:string; state:string; steps:number;
       toolCalls:number; writes:number;
       actions:AiAction[]; unverifiedCitations:string[]; answer:string; elapsedSec:number;
-      compactions:number; contextCeiling:number; recordNudges:number }
+      compactions:number; contextCeiling:number; recordNudges:number;
+      resets:number;            // in-run restarts from the run's own record when folding could not fit (≤ 3)
+      outputContinues:number }  // replies cut off at the model's output limit that were continued and joined (≤ 3)
   | { type:'error'; message:string; actions?:AiAction[] };
 ```
 - `POST /api/ai/investigate` body `AiInvestigateRequest` → SSE (`text/event-stream`) of `AiRunEvent`. The response
@@ -1454,9 +1456,15 @@ running as it was) and the reason goes back to the model. AI-authored rules carr
   (citations are load-bearing: a claim whose citation was compacted away would become uncited and the citation
   validator would then flag the model's own correct finding), what has already been written to the case, and the
   model's prose findings — keeping the system message, the objective and a recent tail verbatim. The brief is
-  built deterministically, not by a second model call. Bounded by `IRIS_AI_MAX_COMPACTIONS` (default 6, cap 20)
-  and by a floor: if compacting cannot get the estimate under 80 % of the ceiling the run stops on `budget` as
-  before, so it can never loop. Every compaction emits a `status` event ("compacted N earlier steps into a running
+  built deterministically, not by a second model call. Bounded by `IRIS_AI_MAX_COMPACTIONS` (default 6, cap 20;
+  NO cap with the run limits switched off — the count is policy, the window is the fact) and by a floor: a fold
+  has to get the estimate under 80 % of the room above the request's fixed cost (tool schemas + system prompt +
+  objective), or it is refused. A second fold carries the first brief's calls and findings forward, so a long
+  run degrades gradually rather than forgetting everything before fold one. When no fold can fit, the run
+  RESTARTS from its own persisted record (`status` event with `reset:n`, ≤ 3 per run) — the transcript is rebuilt
+  as system + objective + the same brief a follow-up turn would get — and only past that does it stop on `budget`.
+  A reply cut off at the model's output limit (`finish_reason: length`, no tool call) is continued and the pieces
+  joined (`status` with `outputContinue:n`, ≤ 3). Every compaction emits a `status` event ("compacted N earlier steps into a running
   brief …") that is persisted in the transcript — an analyst reading a run back must know the model's view was
   summarised. `done` reports `compactions`, `cachedToolCalls` and `textToolCalls`.
 - **Tool calling is verified, not assumed.** A provider that rejects the `tools` body key fails with a specific

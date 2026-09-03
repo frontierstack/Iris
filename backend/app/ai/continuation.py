@@ -47,6 +47,11 @@ MAX_NOTES_UNFINISHED = 3000
 MAX_IDS = 120
 
 _ID_RE = eventids.BARE     # hex, not decimal — see ai/eventids.py
+# A turn that ended on one of these DID reach a report — written from partial work, on the loop's
+# instruction, with "what I did not get to" in it. `state` is 'done' for all of them, so without this
+# list a follow-up saying "continue" was told the turn had finished and the model re-answered the
+# question instead of picking up the investigation the limit interrupted.
+CUT_SHORT_REASONS = ("max_steps", "timeout", "budget", "tool_arguments", "unfinished", "context")
 
 HEADER = (
     "EARLIER IN THIS CONVERSATION — you have already done the work below for this analyst. It is "
@@ -131,9 +136,20 @@ def build(records: list[dict[str, Any]], *, max_chars: int = MAX_BRIEF_CHARS) ->
         n = dropped + i + 1
         head = f"\n--- TURN {n} — the analyst asked: {_clip(rec.get('prompt'), 600)}"
         state = str(rec.get("state") or "")
-        unfinished = bool(state) and state != "done"
-        if unfinished:
-            why = str(rec.get("reason") or state)
+        reason = str(rec.get("reason") or "")
+        cut_short = state == "done" and reason in CUT_SHORT_REASONS
+        unfinished = (bool(state) and state != "done") or cut_short
+        if state == "running":
+            # The run being briefed is THIS run — an in-run restart (investigator._reset_transcript),
+            # not an earlier turn. Say so, or the model reads its own work as somebody else's.
+            head += ("  [THIS IS THE CURRENT RUN, STILL IN PROGRESS: the work below is yours. CONTINUE "
+                     "FROM WHERE IT STOPPED; do not restart the investigation.]")
+        elif cut_short:
+            head += (f"  [THIS TURN WAS CUT SHORT by a limit ({reason}): its report was written from "
+                     f"partial work and says what it did not get to. CONTINUE FROM WHERE IT STOPPED — "
+                     f"pick up the lines of enquiry it named as unfinished; do not restart.]")
+        elif unfinished:
+            why = reason or state
             err = _clip(rec.get("error"), 160)
             head += (f"  [THIS TURN ENDED EARLY: {why}{' - ' + err if err else ''}. Its work below is "
                      f"still valid — CONTINUE FROM WHERE IT STOPPED; do not restart the investigation.]")

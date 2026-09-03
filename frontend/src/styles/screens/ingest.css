@@ -1092,6 +1092,29 @@
   overflow-wrap: anywhere;
 }
 .tlx__labels { display: flex; flex-wrap: wrap; gap: 6px; }
+/* The note's two views side by side: the technical account on the left, what it means on the right.
+   Each is its own bordered block with a quiet label, so a reader who wants only the high-level
+   picture can read down the right-hand column of an open timeline. One column under 720px. */
+.tlx__why { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 12px; min-width: 0; }
+.tlx__whycol {
+  min-width: 0;
+  padding: 10px 12px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+.tlx__whycol--matters { border-left: 2px solid var(--accent); }
+.tlx__whylbl {
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: var(--ls-head);
+  text-transform: uppercase;
+  color: var(--muted-2);
+  margin-bottom: 6px;
+}
+.tlx__whycol .tl__note { padding: 0; border: 0; background: transparent; }
+.tlx__whycol .md > :last-child { margin-bottom: 0; }
 .tlx__dets { display: flex; flex-direction: column; gap: 10px; }
 .tlx__acts { display: flex; flex-wrap: wrap; gap: 8px; }
 /* Curation is never lost to a reload: an entry whose line is not loaded is KEPT and explained. */
@@ -1103,6 +1126,7 @@
   line-height: 1.55;
 }
 @media (max-width: 720px) {
+  .tlx__why { grid-template-columns: 1fr; }
   .tl__src, .tl__gap { display: none; }
 }
 
