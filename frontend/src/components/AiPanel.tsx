@@ -541,14 +541,47 @@ function Warning({ text }: { text: string }) {
   );
 }
 
+/** The clock of a change, for the ledger's time column: `14:02:37` — the date is the run's. */
+const clockOf = (iso: string): string => {
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? '' : new Date(t).toISOString().slice(11, 19);
+};
+
+/** A short noun per change family, for the ledger's kind tag. */
+function changeFamily(tool: string): string {
+  if (tool.includes('note')) return 'note';
+  if (tool.includes('ioc')) return 'indicator';
+  if (tool.includes('graph')) return 'graph';
+  if (tool.includes('rule')) return 'rule';
+  if (tool.includes('exclusion')) return 'exclusion';
+  if (tool.includes('annotate')) return 'timeline';
+  if (tool.includes('events')) return 'case set';
+  if (tool.includes('case')) return 'case';
+  return 'change';
+}
+
+/** `2 notes · 1 indicator · 1 graph` — the head's one-line breakdown of what is still on the case. */
+function changeBreakdown(actions: AiAction[]): string {
+  const families = new Map<string, number>();
+  for (const a of actions) {
+    if (a.undone) continue;
+    const f = changeFamily(a.tool);
+    families.set(f, (families.get(f) ?? 0) + 1);
+  }
+  const plural = (f: string, n: number) => (n === 1 ? f : f === 'case set' ? 'case set entries' : `${f}s`);
+  return [...families].map(([f, n]) => `${n} ${plural(f, n)}`).join(' · ');
+}
+
 /**
  * The template's ARTIFACT CARD, carrying what the run did to the case — second only to the answer,
- * because it is the part that persists. Every entry is reversible in one click; a reverted one stays
- * listed rather than disappearing.
+ * because it is the part that persists. It reads as a LEDGER: one row per change, the change itself
+ * as the line, the family it belongs to as a tag, the clock on the right. Every entry is reversible
+ * in one click; a reverted one stays listed, struck through, rather than disappearing.
  */
 function Changes({ actions, busy, onUndo }: { actions: AiAction[]; busy: boolean; onUndo: () => void }) {
   const active = actions.filter((a) => !a.undone).length;
   if (!actions.length) return null;
+  const reverted = actions.length - active;
   return (
     <section className="aic-art" aria-label="Changes this run made to the case">
       <div className="aic-art__head">
@@ -556,30 +589,39 @@ function Changes({ actions, busy, onUndo }: { actions: AiAction[]; busy: boolean
         <span className="aic-art__ident">
           <span className="aic-art__name">Changes to this case</span>
           <span className="aic-art__meta">
-            {active} active{actions.length !== active ? ` · ${actions.length - active} reverted` : ''}
+            {active === 0 ? 'everything reverted' : changeBreakdown(actions)}
+            {reverted > 0 && active > 0 ? ` · ${reverted} reverted` : ''}
           </span>
         </span>
+        <span className="aic-art__count" aria-label={`${active} active changes`}>{active}</span>
         {active > 0 && (
           <button type="button" className="aic-art__act" onClick={onUndo} disabled={busy}>
             {busy ? 'Reverting…' : 'Revert all'}
           </button>
         )}
       </div>
-      <ul className="aic-art__list">
+      <ol className="aic-art__list">
         {actions.map((a) => {
           const Glyph = toolIcon(a.tool);
+          const clock = clockOf(a.at);
           return (
             <li key={a.id} className={cx('aic-change', a.undone && 'aic-change--undone')}>
-              <Glyph className="aic-change__glyph" />
+              <span className="aic-change__glyph" aria-hidden><Glyph /></span>
               <span className="aic-change__text">
                 <span className="aic-change__summary">{a.summary}</span>
-                <span className="aic-change__kind" title={a.tool}>{writeLabel(a.tool)}</span>
+                <span className="aic-change__sub">
+                  <span className="aic-change__kind" title={a.tool}>{changeFamily(a.tool)}</span>
+                  <span className="aic-change__what">{writeLabel(a.tool)}</span>
+                </span>
               </span>
-              {a.undone && <span className="aic-change__tag">reverted</span>}
+              <span className="aic-change__side">
+                {a.undone ? <span className="aic-change__tag">reverted</span> : null}
+                {clock && <time className="aic-change__time" dateTime={a.at} title={UTC(a.at)}>{clock}</time>}
+              </span>
             </li>
           );
         })}
-      </ul>
+      </ol>
     </section>
   );
 }
@@ -1435,12 +1477,6 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
 
           {provider && provider !== 'none' && !run && (
             <div className="aic-hero">
-              <h1 className="aic-hero__title">What are we investigating?</h1>
-              <div className="aic-hero__body">
-                The assistant searches the pool, opens events, walks the entity graph and writes what it finds into the
-                case &mdash; citing the event ids behind every claim. Every change it makes is listed with the answer and can be
-                reverted in one click.
-              </div>
               {scopeNote && (
                 <div className="aic-hero__ctx"><b>Context</b>{scopeNote}</div>
               )}

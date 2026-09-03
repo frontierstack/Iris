@@ -294,7 +294,6 @@ export function Header() {
   const nav = useNavigate();
   const ai = useAiPanel();
   const clock = useUtcClock();
-  const inCase = c.data?.caseSet.length ?? 0;
   const loc = useLocation();
   // Findings now live on the case detail screen; with no case yet, fall back to the case list
   const caseHref = c.data && !c.data.pending ? `/cases/${encodeURIComponent(c.data.id)}` : '/cases';
@@ -333,10 +332,6 @@ export function Header() {
       </div>
       <div className="header__right">
         <span className="header__utc" title="Coordinated Universal Time"><b>{clock}</b> UTC</span>
-        <button className="btn btn--sm btn--field" title="Events curated into this case" onClick={() => nav(caseHref)}>
-          <Icon.Check width={11} height={11} />
-          {inCase} in case
-        </button>
         <ComputeBadge />
         <span className="header__sep" />
         <button className="btn btn--sm btn--field" onClick={() => ai.open({ scope: 'case', label: c.data?.name ?? 'Active case' })} title="Ask the AI assistant about this case (Shift+A)">

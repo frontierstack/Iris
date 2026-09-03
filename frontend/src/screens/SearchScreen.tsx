@@ -488,11 +488,6 @@ function SearchHistogram({ h, loading }: { h?: EventsHistogram; loading: boolean
       <div className="histo__ticks">
         {(view?.ticks ?? []).map((t, i) => <span key={`${t}-${i}`} className="num">{tickLabel(t, view!.span)}</span>)}
       </div>
-      {h && !h.exact && (
-        <div className="histo__partial">
-          Shape read from the first {fmtInt(h.counted)} of {fmtInt(h.total)}+ matches — narrow the query or the range for the whole picture.
-        </div>
-      )}
     </div>
   );
 }

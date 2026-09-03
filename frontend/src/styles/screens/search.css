@@ -390,13 +390,6 @@
   font-size: var(--fs-xxs);
   color: var(--muted-3);
 }
-/* A partial read is never presented as the whole picture — same rule as a floored count. */
-.histo__partial {
-  margin-top: 8px;
-  font-size: var(--fs-sm);
-  color: var(--warn);
-}
-
 /* ── the body: answer, then facets ── */
 .search-layout {
   flex: 1;

@@ -118,6 +118,15 @@ export function FloatingWindow({
       h: defaultBox?.h ?? Math.min(640, window.innerHeight - 140),
     }, { w: minW, h: minH }));
   const mode = useRef<Mode>(null);
+  /**
+   * `dragging` is STATE, not a read of `mode.current` at render time. The class it drives puts
+   * `pointer-events: none` on the body for the length of a drag (so a canvas or iframe underneath
+   * cannot eat the moves), and the end of a drag used to be `mode.current = null` followed by a
+   * setBox that returned the SAME object — which React bails out of, so nothing re-rendered and the
+   * class stayed on. The body was then unclickable and unscrollable until something ELSE re-rendered
+   * the window: "sometimes the chat freezes and I have to click out of it".
+   */
+  const [dragging, setDragging] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
 
   const persist = useCallback((b: WinBox) => {
@@ -164,6 +173,7 @@ export function FloatingWindow({
   const endDrag = (e: React.PointerEvent) => {
     if (!mode.current) return;
     mode.current = null;
+    setDragging(false);
     try { (e.target as HTMLElement).releasePointerCapture(e.pointerId); } catch { /* already released */ }
     setBox((b) => { persist(b); return b; });
   };
@@ -171,12 +181,14 @@ export function FloatingWindow({
   const startMove = (e: React.PointerEvent) => {
     if ((e.target as HTMLElement).closest('button')) return;   // the close/dock buttons are not a handle
     mode.current = { kind: 'move', dx: e.clientX - box.x, dy: e.clientY - box.y };
+    setDragging(true);
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     e.preventDefault();
   };
 
   const startResize = (edge: string) => (e: React.PointerEvent) => {
     mode.current = { kind: 'resize', edge, start: box, px: e.clientX, py: e.clientY };
+    setDragging(true);
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     e.preventDefault();
     e.stopPropagation();
@@ -185,13 +197,14 @@ export function FloatingWindow({
   return (
     <div
       ref={ref}
-      className={cx('floatwin', mode.current && 'floatwin--dragging', className)}
+      className={cx('floatwin', dragging && 'floatwin--dragging', className)}
       style={{ left: box.x, top: box.y, width: box.w, height: box.h, minWidth: minW, minHeight: minH }}
       role="dialog"
       aria-label={ariaLabel ?? (typeof title === 'string' ? title : 'Detached window')}
       onPointerMove={onPointerMove}
       onPointerUp={endDrag}
       onPointerCancel={endDrag}
+      onLostPointerCapture={endDrag}
     >
       <div className="floatwin__head" onPointerDown={startMove}>
         {head ?? (
