@@ -993,8 +993,7 @@ mark.hl {
    on its own ground behind a 1px rule instead of continuing the row's. */
 .tl__day-label,
 .tlx__eyebrow,
-.tlx__fact i,
-.tlx__norm i {
+.tlx__fact i {
   font-family: var(--font-ui);
   font-size: var(--fs-xs);
   font-weight: 600;
@@ -1030,7 +1029,8 @@ mark.hl {
   gap: 7px;
 }
 .tlx__fact b { font-family: var(--font-mono); font-weight: 500; color: var(--text-brightest); }
-.tlx__raw { background: var(--panel); }
+/* the code block sits on the panel ground so it stands off the entry's inset ground */
+.tlx__code { background: var(--panel); border-color: var(--border-strong); }
 /* the pace of the sequence is a figure, so it is tabular */
 .tl__gap { font-variant-numeric: tabular-nums; font-feature-settings: 'tnum' 1; }
 .tl__ts { font-feature-settings: 'tnum' 1; }

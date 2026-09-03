@@ -1069,26 +1069,31 @@
   color: var(--muted-2);
 }
 .tlx__hint { text-transform: none; letter-spacing: 0; color: var(--muted-3); }
-/* The line as the log recorded it. Capped, because one JSON record can be thousands of characters and
-   an entry is not a file viewer; `.raw` already scrolls and wraps. */
-.tlx__raw { margin: 0; max-height: 240px; font-size: var(--fs-sm); line-height: 1.65; }
-.tlx__norm { display: flex; gap: 8px; align-items: baseline; font-size: var(--fs-sm); color: var(--text-3); min-width: 0; }
-.tlx__norm i {
-  font-style: normal;
-  font-size: var(--fs-xs);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--muted-2);
-  flex: 0 0 auto;
+/* The line as the log recorded it, set as a CODE BLOCK — the same treatment a fenced block gets in a
+   note (`.md-pre` in notes.css), so the one log line and a note quoting one read alike. It wraps
+   rather than scrolling sideways (a 2,000-character JSON record has to be readable in a 600px column)
+   and is capped in height, because an entry is not a file viewer. */
+.tlx__code {
+  margin: 0;
+  padding: 10px 12px;
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-inset);
 }
-.tlx__norm span { min-width: 0; word-break: break-word; }
-/* The shared grid is padded for a full page; inside an entry it is already inside a panel. */
-.fields-grid--tight { padding: 0; gap: 9px 22px; }
-.tlx__empty { font-size: var(--fs-base); color: var(--muted-2); line-height: 1.55; }
+.tlx__code code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.65;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
 .tlx__labels { display: flex; flex-wrap: wrap; gap: 6px; }
 .tlx__dets { display: flex; flex-direction: column; gap: 10px; }
 .tlx__acts { display: flex; flex-wrap: wrap; gap: 8px; }
-.tlx__more { align-self: flex-start; }
 /* Curation is never lost to a reload: an entry whose line is not loaded is KEPT and explained. */
 .tlx__gone {
   border-left: 2px solid var(--warn);
@@ -1098,7 +1103,6 @@
   line-height: 1.55;
 }
 @media (max-width: 720px) {
-  .fields-grid--tight { grid-template-columns: 1fr; }
   .tl__src, .tl__gap { display: none; }
 }
 

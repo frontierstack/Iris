@@ -16,7 +16,7 @@
  * happened and WHAT THEY CONCLUDED about it. So the row leads with their own sentence (the first line
  * of the note), and the log line moved into `EntryDetail`, which the whole row opens: identity chips
  * with the event id to cite, the note and labels with their editor, then the raw line exactly as the
- * log recorded it, the fields parsed out of it, the entities it mentions and the rules it fired. An
+ * log recorded it, the entities it mentions and the rules it fired. An
  * entry with no note yet still has to be identifiable, so it falls back to the normalized message —
  * set in mono and dimmed, because those are the log's words and not the analyst's.
  *
@@ -112,8 +112,6 @@ function AddFromSource({ sources, inSet }: { sources: Source[]; inSet: Set<strin
 
 /* ───────── one entry, opened ───────── */
 
-/** How many parsed fields an entry shows before it has to be asked for the rest. */
-const FIELDS_SHOWN = 8;
 /** localStorage: '1' = newest first. Oldest first is the default — a timeline reads forward. */
 const SORT_KEY = 'iris.timeline.newestFirst';
 
@@ -169,8 +167,11 @@ function RowSaid({ said, summary, arriving, id }: { said: string; summary: strin
  *  The row used to carry the log line itself, and that is the wrong altitude for a chronology: what an
  *  analyst reads down the page is WHEN it happened and WHAT THEY CONCLUDED, and the line that proves it
  *  is what they open when they want it. So the row is the claim and this is the evidence — identity
- *  first, then the analyst's own words, then the raw line exactly as the log recorded it, the fields
- *  parsed out of it, the entities it mentions and the rules it fired.
+ *  first, then the analyst's own words, then the raw line exactly as the log recorded it — set as a
+ *  code block, because it IS code as far as the reader is concerned — the entities it mentions and the
+ *  rules it fired. The normalized message and the parsed fields were removed on request: the row
+ *  already falls back to the message when there is no note, and the fields are one click away on the
+ *  event page.
  *
  *  Deliberately NOT a second copy of the event detail page: no correlations (an O(pool) derived
  *  structure — see CLAUDE.md on why event detail itself must stay a dictionary lookup) and no file
@@ -179,9 +180,6 @@ function EntryDetail({ en, e, editing, onEdit, onDone }: {
   en: CaseSetEntry; e: Event | undefined; editing: boolean; onEdit: () => void; onDone: () => void;
 }) {
   const nav = useNavigate();
-  const [allFields, setAllFields] = useState(false);
-  const fields = useMemo(() => Object.entries(e?.fields ?? {}), [e]);
-  const shown = allFields ? fields : fields.slice(0, FIELDS_SHOWN);
 
   return (
     <div className="tlx">
@@ -232,33 +230,7 @@ function EntryDetail({ en, e, editing, onEdit, onDone }: {
         <>
           <section className="tlx__sec">
             <div className="tlx__eyebrow">Raw line<span className="tlx__hint">as the log recorded it</span></div>
-            <div className="raw tlx__raw">{e.raw || e.msg || '—'}</div>
-            {e.msg && e.raw && e.msg !== e.raw && (
-              <div className="tlx__norm"><i>normalized</i><span>{e.msg}</span></div>
-            )}
-          </section>
-
-          <section className="tlx__sec">
-            <div className="tlx__eyebrow">Parsed fields<span className="sec__count">{fields.length}</span></div>
-            {fields.length === 0 ? (
-              <div className="tlx__empty">Nothing structured was extracted from this line — it is in the pool as raw text.</div>
-            ) : (
-              <>
-                <div className="fields-grid fields-grid--tight">
-                  {shown.map(([k, v]) => (
-                    <div key={k} className="field-kv">
-                      <span className="field-kv__k">{k}</span>
-                      <span className="field-kv__v" title={v}>{v === '' ? '—' : v}</span>
-                    </div>
-                  ))}
-                </div>
-                {fields.length > FIELDS_SHOWN && (
-                  <button className="btn btn--sm btn--ghost tlx__more" onClick={() => setAllFields((v) => !v)}>
-                    {allFields ? 'Show fewer' : `Show all ${fields.length} fields`}
-                  </button>
-                )}
-              </>
-            )}
+            <pre className="tlx__code"><code>{e.raw || e.msg || '—'}</code></pre>
           </section>
 
           {e.entities.length > 0 && (
@@ -466,7 +438,7 @@ export function CaseTimeline({ sources }: { sources: Source[] }) {
                       keyboard handling back on us for no gain. */}
                   <button type="button" className="tl__summary" aria-expanded={open}
                     onClick={() => toggle(en.eventId)}
-                    title={open ? 'Collapse this entry' : 'Open this entry — the raw line, its fields, entities and detections'}>
+                    title={open ? 'Collapse this entry' : 'Open this entry — the raw line, its entities and detections'}>
                     <Icon.Chevron className={cx('tl__chev', open && 'tl__chev--open')} aria-hidden />
                     <span className="cell-mono tl__ts"
                       title={[e?.ts ? `${fmtTs(e.ts)} UTC` : 'this event has no parsed timestamp',
