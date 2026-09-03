@@ -320,124 +320,236 @@ a.aic__pill { display: inline-block; text-decoration: none; }
 /* ───────── an assistant message ───────── */
 .aic-asst { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 
-/* THE STEPS CARD. Unnumbered, by design: the sequence is the order of the rows and a model-turn
-   boundary is a GAP in the rail. The dot pulses only while the run is live. The head is a title with
-   its counts underneath — the same head shape as the changes card, so the two read as siblings. */
-.aic-steps {
-  border: 1px solid var(--border-2);
+/* ───────── THE DISCLOSURE CARDS: "How it got there" and "Changes to this case" ─────────
+   ONE head treatment for both, so they read as siblings: a tile on the left (a glyph, or the count
+   where the count IS the point), a sans title with its figures in mono underneath, and the app's
+   labelled Expand / Collapse pill on the right — never a bare caret, which read as a tree view. */
+.aic-disc {
+  border: 1px solid var(--border);
   background: var(--panel-inset);
-  border-radius: 14px;
+  border-radius: 12px;
   overflow: hidden;
-  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.18);
 }
-.aic-steps__head {
+.aic-disc__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-right: 12px;
+  min-width: 0;
+  background: var(--panel-2);
+}
+.aic-disc--open .aic-disc__head { border-bottom: 1px solid var(--border); }
+.aic-disc__toggle {
   appearance: none;
-  width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 12px;
-  background: linear-gradient(180deg, var(--panel-2), var(--panel-inset));
+  background: transparent;
   border: 0;
   cursor: pointer;
-  padding: 11px 14px 11px 16px;
+  padding: 10px 6px 10px 12px;
   text-align: left;
   color: var(--text);
-  transition: background var(--t-fast);
 }
-.aic-steps__head:hover { background: var(--panel-2); }
-.aic-steps__head:hover .aic-steps__chev { color: var(--text); }
-.aic-steps__head:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
-.aic-steps__dot {
+.aic-disc__toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
+.aic-disc:has(.aic-disc__toggle:hover) .aic-disc__head { background: var(--panel-deep); }
+.aic-disc:has(.aic-disc__toggle:hover) .aic-disc__state { border-color: var(--accent-border); color: var(--text-bright); }
+.aic-disc__tile {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  border: 1px solid var(--accent-border);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  position: relative;
+}
+.aic-disc__tile svg { width: 14px; height: 14px; }
+.aic-disc__tile--idle { background: var(--panel-inset); color: var(--muted); border-color: var(--border-strong); }
+/* the live badge on the tile: the run is still calling tools */
+.aic-disc__live {
+  position: absolute;
+  top: -3px;
+  right: -3px;
   width: 8px;
   height: 8px;
   border-radius: var(--radius-pill);
   background: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-bg);
-  flex: 0 0 auto;
+  box-shadow: 0 0 0 2px var(--panel-2);
+  animation: aicPulse 1.5s ease-in-out infinite;
 }
-.aic-steps__dot--live { animation: aicPulse 1.5s ease-in-out infinite; }
-.aic-steps__dot--idle { background: var(--muted-3); box-shadow: 0 0 0 3px var(--panel-2); }
-.aic-steps__ident { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.aic-steps__title { font-family: var(--aic-serif); font-size: 16px; line-height: 1.2; color: var(--text); }
-.aic-steps__meta {
+.aic-disc__ident { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.aic-disc__title { font-family: var(--font-ui); font-size: 13.5px; font-weight: 500; line-height: 1.25; color: var(--text-bright); }
+.aic-disc__meta {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 10.5px;
   letter-spacing: 0.02em;
   color: var(--muted-2);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.aic-steps__chev {
-  width: 12px;
-  height: 12px;
+.aic-disc__meta b { font-weight: 500; color: var(--muted); }
+.aic-disc__state {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-4);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  min-width: 92px;
+  justify-content: center;
+  transition: color var(--t-fast), border-color var(--t-fast);
+}
+.aic-disc__state svg { width: 11px; height: 11px; }
+.aic-disc__act {
+  appearance: none;
+  flex: 0 0 auto;
+  height: 24px;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--text-4);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0 10px;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  line-height: 1;
+  transition: color var(--t-fast), border-color var(--t-fast), background var(--t-fast);
+}
+.aic-disc__act:hover:not(:disabled) { border-color: var(--bad); color: var(--bad); background: color-mix(in srgb, var(--bad) 10%, transparent); }
+.aic-disc__act:disabled { opacity: 0.5; cursor: not-allowed; }
+.aic-disc__act:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+
+/* ───────── the steps body ───────── */
+.aic-steps__body { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 8px; }
+.aic-step { animation: aicStepIn 260ms ease both; min-width: 0; }
+/* a model-turn boundary is a little more air, nothing drawn */
+.aic-step--turn { margin-top: 8px; }
+/* the assistant's own commentary between calls: sans, quiet, indented a touch off the cards */
+.aic-steps__body .aic-prose--quiet { font-family: var(--font-ui); font-size: 13px; line-height: 1.55; color: var(--text-3); padding: 2px 4px; }
+.aic-steps__body .aic-prose--quiet .md-p { margin: 0 0 6px; }
+/* a status note (compaction, a nudge, the opening line): the run talking about itself */
+.aic-steps__body .aic-bare__note {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
   color: var(--muted-2);
-  transform: rotate(-90deg);
-  transition: transform var(--t-fast), color var(--t-fast);
+  padding: 6px 10px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
 }
-.aic-steps__chev--open { transform: rotate(0deg); }
-.aic-steps__body {
-  padding: 12px 16px 16px;
-  border-top: 1px solid var(--border-2);
-  display: flex;
-  flex-direction: column;
-}
-/* No rail and no node down the left edge — both were asked to go. The order is the order, a write
-   is named by its `write` tag and its accent glyph, and a model-turn boundary is a gap. */
-.aic-step {
-  padding: 7px 0;
-  animation: aicStepIn 260ms ease both;
+
+/* ───────── one tool CALL and its RESULT in ONE card ─────────
+   `writes` is read in exactly one place in the TSX; this is the card it draws. */
+.tcall { display: flex; flex-direction: column; min-width: 0; gap: 6px; }
+.tcall__lead { padding: 2px 4px 4px; }
+.tcall__card {
+  border: 1px solid var(--border-2);
+  background: var(--panel);
+  border-radius: 9px;
+  overflow: hidden;
   min-width: 0;
 }
-.aic-step--turn { margin-top: 14px; }
-
-/* One tool CALL and its RESULT in ONE card — they used to be two lines with nothing binding them.
-   `writes` is read in exactly one place in the TSX; this is the rail it draws. */
-.tcall { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.tcall--write .tcall__name { color: var(--text); }
-.tcall--bad .tcall__name { color: var(--bad); }
-.aic .tcall__lead { font-size: 12.5px; line-height: 1.55; color: var(--text-4); }
-.aic .tcall__lead .md-p { margin: 0 0 4px; }
-.tcall__head { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.tcall__glyph { width: 12px; height: 12px; flex: 0 0 auto; color: var(--muted-2); }
-.tcall--write .tcall__glyph { color: var(--accent); }
+.tcall--write .tcall__card { border-color: var(--accent-border); }
+.tcall--bad .tcall__card { border-color: color-mix(in srgb, var(--bad) 45%, var(--border-2)); }
+.tcall__head { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 7px 10px 7px 8px; }
+.tcall__glyph {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--panel-inset);
+  color: var(--muted);
+  border: 1px solid var(--border-2);
+}
+.tcall__glyph svg { width: 11px; height: 11px; }
+.tcall--write .tcall__glyph { background: var(--accent-bg); color: var(--accent); border-color: var(--accent-border); }
+.tcall--bad .tcall__glyph { color: var(--bad); }
 .tcall__name {
   font-family: var(--font-mono);
-  font-size: 11.5px;
-  letter-spacing: 0.04em;
-  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--text);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.tcall--bad .tcall__name { color: var(--bad); }
 .tcall__kind {
   flex: 0 0 auto;
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: 9px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--accent);
   border: 1px solid var(--accent-border);
   background: var(--accent-bg);
-  border-radius: var(--radius-pill);
-  padding: 2px 7px;
-  line-height: 1.3;
+  border-radius: var(--radius-sm);
+  padding: 2px 5px;
+  line-height: 1.2;
 }
 .tcall__ms, .tcall__unknown {
   margin-left: auto;
   flex: 0 0 auto;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
   color: var(--muted-3);
 }
 .tcall__ms + .tcall__unknown, .tcall__unknown + .tcall__ms { margin-left: 0; }
-.tcall__args { margin: 0; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.tcall__arg { display: flex; gap: 10px; min-width: 0; align-items: baseline; }
-.tcall__arg dt { flex: 0 0 auto; font-family: var(--font-mono); font-size: 11.5px; color: var(--muted-2); }
-.tcall__arg--prose { flex-direction: column; align-items: stretch; gap: 4px; }
+/* arguments: a two-column grid on the inset ground, keys in one column, values in the other */
+.tcall__args {
+  margin: 0;
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  column-gap: 12px;
+  row-gap: 3px;
+  padding: 7px 10px 8px 38px;
+  border-top: 1px solid var(--border-2);
+  background: var(--panel-inset);
+  min-width: 0;
+}
+.tcall__arg { display: contents; }
+.tcall__arg dt { font-family: var(--font-mono); font-size: 11px; color: var(--muted-2); line-height: 1.5; }
+.tcall__arg dd {
+  margin: 0;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .tcall__arg--prose dd { white-space: normal; overflow: visible; }
+.tcall__arg--prose dt { grid-column: 1 / -1; }
+.tcall__arg--prose dd { grid-column: 1 / -1; }
 /* A prose argument rendered as the note it is: bounded, scrolling inside its own box, in the UI
    face rather than mono, with the markdown stylesheet's tables and lists intact. */
 .aic .tcall__md {
@@ -460,43 +572,37 @@ a.aic__pill { display: inline-block; text-decoration: none; }
 .aic .tcall__md .md-table th, .aic .tcall__md .md-table td { padding: 4px 8px; white-space: nowrap; }
 .aic .tcall__md .md-table td:last-child, .aic .tcall__md .md-table th:last-child { white-space: normal; min-width: 14ch; }
 .aic .tcall__md .md-code { font-size: 11px; }
-.tcall__arg dd {
-  margin: 0;
-  min-width: 0;
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .tcall__more {
-  align-self: flex-start;
   appearance: none;
   border: 0;
-  background: transparent;
-  padding: 0;
+  background: var(--panel-inset);
+  padding: 0 10px 7px 38px;
   cursor: pointer;
+  text-align: left;
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 10px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--muted-2);
 }
 .tcall__more:hover { color: var(--text); }
-.tcall__more:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.tcall__more:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
+/* the outcome: its own row, sans, with a check or a warning */
 .tcall__result {
   display: flex;
   gap: 7px;
   align-items: flex-start;
-  font-family: var(--font-mono);
-  font-size: 11.5px;
+  padding: 7px 10px 8px 10px;
+  border-top: 1px solid var(--border-2);
+  font-family: var(--font-ui);
+  font-size: 12.5px;
   line-height: 1.5;
-  color: var(--muted);
+  color: var(--text-3);
 }
-.tcall__result svg { flex: 0 0 auto; width: 11px; height: 11px; margin-top: 3px; color: var(--ok); }
+.tcall__result svg { flex: 0 0 auto; width: 12px; height: 12px; margin-top: 3px; color: var(--ok); }
 .tcall__result span { min-width: 0; overflow-wrap: anywhere; }
-.tcall__result--bad, .tcall__result--bad svg { color: var(--bad); }
+.tcall__result--bad { color: var(--bad); }
+.tcall__result--bad svg { color: var(--bad); }
 .tcall__pending { color: var(--muted-3); }
 
 /* Nothing was CALLED — the agent simply said something. A collapsible card labelled "0 tool calls"
@@ -587,98 +693,7 @@ a.aic__pill { display: inline-block; text-decoration: none; }
   margin-top: -8px;
 }
 
-/* ───────── the artifact card: what this run changed in the case ─────────
-   Closed by default: the head carries the count as a figure and the breakdown as prose. Open, it is a
-   TIMELINE — the clock in a column on the left, a rail with one node per change, the change itself as
-   the line. The same head shape as the steps card, so the two read as siblings. */
-.aic-art {
-  border: 1px solid var(--border-2);
-  background: var(--panel-inset);
-  border-radius: 14px;
-  overflow: hidden;
-  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.18);
-}
-.aic-art__head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding-right: 14px;
-  min-width: 0;
-  background: linear-gradient(180deg, var(--panel-2), var(--panel-inset));
-}
-.aic-art__toggle {
-  appearance: none;
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  background: transparent;
-  border: 0;
-  cursor: pointer;
-  padding: 11px 6px 11px 14px;
-  text-align: left;
-  color: var(--text);
-}
-.aic-art__toggle:hover .aic-art__chev { color: var(--text); }
-.aic-art:has(.aic-art__toggle:hover) .aic-art__head { background: var(--panel-2); }
-.aic-art__toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
-.aic-art__count {
-  flex: 0 0 auto;
-  min-width: 28px;
-  height: 28px;
-  padding: 0 8px;
-  border-radius: 8px;
-  background: var(--accent-bg);
-  color: var(--accent);
-  border: 1px solid var(--accent-border);
-  font-family: var(--font-mono);
-  font-size: 12.5px;
-  font-variant-numeric: tabular-nums;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-.aic-art__ident { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.aic-art__name { font-family: var(--aic-serif); font-size: 16px; color: var(--text); line-height: 1.2; }
-.aic-art__meta {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  letter-spacing: 0.02em;
-  color: var(--muted-2);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.aic-art__chev {
-  width: 12px;
-  height: 12px;
-  flex: 0 0 auto;
-  color: var(--muted-2);
-  transform: rotate(-90deg);
-  transition: transform var(--t-fast), color var(--t-fast);
-}
-.aic-art__chev--open { transform: rotate(0deg); }
-.aic-art__act {
-  appearance: none;
-  flex: 0 0 auto;
-  border: 1px solid var(--border-strong);
-  background: transparent;
-  color: var(--text-4);
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  padding: 7px 12px;
-  border-radius: var(--radius-pill);
-  cursor: pointer;
-  line-height: 1;
-  transition: color var(--t-fast), border-color var(--t-fast), background var(--t-fast);
-}
-.aic-art__act:hover:not(:disabled) { border-color: var(--bad); color: var(--bad); background: color-mix(in srgb, var(--bad) 10%, transparent); }
-.aic-art__act:disabled { opacity: 0.5; cursor: not-allowed; }
-.aic-art__act:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
-
+/* ───────── the artifact card: what this run changed in the case — head shared with the steps card ───────── */
 /* the timeline */
 .aic-tl {
   list-style: none;
@@ -1019,7 +1034,7 @@ a.aic__pill { display: inline-block; text-decoration: none; }
   font-size: 10.5px;
   color: var(--muted-2);
 }
-.aic-canvas__foot .aic-art__act { margin-left: auto; }
+.aic-canvas__foot .aic-disc__act { margin-left: auto; }
 
 /* the history rows, laid out as the canvas's numbered mono lines */
 .aic-hist { list-style: none; margin: 0; padding: 0; }

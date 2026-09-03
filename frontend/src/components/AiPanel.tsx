@@ -420,8 +420,9 @@ const ToolCall = memo(function ToolCall({ e, live, lead = '' }: { e: AiTranscrip
       {!!lead.trim() && <Markdown className="md tcall__lead" text={lead} />}
       {/* There is ONE card and ONE head, so `e.writes` is read here and nowhere else — the rule that
           stops one layout drawing a write as a read. Keep it that way if a variant is ever added. */}
+      <div className="tcall__card">
       <div className="tcall__head">
-        <Glyph className="tcall__glyph" />
+        <span className="tcall__glyph" aria-hidden><Glyph /></span>
         <span className="tcall__name">{e.name}</span>
         {e.writes && <span className="tcall__kind" title="this tool changed the case">write</span>}
         {e.ok === null && live && <span className="spinner" style={{ width: 9, height: 9, borderWidth: 1.5 }} />}
@@ -456,6 +457,7 @@ const ToolCall = memo(function ToolCall({ e, live, lead = '' }: { e: AiTranscrip
             <span>{bad ? `refused — ${e.summary}` : (e.summary || 'done')}</span>
           </>
         )}
+      </div>
       </div>
     </div>
   );
@@ -519,15 +521,20 @@ const StepsCard = memo(function StepsCard({ nodes, live, title, startOpen }: {
   const { bits, pending } = countsOf(nodes);
 
   return (
-    <section className="aic-steps">
-      <button type="button" className="aic-steps__head" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
-        <span className={cx('aic-steps__dot', pending && live ? 'aic-steps__dot--live' : !live && 'aic-steps__dot--idle')} aria-hidden />
-        <span className="aic-steps__ident">
-          <span className="aic-steps__title">{title}</span>
-          {!!bits.length && <span className="aic-steps__meta">{bits.join(' · ')}</span>}
-        </span>
-        <Icon.Chevron className={cx('aic-steps__chev', open && 'aic-steps__chev--open')} />
-      </button>
+    <section className={cx('aic-disc', 'aic-steps', open && 'aic-disc--open')}>
+      <div className="aic-disc__head">
+        <button type="button" className="aic-disc__toggle" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+          <span className={cx('aic-disc__tile', !live && 'aic-disc__tile--idle')} aria-hidden>
+            <Icon.Timeline />
+            {pending && live && <span className="aic-disc__live" />}
+          </span>
+          <span className="aic-disc__ident">
+            <span className="aic-disc__title">{title}</span>
+            {!!bits.length && <span className="aic-disc__meta">{bits.join(' · ')}</span>}
+          </span>
+          <span className="aic-disc__state" aria-hidden>{open ? <><Icon.Minus /> Collapse</> : <><Icon.Plus /> Expand</>}</span>
+        </button>
+      </div>
       {open && (
         <div className="aic-steps__body">
           {nodes.map((n) => (
@@ -602,18 +609,18 @@ function Changes({ actions, busy, onUndo }: { actions: AiAction[]; busy: boolean
   const meta = (active === 0 ? 'everything reverted' : changeBreakdown(actions))
     + (reverted > 0 && active > 0 ? ` · ${reverted} reverted` : '');
   return (
-    <section className={cx('aic-art', open && 'aic-art--open')} aria-label="Changes this run made to the case">
-      <div className="aic-art__head">
-        <button type="button" className="aic-art__toggle" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
-          <span className="aic-art__count" aria-label={`${active} active changes`}>{active}</span>
-          <span className="aic-art__ident">
-            <span className="aic-art__name">Changes to this case</span>
-            <span className="aic-art__meta">{meta}</span>
+    <section className={cx('aic-disc', 'aic-art', open && 'aic-disc--open')} aria-label="Changes this run made to the case">
+      <div className="aic-disc__head">
+        <button type="button" className="aic-disc__toggle" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+          <span className={cx('aic-disc__tile', active === 0 && 'aic-disc__tile--idle')} aria-label={`${active} active changes`}>{active}</span>
+          <span className="aic-disc__ident">
+            <span className="aic-disc__title">Changes to this case</span>
+            <span className="aic-disc__meta">{meta}</span>
           </span>
-          <Icon.Chevron className={cx('aic-art__chev', open && 'aic-art__chev--open')} />
+          <span className="aic-disc__state" aria-hidden>{open ? <><Icon.Minus /> Collapse</> : <><Icon.Plus /> Expand</>}</span>
         </button>
         {active > 0 && (
-          <button type="button" className="aic-art__act" onClick={onUndo} disabled={busy}>
+          <button type="button" className="aic-disc__act" onClick={onUndo} disabled={busy}>
             {busy ? 'Reverting…' : 'Revert all'}
           </button>
         )}
