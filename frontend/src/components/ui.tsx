@@ -242,11 +242,16 @@ export function SectionHead({ eyebrow, title, hint, meta, actions, id, open, onT
   if (!collapsible) {
     return (
       <div className="sec" id={id}>
-        <div>
-          {eyebrow && <div className="sec__eyebrow">{eyebrow}</div>}
-          <div className="sec__title">{title}</div>
+        {/* The hint is a DESCRIPTION of the section and sits under its title. It used to be a
+            right-aligned block between the title and the actions, so on the case screen the analyst
+            line, the timestamps and the "Active case" badge ran together at three different heights. */}
+        <div className="sec__ident">
+          <div className="sec__lead">
+            {eyebrow && <div className="sec__eyebrow">{eyebrow}</div>}
+            <div className="sec__title">{title}</div>
+          </div>
+          {hint && <div className="sec__hint">{hint}</div>}
         </div>
-        {hint && <div className="sec__hint">{hint}</div>}
         {actions && <div className="sec__actions">{actions}</div>}
       </div>
     );

@@ -1355,10 +1355,13 @@ button.header__ctx:hover {
 /* ───────── Section headers / cards / toggles / pills ───────── */
 .sec {
   display: flex;
-  align-items: flex-end;
-  gap: 12px;
-  margin-bottom: 10px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
 }
+.sec__ident { min-width: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 3px; }
+.sec__lead { min-width: 0; }
 .sec__eyebrow {
   font-family: var(--font-ui);
   font-size: var(--fs-xxs);
@@ -1376,11 +1379,12 @@ button.header__ctx:hover {
 .sec__hint {
   font-size: var(--fs-sm);
   color: var(--muted);
-  margin-left: auto;
-  text-align: right;
+  line-height: 1.5;
+  max-width: 96ch;
+  overflow-wrap: anywhere;
 }
 .sec__actions {
-  margin-left: auto;
+  flex: 0 0 auto;
   display: flex;
   gap: 8px;
   align-items: center;

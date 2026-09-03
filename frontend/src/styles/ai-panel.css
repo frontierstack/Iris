@@ -137,24 +137,6 @@
   min-width: 0;
 }
 .aic__brand { display: flex; align-items: center; gap: 9px; flex: 0 0 auto; }
-.aic__mark {
-  width: 22px;
-  height: 22px;
-  border-radius: 7px;
-  background: var(--accent);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-}
-.aic__mark i {
-  display: block;
-  width: 7px;
-  height: 7px;
-  border-radius: 2px;
-  background: var(--on-accent);
-  transform: rotate(45deg);
-}
 .aic__wordmark {
   font-family: var(--aic-serif);
   font-size: 18px;
@@ -298,8 +280,8 @@ a.aic__pill { display: inline-block; text-decoration: none; }
   background: var(--panel-2);
   border: 1px solid var(--border-2);
   border-radius: 20px 20px 7px 20px;
-  padding: 13px 17px;
-  font-size: 15.5px;
+  padding: 11px 15px;
+  font-size: 14px;
   line-height: 1.56;
   color: var(--text);
   white-space: pre-wrap;
@@ -339,71 +321,82 @@ a.aic__pill { display: inline-block; text-decoration: none; }
 .aic-asst { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 
 /* THE STEPS CARD. Unnumbered, by design: the sequence is the order of the rows and a model-turn
-   boundary is a GAP in the rail. The dot pulses only while the run is live. */
+   boundary is a GAP in the rail. The dot pulses only while the run is live. The head is a title with
+   its counts underneath — the same head shape as the changes card, so the two read as siblings. */
 .aic-steps {
   border: 1px solid var(--border-2);
   background: var(--panel-inset);
   border-radius: 14px;
   overflow: hidden;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.18);
 }
 .aic-steps__head {
   appearance: none;
   width: 100%;
   display: flex;
   align-items: center;
-  gap: 10px;
-  background: transparent;
+  gap: 12px;
+  background: linear-gradient(180deg, var(--panel-2), var(--panel-inset));
   border: 0;
   cursor: pointer;
-  padding: 12px 14px;
+  padding: 11px 14px 11px 16px;
   text-align: left;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  transition: color var(--t-fast);
+  color: var(--text);
+  transition: background var(--t-fast);
 }
-.aic-steps__head:hover { color: var(--text); }
+.aic-steps__head:hover { background: var(--panel-2); }
+.aic-steps__head:hover .aic-steps__chev { color: var(--text); }
 .aic-steps__head:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
 .aic-steps__dot {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
   border-radius: var(--radius-pill);
   background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
   flex: 0 0 auto;
 }
 .aic-steps__dot--live { animation: aicPulse 1.5s ease-in-out infinite; }
-.aic-steps__dot--idle { background: var(--muted-3); }
-.aic-steps__sum { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aic-steps__dot--idle { background: var(--muted-3); box-shadow: 0 0 0 3px var(--panel-2); }
+.aic-steps__ident { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.aic-steps__title { font-family: var(--aic-serif); font-size: 16px; line-height: 1.2; color: var(--text); }
+.aic-steps__meta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--muted-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .aic-steps__chev {
-  width: 11px;
-  height: 11px;
+  width: 12px;
+  height: 12px;
   flex: 0 0 auto;
   color: var(--muted-2);
   transform: rotate(-90deg);
-  transition: transform var(--t-fast);
+  transition: transform var(--t-fast), color var(--t-fast);
 }
 .aic-steps__chev--open { transform: rotate(0deg); }
-.aic-steps__body { padding: 2px 14px 14px 20px; display: flex; flex-direction: column; }
+.aic-steps__body {
+  padding: 12px 16px 16px;
+  border-top: 1px solid var(--border-2);
+  display: flex;
+  flex-direction: column;
+}
+/* No rail and no node down the left edge — both were asked to go. The order is the order, a write
+   is named by its `write` tag and its accent glyph, and a model-turn boundary is a gap. */
 .aic-step {
-  padding: 8px 0 8px 14px;
-  border-left: 1px solid var(--border);
+  padding: 7px 0;
   animation: aicStepIn 260ms ease both;
   min-width: 0;
 }
-/* the break that replaced the step numbers */
-.aic-step--turn { margin-top: 12px; border-left-color: var(--accent-deep); }
+.aic-step--turn { margin-top: 14px; }
 
 /* One tool CALL and its RESULT in ONE card — they used to be two lines with nothing binding them.
    `writes` is read in exactly one place in the TSX; this is the rail it draws. */
 .tcall { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.tcall--write {
-  margin-left: -15px;
-  padding-left: 13px;
-  box-shadow: inset 2px 0 0 var(--accent);
-}
-.tcall--bad { box-shadow: inset 2px 0 0 var(--bad); margin-left: -15px; padding-left: 13px; }
+.tcall--write .tcall__name { color: var(--text); }
+.tcall--bad .tcall__name { color: var(--bad); }
 .aic .tcall__lead { font-size: 12.5px; line-height: 1.55; color: var(--text-4); }
 .aic .tcall__lead .md-p { margin: 0 0 4px; }
 .tcall__head { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -443,6 +436,30 @@ a.aic__pill { display: inline-block; text-decoration: none; }
 .tcall__args { margin: 0; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .tcall__arg { display: flex; gap: 10px; min-width: 0; align-items: baseline; }
 .tcall__arg dt { flex: 0 0 auto; font-family: var(--font-mono); font-size: 11.5px; color: var(--muted-2); }
+.tcall__arg--prose { flex-direction: column; align-items: stretch; gap: 4px; }
+.tcall__arg--prose dd { white-space: normal; overflow: visible; }
+/* A prose argument rendered as the note it is: bounded, scrolling inside its own box, in the UI
+   face rather than mono, with the markdown stylesheet's tables and lists intact. */
+.aic .tcall__md {
+  max-height: 280px;
+  overflow: auto;
+  padding: 9px 12px;
+  border: 1px solid var(--border-2);
+  border-radius: 8px;
+  background: var(--panel);
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-2);
+  white-space: normal;
+}
+.aic .tcall__md .md-p { margin: 0 0 8px; }
+.aic .tcall__md .md-h1, .aic .tcall__md .md-h2, .aic .tcall__md .md-h3 { margin: 10px 0 6px; font-size: 13px; }
+.aic .tcall__md .md-tablewrap { margin: 6px 0 8px; border-radius: 6px; }
+.aic .tcall__md .md-table { font-size: 11.5px; min-width: 100%; }
+.aic .tcall__md .md-table th, .aic .tcall__md .md-table td { padding: 4px 8px; white-space: nowrap; }
+.aic .tcall__md .md-table td:last-child, .aic .tcall__md .md-table th:last-child { white-space: normal; min-width: 14ch; }
+.aic .tcall__md .md-code { font-size: 11px; }
 .tcall__arg dd {
   margin: 0;
   min-width: 0;
@@ -492,9 +509,9 @@ a.aic__pill { display: inline-block; text-decoration: none; }
    everything around it is mono or sans. */
 .aic .aic-prose {
   font-family: var(--aic-serif);
-  font-size: 19px;
-  line-height: 1.66;
-  letter-spacing: 0.002em;
+  font-size: 16px;
+  line-height: 1.62;
+  letter-spacing: 0.003em;
   color: var(--text);
   text-wrap: pretty;
   overflow-wrap: anywhere;
@@ -504,17 +521,17 @@ a.aic__pill { display: inline-block; text-decoration: none; }
 .aic .aic-prose > *:last-child { margin-bottom: 0; }
 /* `.md-p` keeps `white-space: pre-wrap` from notes.css — deliberate and documented: analysts type
    real line breaks and reflowing them would silently change every note already on disk. */
-.aic .aic-prose .md-p { margin: 0 0 16px; }
+.aic .aic-prose .md-p { margin: 0 0 12px; }
 .aic .aic-prose .md-h1, .aic .aic-prose .md-h2 {
   font-family: var(--aic-serif);
   font-weight: 500;
   letter-spacing: -0.01em;
   color: var(--text-bright);
-  margin: 26px 0 10px;
+  margin: 20px 0 8px;
   line-height: 1.3;
 }
-.aic .aic-prose .md-h1 { font-size: 25px; }
-.aic .aic-prose .md-h2 { font-size: 21px; }
+.aic .aic-prose .md-h1 { font-size: 21px; }
+.aic .aic-prose .md-h2 { font-size: 18px; }
 .aic .aic-prose .md-h3 {
   font-family: var(--font-ui);
   font-size: 11px;
@@ -522,48 +539,48 @@ a.aic__pill { display: inline-block; text-decoration: none; }
   letter-spacing: var(--ls-head);
   text-transform: uppercase;
   color: var(--muted-2);
-  margin: 24px 0 8px;
+  margin: 18px 0 7px;
 }
 .aic .aic-prose > .md-h1:first-child,
 .aic .aic-prose > .md-h2:first-child,
 .aic .aic-prose > .md-h3:first-child { margin-top: 0; }
-.aic .aic-prose ul, .aic .aic-prose ol { margin: 0 0 16px; padding-left: 24px; }
-.aic .aic-prose li { margin: 6px 0; font-size: 18px; line-height: 1.6; }
-.aic .aic-prose li > ul, .aic .aic-prose li > ol { margin: 6px 0 2px; }
+.aic .aic-prose ul, .aic .aic-prose ol { margin: 0 0 12px; padding-left: 22px; }
+.aic .aic-prose li { margin: 4px 0; font-size: 16px; line-height: 1.55; }
+.aic .aic-prose li > ul, .aic .aic-prose li > ol { margin: 4px 0 2px; }
 .aic .aic-prose .md-quote {
-  margin: 0 0 16px;
+  margin: 0 0 12px;
   font-family: var(--aic-serif);
-  font-size: 18px;
+  font-size: 15.5px;
   color: var(--text-3);
 }
-.aic .aic-prose .md-hr { margin: 24px 0; }
+.aic .aic-prose .md-hr { margin: 18px 0; }
 /* Data stays in the mono face at a data size — an event id is not prose. */
 .aic .aic-prose .md-code, .aic .aic-prose .md-data, .aic .aic-prose .md-time {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 12px;
 }
 .aic .aic-prose .md-pre {
-  margin: 0 0 16px;
+  margin: 0 0 12px;
   max-width: 100%;
   overflow-x: auto;
   border: 1px solid var(--border-2);
-  border-radius: 14px;
+  border-radius: 10px;
   background: var(--panel-inset);
-  padding: 13px 16px 15px;
+  padding: 11px 14px 12px;
 }
-.aic .aic-prose .md-pre code { font-family: var(--font-mono); font-size: 12.5px; line-height: 1.82; color: var(--text-2); }
-.aic .aic-prose .md-tablewrap { max-width: 100%; overflow-x: auto; margin: 0 0 16px; border-radius: 10px; }
-.aic .aic-prose .md-table { min-width: 0; font-family: var(--font-ui); font-size: 12.5px; }
+.aic .aic-prose .md-pre code { font-family: var(--font-mono); font-size: 12px; line-height: 1.7; color: var(--text-2); }
+.aic .aic-prose .md-tablewrap { max-width: 100%; overflow-x: auto; margin: 0 0 12px; border-radius: 8px; }
+.aic .aic-prose .md-table { min-width: 0; font-family: var(--font-ui); font-size: 12px; }
 /* the same measure, one size down, where prose is commentary rather than the answer */
-.aic .aic-prose--quiet { font-size: 16.5px; color: var(--text-3); }
-.aic .aic-prose--quiet li { font-size: 16px; }
+.aic .aic-prose--quiet { font-size: 14.5px; color: var(--text-3); }
+.aic .aic-prose--quiet li { font-size: 14.5px; }
 
 /* The streaming caret. Included on the analyst's explicit instruction that this template's UX
    supersedes the earlier note that the panel carries no caret. */
 .aic-caret {
   display: inline-block;
-  width: 9px;
-  height: 19px;
+  width: 8px;
+  height: 16px;
   background: var(--accent);
   border-radius: 2px;
   animation: aicCaret 1s steps(1, end) infinite;
@@ -571,8 +588,9 @@ a.aic__pill { display: inline-block; text-decoration: none; }
 }
 
 /* ───────── the artifact card: what this run changed in the case ─────────
-   A LEDGER. The head carries the count as a figure and the breakdown as prose; every row is one
-   change, divided by a hairline rather than a gap, with the family tag and the clock in mono. */
+   Closed by default: the head carries the count as a figure and the breakdown as prose. Open, it is a
+   TIMELINE — the clock in a column on the left, a rail with one node per change, the change itself as
+   the line. The same head shape as the steps card, so the two read as siblings. */
 .aic-art {
   border: 1px solid var(--border-2);
   background: var(--panel-inset);
@@ -583,26 +601,46 @@ a.aic__pill { display: inline-block; text-decoration: none; }
 .aic-art__head {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 13px 16px 13px 14px;
+  gap: 10px;
+  padding-right: 14px;
   min-width: 0;
   background: linear-gradient(180deg, var(--panel-2), var(--panel-inset));
 }
-.aic-art__tile {
-  width: 34px;
-  height: 34px;
-  border-radius: 10px;
+.aic-art__toggle {
+  appearance: none;
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  padding: 11px 6px 11px 14px;
+  text-align: left;
+  color: var(--text);
+}
+.aic-art__toggle:hover .aic-art__chev { color: var(--text); }
+.aic-art:has(.aic-art__toggle:hover) .aic-art__head { background: var(--panel-2); }
+.aic-art__toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
+.aic-art__count {
+  flex: 0 0 auto;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 8px;
   background: var(--accent-bg);
   color: var(--accent);
   border: 1px solid var(--accent-border);
-  display: flex;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex: 0 0 auto;
 }
-.aic-art__tile svg { width: 15px; height: 15px; }
 .aic-art__ident { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.aic-art__name { font-family: var(--aic-serif); font-size: 16.5px; color: var(--text); line-height: 1.2; }
+.aic-art__name { font-family: var(--aic-serif); font-size: 16px; color: var(--text); line-height: 1.2; }
 .aic-art__meta {
   font-family: var(--font-mono);
   font-size: 11px;
@@ -612,22 +650,15 @@ a.aic__pill { display: inline-block; text-decoration: none; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.aic-art__count {
+.aic-art__chev {
+  width: 12px;
+  height: 12px;
   flex: 0 0 auto;
-  min-width: 26px;
-  height: 22px;
-  padding: 0 8px;
-  border-radius: var(--radius-pill);
-  background: var(--accent-bg);
-  color: var(--accent);
-  border: 1px solid var(--accent-border);
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  font-variant-numeric: tabular-nums;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  color: var(--muted-2);
+  transform: rotate(-90deg);
+  transition: transform var(--t-fast), color var(--t-fast);
 }
+.aic-art__chev--open { transform: rotate(0deg); }
 .aic-art__act {
   appearance: none;
   flex: 0 0 auto;
@@ -647,42 +678,65 @@ a.aic__pill { display: inline-block; text-decoration: none; }
 .aic-art__act:hover:not(:disabled) { border-color: var(--bad); color: var(--bad); background: color-mix(in srgb, var(--bad) 10%, transparent); }
 .aic-art__act:disabled { opacity: 0.5; cursor: not-allowed; }
 .aic-art__act:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
-.aic-art__list {
+
+/* the timeline */
+.aic-tl {
   list-style: none;
   margin: 0;
-  padding: 0;
+  padding: 14px 16px 16px 14px;
   border-top: 1px solid var(--border-2);
   display: flex;
   flex-direction: column;
 }
-.aic-change {
+.aic-tl__item {
+  position: relative;
   display: grid;
-  grid-template-columns: 26px minmax(0, 1fr) auto;
+  grid-template-columns: 60px 24px minmax(0, 1fr);
+  column-gap: 10px;
   align-items: start;
-  gap: 12px;
-  padding: 11px 16px 11px 14px;
   min-width: 0;
-  border-top: 1px solid var(--border-2);
-  transition: background var(--t-fast);
+  padding: 0 0 16px;
 }
-.aic-change:first-child { border-top: 0; }
-.aic-change:hover { background: var(--panel-2); }
-.aic-change__glyph {
-  width: 26px;
-  height: 26px;
-  border-radius: 7px;
+.aic-tl__item:last-child { padding-bottom: 0; }
+/* the rail runs through the node column, from this node to the next one */
+.aic-tl__item::before {
+  content: '';
+  position: absolute;
+  left: calc(60px + 10px + 12px - 0.5px);
+  top: 24px;
+  bottom: 0;
+  border-left: 1px solid var(--border);
+}
+.aic-tl__item:last-child::before { display: none; }
+.aic-tl__when {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-2);
+  line-height: 24px;
+  text-align: right;
+  white-space: nowrap;
+}
+.aic-tl__node {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-pill);
   background: var(--accent-bg);
   color: var(--accent);
+  border: 1px solid var(--accent-border);
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-top: 1px;
+  box-sizing: border-box;
+  box-shadow: 0 0 0 3px var(--panel-inset);
+  position: relative;
+  z-index: 1;
 }
-.aic-change__glyph svg { width: 12px; height: 12px; }
-.aic-change__text { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.aic-change__summary { font-size: 13.5px; line-height: 1.45; color: var(--text); overflow-wrap: anywhere; }
-.aic-change__sub { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.aic-change__kind {
+.aic-tl__node svg { width: 11px; height: 11px; }
+.aic-tl__body { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding-top: 3px; }
+.aic-tl__summary { font-size: 13.5px; line-height: 1.45; color: var(--text); overflow-wrap: anywhere; }
+.aic-tl__sub { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.aic-tl__kind {
   flex: 0 0 auto;
   font-family: var(--font-mono);
   font-size: 9.5px;
@@ -695,25 +749,8 @@ a.aic__pill { display: inline-block; text-decoration: none; }
   padding: 2px 6px;
   line-height: 1.2;
 }
-.aic-change__what {
-  font-size: 12px;
-  color: var(--muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.aic-change__side { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
-.aic-change__time {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  color: var(--muted-2);
-}
-.aic-change--undone .aic-change__summary { text-decoration: line-through; color: var(--muted); }
-.aic-change--undone .aic-change__glyph { background: transparent; border: 1px dashed var(--border-strong); color: var(--muted-2); }
-.aic-change--undone .aic-change__kind { color: var(--muted-2); background: transparent; border-color: var(--border-strong); }
-.aic-change--undone .aic-change__what { color: var(--muted-3); }
-.aic-change__tag {
+.aic-tl__what { font-size: 12px; color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aic-tl__tag {
   flex: 0 0 auto;
   font-family: var(--font-mono);
   font-size: 9.5px;
@@ -726,6 +763,11 @@ a.aic__pill { display: inline-block; text-decoration: none; }
   line-height: 1.2;
   opacity: 0.85;
 }
+.aic-tl__item--undone .aic-tl__summary { text-decoration: line-through; color: var(--muted); }
+.aic-tl__item--undone .aic-tl__node { background: transparent; border-style: dashed; border-color: var(--border-strong); color: var(--muted-2); }
+.aic-tl__item--undone .aic-tl__kind { color: var(--muted-2); background: transparent; border-color: var(--border-strong); }
+.aic-tl__item--undone .aic-tl__what { color: var(--muted-3); }
+.aic-tl__item--undone .aic-tl__when { color: var(--muted-3); }
 
 /* ───────── the actions row under an answer ───────── */
 .aic-acts { display: flex; align-items: center; gap: 3px; margin-top: -2px; opacity: 0.4; transition: opacity var(--t-fast); }
@@ -1254,8 +1296,8 @@ a.aic__pill { display: inline-block; text-decoration: none; }
 @media (max-width: 620px) {
   .aic { --aic-pad: 16px; }
   .aic__column { gap: 26px; padding-top: 22px; }
-  .aic .aic-prose { font-size: 17.5px; }
-  .aic .aic-prose li { font-size: 16.5px; }
+  .aic .aic-prose { font-size: 15px; }
+  .aic .aic-prose li { font-size: 15px; }
   .aic__wordmark { font-size: 16px; }
   .aic-user__bubble { max-width: 92%; }
 }

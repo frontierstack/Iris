@@ -144,12 +144,22 @@ function argValue(v: unknown): string {
   return String(v);
 }
 
+/**
+ * Arguments that are PROSE the model wrote for the analyst — a note body, a case summary, a link's
+ * `why`. They are markdown, and flattening one into a single ellipsised line turned a note into
+ * `## Indicators | value | kind | … |---|---|`, which is the note's own table read as a string.
+ */
+const PROSE_ARGS = new Set(['text', 'summary', 'why', 'description', 'note', 'notes', 'body', 'title']);
+function isProse(k: string, raw: unknown): boolean {
+  return PROSE_ARGS.has(k) && typeof raw === 'string' && (raw.length > 80 || /[\n#|*`\-]/.test(raw) || raw.includes('\\n'));
+}
+
 /** Tool arguments as key/value rows — a labelled list, not one run-on line. */
-function argRows(args: Record<string, unknown>): Array<{ k: string; v: string }> {
-  const out: Array<{ k: string; v: string }> = [];
+function argRows(args: Record<string, unknown>): Array<{ k: string; v: string; prose: boolean }> {
+  const out: Array<{ k: string; v: string; prose: boolean }> = [];
   for (const [k, raw] of Object.entries(args ?? {})) {
     const v = argValue(raw);
-    if (v) out.push({ k, v });
+    if (v) out.push({ k, v, prose: isProse(k, raw) });
   }
   return out;
 }
@@ -422,9 +432,11 @@ const ToolCall = memo(function ToolCall({ e, live, lead = '' }: { e: AiTranscrip
       {!!shown.length && (
         <dl className="tcall__args">
           {shown.map((r) => (
-            <div className="tcall__arg" key={r.k}>
+            <div className={cx('tcall__arg', r.prose && 'tcall__arg--prose')} key={r.k}>
               <dt>{r.k}</dt>
-              <dd title={r.v}>{r.v}</dd>
+              {r.prose
+                ? <dd><Markdown className="md tcall__md" text={r.v} /></dd>
+                : <dd title={r.v}>{r.v}</dd>}
             </div>
           ))}
         </dl>
@@ -510,7 +522,10 @@ const StepsCard = memo(function StepsCard({ nodes, live, title, startOpen }: {
     <section className="aic-steps">
       <button type="button" className="aic-steps__head" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
         <span className={cx('aic-steps__dot', pending && live ? 'aic-steps__dot--live' : !live && 'aic-steps__dot--idle')} aria-hidden />
-        <span className="aic-steps__sum">{title}{bits.length ? ` · ${bits.join(' · ')}` : ''}</span>
+        <span className="aic-steps__ident">
+          <span className="aic-steps__title">{title}</span>
+          {!!bits.length && <span className="aic-steps__meta">{bits.join(' · ')}</span>}
+        </span>
         <Icon.Chevron className={cx('aic-steps__chev', open && 'aic-steps__chev--open')} />
       </button>
       {open && (
@@ -574,54 +589,59 @@ function changeBreakdown(actions: AiAction[]): string {
 
 /**
  * The template's ARTIFACT CARD, carrying what the run did to the case — second only to the answer,
- * because it is the part that persists. It reads as a LEDGER: one row per change, the change itself
- * as the line, the family it belongs to as a tag, the clock on the right. Every entry is reversible
- * in one click; a reverted one stays listed, struck through, rather than disappearing.
+ * because it is the part that persists. CLOSED by default: the head says how much changed and of
+ * what kind, and opening it shows a TIMELINE — the clock down a rail, one node per change, the
+ * change itself as the line and the family it belongs to as a tag. Every entry is reversible in one
+ * click; a reverted one stays on the rail as a hollow node, struck through, rather than disappearing.
  */
 function Changes({ actions, busy, onUndo }: { actions: AiAction[]; busy: boolean; onUndo: () => void }) {
+  const [open, setOpen] = useState(false);
   const active = actions.filter((a) => !a.undone).length;
   if (!actions.length) return null;
   const reverted = actions.length - active;
+  const meta = (active === 0 ? 'everything reverted' : changeBreakdown(actions))
+    + (reverted > 0 && active > 0 ? ` · ${reverted} reverted` : '');
   return (
-    <section className="aic-art" aria-label="Changes this run made to the case">
+    <section className={cx('aic-art', open && 'aic-art--open')} aria-label="Changes this run made to the case">
       <div className="aic-art__head">
-        <span className="aic-art__tile" aria-hidden><Icon.Cases /></span>
-        <span className="aic-art__ident">
-          <span className="aic-art__name">Changes to this case</span>
-          <span className="aic-art__meta">
-            {active === 0 ? 'everything reverted' : changeBreakdown(actions)}
-            {reverted > 0 && active > 0 ? ` · ${reverted} reverted` : ''}
+        <button type="button" className="aic-art__toggle" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+          <span className="aic-art__count" aria-label={`${active} active changes`}>{active}</span>
+          <span className="aic-art__ident">
+            <span className="aic-art__name">Changes to this case</span>
+            <span className="aic-art__meta">{meta}</span>
           </span>
-        </span>
-        <span className="aic-art__count" aria-label={`${active} active changes`}>{active}</span>
+          <Icon.Chevron className={cx('aic-art__chev', open && 'aic-art__chev--open')} />
+        </button>
         {active > 0 && (
           <button type="button" className="aic-art__act" onClick={onUndo} disabled={busy}>
             {busy ? 'Reverting…' : 'Revert all'}
           </button>
         )}
       </div>
-      <ol className="aic-art__list">
-        {actions.map((a) => {
-          const Glyph = toolIcon(a.tool);
-          const clock = clockOf(a.at);
-          return (
-            <li key={a.id} className={cx('aic-change', a.undone && 'aic-change--undone')}>
-              <span className="aic-change__glyph" aria-hidden><Glyph /></span>
-              <span className="aic-change__text">
-                <span className="aic-change__summary">{a.summary}</span>
-                <span className="aic-change__sub">
-                  <span className="aic-change__kind" title={a.tool}>{changeFamily(a.tool)}</span>
-                  <span className="aic-change__what">{writeLabel(a.tool)}</span>
+      {open && (
+        <ol className="aic-tl">
+          {actions.map((a) => {
+            const Glyph = toolIcon(a.tool);
+            const clock = clockOf(a.at);
+            return (
+              <li key={a.id} className={cx('aic-tl__item', a.undone && 'aic-tl__item--undone')}>
+                <span className="aic-tl__when">
+                  {clock && <time dateTime={a.at} title={UTC(a.at)}>{clock}</time>}
                 </span>
-              </span>
-              <span className="aic-change__side">
-                {a.undone ? <span className="aic-change__tag">reverted</span> : null}
-                {clock && <time className="aic-change__time" dateTime={a.at} title={UTC(a.at)}>{clock}</time>}
-              </span>
-            </li>
-          );
-        })}
-      </ol>
+                <span className="aic-tl__node" aria-hidden><Glyph /></span>
+                <span className="aic-tl__body">
+                  <span className="aic-tl__summary">{a.summary}</span>
+                  <span className="aic-tl__sub">
+                    <span className="aic-tl__kind" title={a.tool}>{changeFamily(a.tool)}</span>
+                    <span className="aic-tl__what">{writeLabel(a.tool)}</span>
+                    {a.undone && <span className="aic-tl__tag">reverted</span>}
+                  </span>
+                </span>
+              </li>
+            );
+          })}
+        </ol>
+      )}
     </section>
   );
 }
@@ -1412,7 +1432,6 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
   const header = (
     <div className="aic__head">
       <div className="aic__brand">
-        <span className="aic__mark" aria-hidden><i /></span>
         <span className="aic__wordmark">Assistant</span>
       </div>
       <span className="aic__rule" aria-hidden />

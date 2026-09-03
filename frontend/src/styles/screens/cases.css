@@ -314,6 +314,8 @@
 /* The investigation log reads as a document, not a table: centred on a wide screen, with the
    composer and the entries sharing one column so what you post lands under the box you typed in. */
 .case-notes .notes {
+  /* 1240px — a viewport-scaled width (84vw, up to 2000px) was tried and the box read as too wide;
+     the text inside it is what wanted the room, and it takes the card's full width now. */
   max-width: 1240px;
   width: 100%;
   margin-inline: auto;
@@ -395,32 +397,26 @@ mark.hl {
 
 /* ═══════ CASE NOTES (chat-style feed) ═══════ */
 .notes { display: flex; flex-direction: column; gap: 18px; }
-/* Entries are separated, not stacked: a 2px gap with no divider made a long feed read as one wall of
-   text, and the full UTC timestamps made each header wider. Each note is its own block with a rule
-   between, so the eye can find where one ends. */
-/* The feed is one bordered region and each entry a row inside it, divided by a 1px rule. Real padding
-   and a divider per entry are both deliberate: a 2px gap read as one wall of text. Square, because a
-   row in a divided list has no corners of its own. */
+/* Each note is its OWN CARD with air between it and the next. They were rows in one bordered region
+   divided by a hairline, and that still read as one connected block — "they are kind of all
+   connected, I want some nice padding between each to show that they are separate". */
 .notes__feed {
   display: flex;
   flex-direction: column;
-  gap: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--panel);
-  overflow: clip;
+  gap: 14px;
 }
 .notes__feed:empty { display: none; }
 .note {
   display: grid;
   grid-template-columns: 30px 1fr;
   gap: 14px;
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--row-line);
-  transition: background var(--t-fast);
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  transition: background var(--t-fast), border-color var(--t-fast);
 }
-.note:last-child { border-bottom: none; }
-.note:hover { background: var(--row-hover); }
+.note:hover { background: var(--row-hover); border-color: var(--border-hover); }
 .note__avatar {
   width: 28px; height: 28px;
   display: flex; align-items: center; justify-content: center;
@@ -457,13 +453,13 @@ mark.hl {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   margin-top: 7px;
-  /* A note is prose and is read as prose. On a wide case screen an unbounded column runs to 150+
-     characters and the eye loses the line; a table or a code block inside it is exempt below.
-     86ch was reported as "confined into a narrow box" — the assistant's notes carry tables and
-     full sentences with timestamps and file names, so the measure is wider now, and the feed as a
-     whole is centred on the page (`.case-notes .notes`) rather than pinned to the left edge. */
-  max-width: 118ch;
+  /* The measure is the CARD, which the feed holds at 1240px: a shade wider than the 118ch cap the
+     text had before, which was "confined into a narrow box". */
+  max-width: 100%;
 }
+/* A long unbroken line — a path, a command, a URL — WRAPS inside a note rather than scrolling. */
+.note__text .md-pre, .note__text .md-pre code { white-space: pre-wrap; overflow-wrap: anywhere; }
+.note__text .md-table td, .note__text .md-table th { overflow-wrap: anywhere; }
 /* the blocks that legitimately want the whole width back */
 .note__text > .md-tablewrap, .note__text > .md-pre, .note__text > .md-img { max-width: 100%; }
 .note__edit { margin-top: 4px; display: flex; flex-direction: column; gap: 6px; }

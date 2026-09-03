@@ -166,7 +166,7 @@ numbers saying there is nothing to see.
 
 The AI panel follows a second design — a reading-first chat interface — and its rules are its own:
 
-- The **assistant's prose is set in a serif** (Newsreader, 19px/1.66). The answer reads like a
+- The **assistant's prose is set in a serif** (Newsreader, 16px/1.62 — brought down from 19px on request, "seems large"). The answer reads like a
   document; everything around it is mono or sans. This is the single most recognisable thing about it.
 - The thread is a **centred 792px column**, messages 34px apart, and the composer is `sticky` at its
   bottom behind a gradient scrim.

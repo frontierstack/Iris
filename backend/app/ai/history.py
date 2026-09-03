@@ -65,7 +65,13 @@ MAX_TEXT = 8000               # one prose entry
 MAX_ANSWER = 20000            # the final report
 MAX_PROMPT = 4000
 MAX_SUMMARY = 400
-MAX_ARGS_CHARS = 800          # the serialized tool arguments we keep for the UI line
+MAX_ARGS_CHARS = 800          # the serialized tool arguments we keep for the UI line …
+# … except PROSE the model wrote for the analyst — a note body, a case summary, a link's `why`. The
+# panel renders those as the markdown they are, and a note clipped at 200 characters showed its own
+# table cut off mid-row ("Target of robocopy /MIR empty-mirror deleti…"). The note also lives on the
+# case in full; this is the transcript's copy of it.
+PROSE_ARG_KEYS = frozenset({"text", "summary", "why", "description", "note", "notes", "body", "title"})
+MAX_PROSE_ARG = 6000
 MAX_THREAD_RUNS = 24          # turns of ONE conversation returned at once (see `thread()`)
 
 FLUSH_EVERY = 1.0             # seconds — deltas arrive per token; the file is not rewritten per token
@@ -91,8 +97,10 @@ def _clip_args(args: Any) -> dict[str, Any]:
     for k, v in args.items():
         if used >= MAX_ARGS_CHARS:
             break
-        if isinstance(v, (str, int, float, bool)) or v is None:
-            sv: Any = _clip(v, 200) if isinstance(v, str) else v
+        if isinstance(v, str) and k in PROSE_ARG_KEYS:
+            sv: Any = _clip(v, MAX_PROSE_ARG)
+        elif isinstance(v, (str, int, float, bool)) or v is None:
+            sv = _clip(v, 200) if isinstance(v, str) else v
         elif isinstance(v, list):
             sv = [_clip(x, 80) for x in v[:20]]
         else:

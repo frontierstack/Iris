@@ -373,23 +373,6 @@
 .cases .cases__trash-row:last-child { border-bottom: 0; }
 .cases__trash-hint { font-size: var(--fs-xs); color: var(--muted); }
 
-/* ── Case DETAIL: section headings sit with the box they describe ──────────────
-   .sec__hint is right-aligned globally (margin-left:auto), which on a full-width
-   detail section threw the hint to the far edge and left a wide empty gap between
-   the title and its own description. Here the hint follows the title instead. */
-.case-detail .sec {
-  align-items: baseline;
-  gap: 10px;
-  margin-bottom: 10px;
-  flex-wrap: wrap;
-}
-.case-detail .sec__hint {
-  margin-left: 0;
-  text-align: left;
-}
-.case-detail .sec__actions {
-  margin-left: auto;
-}
 /* even spacing between the detail's stacked sections */
 .case-detail > section {
   margin-top: 26px;

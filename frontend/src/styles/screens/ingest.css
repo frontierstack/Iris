@@ -33,11 +33,17 @@
    what the region is for. `SectionHead` renders `meta` only for a collapsible card, so on this page
    the figures ride inside `hint` — same `.sec__meta` / `.fig` treatment either way, which is what
    stops the two head shapes drifting apart. */
+.ingest .sec { align-items: flex-end; }
+/* `display: contents` lifts the title block and the hint out of `.sec__ident` so they are flex items
+   of the head again — the figures belong on the RIGHT here, beside the title, not under it. */
+.ingest .sec__ident { display: contents; }
 .ingest .sec__hint {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
   gap: 7px;
+  margin-left: auto;
+  max-width: none;
 }
 /* `.sec__hint` and `.sec__actions` BOTH carry `margin-left: auto`, so the free space was split
    between them and the figures ended up floating in the middle of the head, reading as an accident.
