@@ -62,13 +62,25 @@ function readBox(key: string, fallback: WinBox, min: Mins): WinBox {
 type Mode = null | { kind: 'move'; dx: number; dy: number } | { kind: 'resize'; edge: string; start: WinBox; px: number; py: number };
 
 export function FloatingWindow({
-  title, sub, actions, onClose, children, storageKey, defaultBox,
+  title, sub, actions, head, className, onClose, children, storageKey, defaultBox,
   flush = false, ariaLabel, closeOnEscape = true, minW = MIN_W, minH = MIN_H,
 }: {
   title: ReactNode;
   sub?: ReactNode;
   /** Controls for the title bar — the dock button lives here. */
   actions?: ReactNode;
+  /**
+   * The WHOLE title bar, supplied by the child, replacing the ident/actions/close arrangement.
+   *
+   * For a window whose docked form already has a header of its own — the AI panel is the assistant
+   * template's 58px header, brand lozenge and all — the default bar would sit ABOVE that one and the
+   * analyst would read two headers. Passing it here keeps one header and keeps the bar as the drag
+   * handle, and the child then owns its own close control (`startMove` ignores a press on a button,
+   * so nothing inside it drags the window).
+   */
+  head?: ReactNode;
+  /** Extra class on the window frame, so a tenant can dress it without forking the primitive. */
+  className?: string;
   onClose: () => void;
   children: ReactNode;
   /** localStorage key for the remembered geometry. */
@@ -173,7 +185,7 @@ export function FloatingWindow({
   return (
     <div
       ref={ref}
-      className={cx('floatwin', mode.current && 'floatwin--dragging')}
+      className={cx('floatwin', mode.current && 'floatwin--dragging', className)}
       style={{ left: box.x, top: box.y, width: box.w, height: box.h, minWidth: minW, minHeight: minH }}
       role="dialog"
       aria-label={ariaLabel ?? (typeof title === 'string' ? title : 'Detached window')}
@@ -182,14 +194,18 @@ export function FloatingWindow({
       onPointerCancel={endDrag}
     >
       <div className="floatwin__head" onPointerDown={startMove}>
-        <div className="floatwin__ident">
-          <div className="floatwin__title">{title}</div>
-          {sub && <div className="floatwin__sub">{sub}</div>}
-        </div>
-        <div className="floatwin__actions">
-          {actions}
-          <button className="close-x" onClick={onClose} aria-label="Close">×</button>
-        </div>
+        {head ?? (
+          <>
+            <div className="floatwin__ident">
+              <div className="floatwin__title">{title}</div>
+              {sub && <div className="floatwin__sub">{sub}</div>}
+            </div>
+            <div className="floatwin__actions">
+              {actions}
+              <button className="close-x" onClick={onClose} aria-label="Close">×</button>
+            </div>
+          </>
+        )}
       </div>
       <div className={cx('floatwin__body', flush && 'floatwin__body--flush')}>{children}</div>
       {/* edges first, corner last: the corner must win the hit test where they overlap */}

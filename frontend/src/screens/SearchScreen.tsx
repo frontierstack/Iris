@@ -1,8 +1,8 @@
-import { useInfiniteQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
-import { SEVERITIES, type Event, type EventSort, type FieldFacet, type Severity } from '../api/types';
+import { SEVERITIES, type Event, type EventSort, type EventsHistogram, type FieldFacet, type Severity } from '../api/types';
 import { NoteAboutButton } from '../components/CaseNotes';
 import { AddToCaseButton } from '../components/CaseSet';
 import { FieldQueryNote } from '../components/Enrichment';
@@ -166,7 +166,7 @@ interface ColDef { key: ColKey; label: string; width: string; kind: 'ts' | 'file
 
 const BUILTIN_COLS: ColDef[] = [
   { key: 'ts', label: 'Timestamp', width: '150px', kind: 'ts' },
-  { key: 'file', label: 'File', width: 'minmax(108px, 0.9fr)', kind: 'file' },
+  { key: 'file', label: 'File', width: 'minmax(160px, 1.1fr)', kind: 'file' },
   { key: 'host', label: 'Host', width: 'minmax(90px, 0.7fr)', kind: 'text' },
   { key: 'user', label: 'Principal', width: 'minmax(96px, 0.8fr)', kind: 'text' },
   { key: 'raw', label: 'Message (raw)', width: 'minmax(240px, 3fr)', kind: 'raw' },
@@ -175,7 +175,10 @@ const BUILTIN_COLS: ColDef[] = [
   { key: 'id', label: 'Event id', width: '96px', kind: 'text' },
   { key: 'sev', label: 'Sev', width: '84px', kind: 'sev' },
 ];
-const DEFAULT_COLS: ColKey[] = ['ts', 'file', 'host', 'user', 'raw', 'sev'];
+/* The template's row, in its order: a severity dot, the time, the level, the thing it came from,
+   then the line. Host and principal are still one click away in Columns — they were in the default
+   set and pushed the message, which is the row's headline, into the last third of the width. */
+const DEFAULT_COLS: ColKey[] = ['ts', 'sev', 'file', 'raw'];
 const COLS_KEY = 'iris.search.columns';
 
 function readCols(): ColKey[] {
@@ -325,8 +328,14 @@ function FieldRow({ facet, open, onToggle, query, onAppend, onRemove, onShowAll 
             const term = dslTerm(facet.name, tv.value);
             const on = hasTerm(query, term);
             const off = hasTerm(query, `NOT ${term}`) || hasTerm(query, `-${term}`);
-            return (
-              <div key={tv.value} className={cx('field-val', on && 'on', off && 'off')}>
+              // The 3px meter under a value is driven from here: CSS cannot derive a ratio, and an
+              // always-empty track under every value would read as "0 %" — a claim about the data
+              // that nothing supports. `--val-pct` is this value's share of the field's own events.
+              const pct = facet.count ? Math.max(1, Math.round((tv.count / facet.count) * 100)) : 0;
+              return (
+              <div key={tv.value} className={cx('field-val', on && 'on', off && 'off')}
+                style={{ ['--val-pct' as string]: `${pct}%`, ['--val-on' as string]: on ? 1 : 0 }}
+                title={`${tv.value} — ${fmtInt(tv.count)} of ${fmtInt(facet.count)} (${pct}%)`}>
                 <button className="field-val__btn" onClick={() => (on ? onRemove(term) : onAppend(term))} title={on ? `Remove ${term} from the query` : `Add ${term} to the query`} aria-pressed={on}>
                   <span className="field-val__text">{tv.value}</span>
                   <span className="field-val__count">{fmtInt(tv.count)}</span>
@@ -354,6 +363,219 @@ function FieldRow({ facet, open, onToggle, query, onAppend, onRemove, onShowAll 
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/* ───────────── The histogram above the result list ─────────────
+   The defining element of a log console: the query's own shape in time, so "when did this start"
+   is answered before a single row is read. It is a SEPARATE request from the page of rows
+   (`GET /api/events/histogram`) because it describes every match, not the 200 rows on screen — a
+   chart drawn from the page would describe the page.
+
+   Two things it will not do, both of which would be a picture of evidence that does not exist:
+   * it never presents a partial read as the whole picture. The backend bounds how many matches it
+     will walk; when it stopped early, `exact` is false and the caption says how many it read.
+   * an event with no parsed timestamp is never placed in a bucket. Two-phase ingest lands a source
+     as raw lines with no time at all, and inventing one would draw a spike where the log is silent.
+     They are counted beside the chart instead. */
+const HISTO_H = 118;
+const HISTO_W = 1000;
+/** Bottom to top, least severe first — so the level that matters is the one on the skyline. */
+const STACK: Severity[] = ['info', 'low', 'medium', 'high', 'critical'];
+
+function bucketLabel(sec: number): string {
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.round(sec / 60)}m`;
+  if (sec < 86400) return `${Math.round(sec / 3600)}h`;
+  return `${Math.round(sec / 86400)}d`;
+}
+/** hh:mm for a same-day window, else a date — a chronology is read by day first. */
+function tickLabel(iso: string, spanSec: number): string {
+  const t = iso.slice(11, 16);
+  return spanSec > 86400 ? iso.slice(5, 10) : t;
+}
+
+function SearchHistogram({ h, loading }: { h?: EventsHistogram; loading: boolean }) {
+  const view = useMemo(() => {
+    if (!h || h.buckets.length === 0) return null;
+    const idx = new Map(h.levels.map((l, i) => [l, i]));
+    const peak = Math.max(1, h.peak);
+    // A round ceiling, so the axis reads 40 / 20 / 0 rather than 37 / 18.5 / 0.
+    const step = Math.pow(10, Math.max(0, Math.floor(Math.log10(peak)) - 1));
+    const yMax = Math.max(step, Math.ceil(peak / step) * step);
+    const n = h.buckets.length;
+    const slot = HISTO_W / n;
+    const w = Math.max(1, slot * 0.62);
+    const bars = h.buckets.map((b, i) => {
+      const segs: { sev: Severity; y: number; h: number }[] = [];
+      let acc = 0;
+      for (const sev of STACK) {
+        const cnt = b.levels[idx.get(sev) ?? -1] ?? 0;
+        if (!cnt) continue;
+        const hh = (cnt / yMax) * HISTO_H;
+        acc += hh;
+        segs.push({ sev, y: HISTO_H - acc, h: hh });
+      }
+      return { key: b.start, x: i * slot + (slot - w) / 2, w, segs, b };
+    });
+    const span = h.start && h.end ? (Date.parse(h.end) - Date.parse(h.start)) / 1000 : 0;
+    const present = STACK.filter((s) => h.buckets.some((b) => (b.levels[idx.get(s) ?? -1] ?? 0) > 0));
+    // Six evenly spaced ticks read off the buckets themselves, so a label always names a real edge.
+    const ticks = Array.from({ length: Math.min(6, n) }, (_, k) =>
+      h.buckets[Math.round((k * (n - 1)) / Math.max(1, Math.min(6, n) - 1))]!.start);
+    return { bars, yMax, span, present, ticks };
+  }, [h]);
+
+  const alarming = h ? h.levels.reduce((sum, lvl, i) =>
+    sum + (lvl === 'critical' || lvl === 'high' ? h.buckets.reduce((s, b) => s + (b.levels[i] ?? 0), 0) : 0), 0) : 0;
+  const rate = h && h.counted ? (alarming / h.counted) * 100 : 0;
+
+  return (
+    <div className="histo">
+      <div className="histo__head">
+        <div className="histo__figs">
+          <span className="histo__total num">{h ? fmtInt(h.total) : '—'}{h && !h.exact ? '+' : ''}</span>
+          <span className="histo__label">event{h?.total === 1 ? '' : 's'} matched</span>
+          {alarming > 0 && (
+            <span className="histo__rate num" title={`${fmtInt(alarming)} of the matches are critical or high`}>
+              {rate < 0.1 ? '<0.1' : rate.toFixed(1)}% critical or high
+            </span>
+          )}
+          {!!h?.withoutTimestamp && (
+            <span className="histo__undated" title="These events have no parsed timestamp — a source that is still raw lines has none. They are counted here rather than placed in a bucket they cannot support.">
+              {fmtInt(h.withoutTimestamp)} undated
+            </span>
+          )}
+        </div>
+        <div className="histo__legend">
+          {(view?.present ?? []).map((s) => (
+            <span key={s} className="histo__key"><i style={{ background: `var(--sev-${s})` }} />{s}</span>
+          ))}
+          {h && view && <span className="histo__bucket">{bucketLabel(h.bucketSec)} buckets</span>}
+        </div>
+      </div>
+
+      <div className="histo__plot">
+        <svg viewBox={`0 0 ${HISTO_W} ${HISTO_H}`} preserveAspectRatio="none" role="img"
+          aria-label={h ? `${fmtInt(h.total)} events over ${view ? view.bars.length : 0} time buckets` : 'no data'}>
+          {[0.5, HISTO_H / 3, (HISTO_H / 3) * 2, HISTO_H - 0.5].map((y, i) => (
+            <line key={y} x1="0" y1={y} x2={HISTO_W} y2={y} vectorEffect="non-scaling-stroke"
+              className={i === 3 ? 'histo__axis' : 'histo__grid'} />
+          ))}
+          {view?.bars.map((bar) => (
+            <g key={bar.key}>
+              <title>{`${bar.b.start} · ${fmtInt(bar.b.count)} events`}</title>
+              {bar.segs.map((s) => (
+                <rect key={s.sev} x={bar.x} y={s.y} width={bar.w} height={s.h} fill={`var(--sev-${s.sev})`}
+                  opacity={s.sev === 'info' ? 0.62 : 1} />
+              ))}
+            </g>
+          ))}
+        </svg>
+        <div className="histo__y">
+          <span className="num">{view ? fmtInt(view.yMax) : ''}</span>
+          <span className="num">{view ? fmtInt(Math.round(view.yMax / 2)) : ''}</span>
+          <span className="num">{view ? '0' : ''}</span>
+        </div>
+        {!view && (
+          <div className="histo__empty">
+            {loading ? 'reading the matches…' : h?.withoutTimestamp ? 'none of these events carries a parsed timestamp' : 'nothing to plot'}
+          </div>
+        )}
+      </div>
+
+      <div className="histo__ticks">
+        {(view?.ticks ?? []).map((t, i) => <span key={`${t}-${i}`} className="num">{tickLabel(t, view!.span)}</span>)}
+      </div>
+      {h && !h.exact && (
+        <div className="histo__partial">
+          Shape read from the first {fmtInt(h.counted)} of {fmtInt(h.total)}+ matches — narrow the query or the range for the whole picture.
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ───────────── Which logs to search ─────────────
+   The chips were two wrapped rows above the results and pushed them below the fold on every load.
+   This is the same control as one menu: what is selected is stated on the button, so the row you act
+   in stays one row. Every chip, its event count, the ERROR marking and the clear are unchanged. */
+function SourcePicker({ all, picked, onToggle, onClear }: {
+  all: { id: string; label: string; parser: string; events: number; state: string }[];
+  picked: string[];
+  onToggle: (id: string) => void;
+  onClear: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [filter, setFilter] = useState('');
+  const list = useMemo(() => {
+    const f = filter.trim().toLowerCase();
+    return f ? all.filter((s) => s.label.toLowerCase().includes(f) || s.parser.toLowerCase().includes(f)) : all;
+  }, [all, filter]);
+  const label = picked.length === 0
+    ? `all (${fmtInt(all.length)})`
+    : picked.length === 1
+      ? (all.find((s) => s.id === picked[0])?.label ?? picked[0]!)
+      : `${picked.length} of ${fmtInt(all.length)}`;
+
+  return (
+    <div className="srcpick">
+      <button className={cx('srcpick__btn', open && 'open', picked.length > 0 && 'on')} onClick={() => setOpen((o) => !o)}
+        aria-haspopup="menu" aria-expanded={open} title="Which logs this query reads">
+        <span className="srcpick__k">source</span>
+        <span className="srcpick__v num">{label}</span>
+        <Icon.Chevron className="srcpick__caret" />
+      </button>
+      {open && (
+        <>
+          <div className="srccase__scrim" onClick={() => setOpen(false)} aria-hidden />
+          <div className="srcpick__menu" role="menu">
+            <div className="srcpick__head">
+              <span className="lbl">Sources</span>
+              {picked.length > 0 && <button className="btn btn--sm btn--ghost" onClick={onClear}>clear</button>}
+            </div>
+            <div className="srcpick__filter">
+              <Icon.Search width={12} height={12} />
+              <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter files"
+                aria-label="Filter sources" spellCheck={false} autoComplete="off" />
+            </div>
+            <div className="srcpick__list">
+              {all.length === 0 && <div className="srcpick__empty">Nothing ingested yet.</div>}
+              {all.length > 0 && list.length === 0 && <div className="srcpick__empty">No file matches the filter.</div>}
+              {list.map((s) => {
+                const on = picked.includes(s.id);
+                return (
+                  <label key={s.id} className={cx('srcpick__row', on && 'on', s.state === 'ERROR' && 'bad')}
+                    title={s.parser ? `${s.parser} · ${fmtInt(s.events)} events` : undefined}>
+                    <input type="checkbox" checked={on} onChange={() => onToggle(s.id)} />
+                    <span className="ellipsis">{s.label}</span>
+                    <span className="srcpick__n num">{s.events > 0 ? fmtInt(s.events) : ''}</span>
+                  </label>
+                );
+              })}
+            </div>
+            <div className="srcpick__foot">
+              {picked.length === 0 ? 'Every ingested log is searched.' : `${picked.length} selected — the rest are excluded.`}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Severity as ONE segmented control: a filter has one answer, and four loose pills read as four
+ *  independent buttons. Multi-select is still multi-select — the segments are toggles inside one box. */
+function SevSegs({ picked, onToggle }: { picked: Severity[]; onToggle: (s: Severity) => void }) {
+  return (
+    <div className="segbar" role="group" aria-label="Severity">
+      {SEVERITIES.map((s) => (
+        <button key={s} type="button" className={cx('seg', picked.includes(s) && 'seg--on')} onClick={() => onToggle(s)} aria-pressed={picked.includes(s)}>
+          <span className="seg__dot" style={{ background: `var(--sev-${s})` }} aria-hidden />
+          <span className="seg__label">{s}</span>
+        </button>
+      ))}
     </div>
   );
 }
@@ -387,7 +609,6 @@ export function SearchScreen() {
   const [to, setTo] = useState(sp.get('to') ?? '');
   const [sort, setSort] = useState<EventSort>(() => (sp.get('sort') === 'ts_asc' ? 'ts_asc' : 'ts_desc'));
   const [rangeOpen, setRangeOpen] = useState(false);
-  const [allSources, setAllSources] = useState(false);
   const [cols, setCols] = useState<ColKey[]>(readCols);
   const [colsOpen, setColsOpen] = useState(false);
   const setColumns = useCallback((next: ColKey[]) => {
@@ -467,6 +688,15 @@ export function SearchScreen() {
     }) ?? null;
   }, [submitted]);
 
+  // The chart's own request. It describes every match, so it cannot be derived from the page of
+  // rows below it; `placeholderData` keeps the previous shape on screen while a new one is read,
+  // which is what stops the panel collapsing to zero height on every keystroke.
+  const histogram = useQuery({
+    queryKey: qk.eventsHistogram(params),
+    queryFn: () => api.eventsHistogram({ ...params, buckets: 56 }),
+    placeholderData: (prev) => prev,
+  });
+
   const query = useInfiniteQuery({
     queryKey: qk.events(params),
     queryFn: ({ pageParam }) => api.events({ ...params, limit: PAGE, offset: pageParam }),
@@ -527,16 +757,6 @@ export function SearchScreen() {
     return () => io.disconnect();
   }, [query.hasNextPage, query.isFetchingNextPage, query.fetchNextPage, query]);
 
-  // Source chips: show the picked ones plus a few, never all thirty by default.
-  const SOURCE_CHIP_CAP = 8;
-  const visibleSources = allSources
-    ? chipSources
-    : chipSources.filter((s, i) => sources.includes(s.id) || i < SOURCE_CHIP_CAP);
-  // Measured against the CAP, not against what is currently rendered. Expanding made the two equal,
-  // so the count fell to 0 and the control that had just been used to expand disappeared — leaving no
-  // way back to the short list except reloading the page.
-  const cappedCount = chipSources.filter((s, i) => sources.includes(s.id) || i < SOURCE_CHIP_CAP).length;
-  const hiddenSourceCount = Math.max(0, chipSources.length - cappedCount);
   const activeFilters = sources.length + sevs.length + (preset !== 'all' || from || to ? 1 : 0);
   const clearFilters = () => { setSources([]); setSevs([]); setFrom(''); setTo(''); setPreset('all'); };
   const fieldFacets = useEventFields({ q: submitted, sources, sev: sevs, from: range.from, to: range.to, limit: 40 });
@@ -545,35 +765,22 @@ export function SearchScreen() {
     [fieldFacets.data]);
   const colDefs = useMemo(() => cols.map(colDef), [cols]);
   // the grid is built from the chosen columns; the trailing 84px is the per-row case/note actions
+  // The leading 22px column is the template's severity dot, and the trailing 84px is the row's
+  // case/note actions.
   const gridStyle = useMemo(
-    () => ({ gridTemplateColumns: `${colDefs.map((c) => c.width).join(' ')} 84px` }) as React.CSSProperties,
+    () => ({ gridTemplateColumns: `22px ${colDefs.map((c) => c.width).join(' ')} 84px` }) as React.CSSProperties,
     [colDefs]);
 
   return (
     <div className="page search">
-    <div className={cx('search-layout', railOpen && 'with-rail')}>
-      {railOpen && (
-        <FieldsRail
-          params={{ q: submitted, sources, sev: sevs, from: range.from, to: range.to }}
-          query={submitted}
-          onAppend={appendToQuery}
-          onRemove={removeFromQuery}
-          onClose={() => setRailOpen(false)}
-        />
-      )}
-    <div className="search__main">
-      <div className="search__bar">
-        <button
-          className={cx('search__range-btn fields-toggle', railOpen && 'open')}
-          onClick={() => setRailOpen((o) => !o)}
-          aria-pressed={railOpen}
-          title={railOpen ? 'Hide the fields sidebar' : 'Show the fields sidebar'}
-          aria-label={railOpen ? 'Hide fields' : 'Show fields'}
-        >
-          <Icon.PanelLeft />
-        </button>
-        <div className="search__input">
-          <span className="search__prompt">&gt;</span>
+      {/* THE ROW YOU ACT IN. Scope, then the thing you type in, then the primary action - and
+          nothing else, so the query box is never the busiest element on the page. The source chips
+          used to be two wrapped rows here and pushed the results below the fold on every load. */}
+      <div className="qbar">
+        <SourcePicker all={chipSources} picked={sources} onToggle={toggleSource} onClear={() => setSources([])} />
+        <div className="qbox">
+          {/* The template's search mark is a ring, drawn at the same weight as the nav glyphs. */}
+          <span className="qbox__icon" aria-hidden />
           <input
             ref={inputRef}
             value={q}
@@ -585,117 +792,14 @@ export function SearchScreen() {
             autoComplete="off"
           />
           {q && (
-            <button className="search__clear" onClick={() => { setQ(''); inputRef.current?.focus(); }}
+            <button className="qbox__clear" onClick={() => { setQ(''); inputRef.current?.focus(); }}
               aria-label="Clear the query" title="Clear">×</button>
           )}
           <span className="kbd" title="Press / to focus">/</span>
         </div>
-        <button
-          className="search__range-btn"
-          onClick={() => setSort((v) => (v === 'ts_desc' ? 'ts_asc' : 'ts_desc'))}
-          title={sort === 'ts_desc' ? 'Newest first — click for oldest first' : 'Oldest first — click for newest first'}
-          aria-label={`Sort by timestamp, ${sort === 'ts_desc' ? 'newest' : 'oldest'} first`}
-        >
-          <Icon.Sort style={{ transform: sort === 'ts_asc' ? 'scaleY(-1)' : undefined }} />
-          {sort === 'ts_desc' ? 'Newest' : 'Oldest'}
-        </button>
-        <div className="search__range" ref={rangeRef}>
-          <button className={cx('search__range-btn', rangeOpen && 'open')} onClick={() => setRangeOpen((o) => !o)} aria-haspopup="dialog" aria-expanded={rangeOpen}>
-            {rangeLabel} <span className="muted mono" style={{ fontSize: 10 }}>▾</span>
-          </button>
-          {rangeOpen && (
-            <div className="range-pop" role="dialog" aria-label="Time range">
-              <div className="range-pop__presets">
-                {(['1h', '24h', '7d', 'all'] as Preset[]).map((p) => (
-                  <button key={p} className={cx('chip', preset === p && 'on')} style={{ justifyContent: 'center' }} onClick={() => { setPreset(p); setRangeOpen(false); }}>
-                    {PRESET_LABEL[p]}
-                  </button>
-                ))}
-              </div>
-              <div className="range-pop__custom">
-                <div className="field">
-                  <label className="field__label" htmlFor="range-from">From (UTC)</label>
-                  <input id="range-from" type="datetime-local" value={toLocalInputValue(from)} onChange={(e) => { setFrom(fromLocalInputValue(e.target.value)); setPreset('custom'); }} />
-                </div>
-                <div className="field">
-                  <label className="field__label" htmlFor="range-to">To (UTC)</label>
-                  <input id="range-to" type="datetime-local" value={toLocalInputValue(to)} onChange={(e) => { setTo(fromLocalInputValue(e.target.value)); setPreset('custom'); }} />
-                </div>
-                <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                  <button className="btn btn--sm btn--ghost" onClick={() => { setFrom(''); setTo(''); setPreset('all'); }}>Clear</button>
-                  <button className="btn btn--sm btn--accent" onClick={() => setRangeOpen(false)}>Apply</button>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Thirty source chips pushed the results below the fold on every load. The picked ones are always
-          visible; the rest are one click away, and the count says how many are hiding. */}
-      <div className="search__filters">
-        <div className="chip-row">
-          <span className="chip-row__label">Source</span>
-          {chipSources.length === 0 && <span className="muted" style={{ fontSize: 'var(--fs-sm)' }}>nothing ingested yet</span>}
-          {visibleSources.map((s) => (
-            <button key={s.id} className={cx('chip', sources.includes(s.id) && 'on', s.state === 'ERROR' && 'chip--bad')} onClick={() => toggleSource(s.id)} aria-pressed={sources.includes(s.id)}
-              title={s.parser ? `${s.parser} · ${fmtInt(s.events)} events` : undefined}>
-              {s.label}{s.events > 0 && <span className="chip__count">{fmtInt(s.events)}</span>}
-            </button>
-          ))}
-          {(hiddenSourceCount > 0 || allSources) && (
-            <button className="chip chip--more" onClick={() => setAllSources((v) => !v)} aria-expanded={allSources}>
-              {allSources ? `show fewer (${fmtInt(cappedCount)} of ${fmtInt(chipSources.length)})` : `+${fmtInt(hiddenSourceCount)} more`}
-            </button>
-          )}
-          {sources.length > 0 && <button className="btn btn--sm btn--ghost" onClick={() => setSources([])}>clear</button>}
-        </div>
-        <div className="chip-row">
-          <span className="chip-row__label">Severity</span>
-          {SEVERITIES.map((s) => (
-            <button key={s} className={cx('chip', sevs.includes(s) && 'on')} onClick={() => toggleSev(s)} aria-pressed={sevs.includes(s)}>
-              <span className="sev-dot" style={{ background: `var(--sev-${s})` }} />
-              {s}
-            </button>
-          ))}
-          {sevs.length > 0 && <button className="btn btn--sm btn--ghost" onClick={() => setSevs([])}>clear</button>}
-        </div>
-      </div>
-
-      {/* One line that answers "what am I looking at, and how was it answered". It lives ABOVE the table
-          rather than inside the query box: hit counts and an engine badge crammed next to the caret made
-          the thing you type in the busiest element on the page. */}
-      <div className="search__status">
-        <span className="search__status-count">
-          {query.isFetching && !query.isFetchingNextPage
-            ? <><span className="spinner" /> searching…</>
-            : <><b>{fmtInt(total)}{totalExact ? '' : '+'}</b> {total === 1 ? 'event' : 'events'}
-                {!totalExact && <span className="muted" title="The exact count needs the search index, which is still building — this is at least this many.">
-                  {' '}at least</span>}</>}
-        </span>
-        {engine && !query.isFetching && (
-          <span className={cx('badge', engine === 'cuda' && 'badge--ok')}
-            title={engine === 'cuda' ? 'Searched on the GPU (vectorized index on CUDA)' : engine === 'vector' ? 'Vectorized search on CPU (numpy)' : 'Sequential scan (small pool)'}>
-            {engine === 'cuda' ? 'CUDA' : engine === 'vector' ? 'CPU · vector' : 'CPU'}{tookMs != null ? ` · ${tookMs < 1 ? '<1' : Math.round(tookMs)} ms` : ''}
-          </span>
-        )}
-        {/* The vectorised index is built in the BACKGROUND — a query never waits for it (that is what
-            made the first search after a big ingest look like a hang). Say it is warming instead. */}
-        {indexState?.state === 'building' && !query.isFetching && (
-          <span className="badge" title="The vectorized search index is still being built; this query used the slower scan. It will speed up once the index is ready.">
-            index warming {Math.round(indexState.pct)}%
-          </span>
-        )}
-        {activeFilters > 0 && (
-          <>
-            <span className="search__status-sep">·</span>
-            <span className="muted">{activeFilters} filter{activeFilters === 1 ? '' : 's'}</span>
-            <button className="btn btn--sm btn--ghost" onClick={clearFilters}>clear all</button>
-          </>
-        )}
-        <span style={{ flex: 1 }} />
+        <button className="btn btn--lg btn--primary" onClick={() => setSubmitted(q)} title="Run this query now (Enter)">Run</button>
         <div className="search__cols">
-          <button className={cx('btn btn--sm', colsOpen && 'btn--accent')} onClick={() => setColsOpen((v) => !v)}
+          <button className={cx('btn btn--lg', colsOpen && 'btn--accent')} onClick={() => setColsOpen((v) => !v)}
             aria-expanded={colsOpen} title="Choose which columns this table shows">
             <Icon.Sliders />Columns <span className="chip__count">{cols.length}</span>
           </button>
@@ -704,7 +808,7 @@ export function SearchScreen() {
               <div className="srccase__scrim" onClick={() => setColsOpen(false)} aria-hidden />
               <div className="search__colmenu" role="menu">
                 <div className="search__colmenu-head">
-                  <span className="eyebrow">Columns</span>
+                  <span className="lbl">Columns</span>
                   <button className="btn btn--sm btn--ghost" onClick={() => setColumns(DEFAULT_COLS)}>reset</button>
                 </div>
                 <div className="search__collist">
@@ -736,122 +840,230 @@ export function SearchScreen() {
             </>
           )}
         </div>
+        <button
+          className={cx('btn btn--lg btn--icon', railOpen && 'btn--accent')}
+          onClick={() => setRailOpen((o) => !o)}
+          aria-pressed={railOpen}
+          title={railOpen ? 'Hide the fields sidebar' : 'Show the fields sidebar'}
+          aria-label={railOpen ? 'Hide fields' : 'Show fields'}
+        >
+          <Icon.PanelLeft />
+        </button>
+      </div>
+
+      {/* The scoping strip: what the query is being asked OVER, on one 34px line under the row you
+          type in. Severity is one segmented control — a filter has one answer, and four loose pills
+          read as four independent buttons. */}
+      <div className="qbar qbar--sub">
+        <SevSegs picked={sevs} onToggle={toggleSev} />
+        <div className="search__range" ref={rangeRef}>
+          <button className={cx('qbtn', rangeOpen && 'open')} onClick={() => setRangeOpen((o) => !o)} aria-haspopup="dialog" aria-expanded={rangeOpen}>
+            <Icon.Clock width={11} height={11} />
+            <span className="num">{rangeLabel}</span>
+            <Icon.Chevron className="qbtn__caret" />
+          </button>
+          {rangeOpen && (
+            <div className="range-pop" role="dialog" aria-label="Time range">
+              <div className="range-pop__presets">
+                {(['1h', '24h', '7d', 'all'] as Preset[]).map((pr) => (
+                  <button key={pr} className={cx('chip', preset === pr && 'on')} style={{ justifyContent: 'center' }} onClick={() => { setPreset(pr); setRangeOpen(false); }}>
+                    {PRESET_LABEL[pr]}
+                  </button>
+                ))}
+              </div>
+              <div className="range-pop__custom">
+                <div className="field">
+                  <label className="field__label" htmlFor="range-from">From (UTC)</label>
+                  <input id="range-from" type="datetime-local" value={toLocalInputValue(from)} onChange={(e) => { setFrom(fromLocalInputValue(e.target.value)); setPreset('custom'); }} />
+                </div>
+                <div className="field">
+                  <label className="field__label" htmlFor="range-to">To (UTC)</label>
+                  <input id="range-to" type="datetime-local" value={toLocalInputValue(to)} onChange={(e) => { setTo(fromLocalInputValue(e.target.value)); setPreset('custom'); }} />
+                </div>
+                <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                  <button className="btn btn--sm btn--ghost" onClick={() => { setFrom(''); setTo(''); setPreset('all'); }}>Clear</button>
+                  <button className="btn btn--sm btn--accent" onClick={() => setRangeOpen(false)}>Apply</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+        <button
+          className="qbtn"
+          onClick={() => setSort((v) => (v === 'ts_desc' ? 'ts_asc' : 'ts_desc'))}
+          title={sort === 'ts_desc' ? 'Newest first — click for oldest first' : 'Oldest first — click for newest first'}
+          aria-label={`Sort by timestamp, ${sort === 'ts_desc' ? 'newest' : 'oldest'} first`}
+        >
+          <Icon.Sort style={{ transform: sort === 'ts_asc' ? 'scaleY(-1)' : undefined }} />
+          {sort === 'ts_desc' ? 'Newest' : 'Oldest'}
+        </button>
+        {activeFilters > 0 && (
+          <button className="btn btn--sm btn--ghost" onClick={clearFilters}>
+            clear {activeFilters} filter{activeFilters === 1 ? '' : 's'}
+          </button>
+        )}
+        <span className="qbar__gap" />
         {/* A field-scoped query cannot reach a source that is still raw lines. It is the one
-            incompleteness that depends on what was TYPED, so it belongs in this row — which already
-            answers "what am I looking at, and how was it answered" — and never next to the caret. Last
-            child, so it wraps onto its own line under the count, the engine badge and Columns. */}
+            incompleteness that depends on what was TYPED, so it belongs on the row that says what
+            the query is being asked over — and never next to the caret. */}
         <FieldQueryNote fields={unreachableFields} sourceIds={sources} />
       </div>
 
-      {/* Search is where a missing source does the most damage: an unloaded file looks exactly like
-          "no events match". Say it on every result set, not only the empty one. */}
-      {(c.data?.poolSkippedFiles.length ?? 0) > 0 && (
-        <div className="notloaded notloaded--inline" style={{ marginTop: 12 }}>
-          <Icon.Warn />
-          <span>
-            <b>{fmtInt(c.data!.poolSkippedFiles.length)}</b> source
-            {c.data!.poolSkippedFiles.length === 1 ? ' is' : 's are'} not loaded
-            ({fmtBytes(c.data!.poolSkippedFiles.reduce((n, s) => n + s.size, 0))}), so these results do NOT
-            include them: {c.data!.poolSkippedFiles.map((s) => s.displayName).join(', ')}.{' '}
-            <Link to="/ingest">Load them on Sources</Link>.
-          </span>
-        </div>
-      )}
-
-      {query.isError ? (
-        <div className="search__error"><ErrorState title="Search failed" error={query.error} onRetry={() => void query.refetch()} /></div>
-      ) : (
-        <div className="table" style={{ marginTop: 16, opacity: query.isFetching && !query.isFetchingNextPage && rows.length ? 0.6 : 1, transition: 'opacity var(--t-fast)' }}>
-          <div className="table__head results-grid" style={gridStyle}>
-            {colDefs.map((col) => (col.kind === 'ts' ? (
-              <button key={col.key} className="table__sort" onClick={() => setSort((v) => (v === 'ts_desc' ? 'ts_asc' : 'ts_desc'))} title="Sort by timestamp">
-                {col.label} <span className="table__sort-arrow">{sort === 'ts_desc' ? '↓' : '↑'}</span>
-              </button>
-            ) : (
-              <div key={col.key} title={col.kind === 'field' ? `parsed field: ${col.key}` : undefined}>{col.label}</div>
-            )))}
-            <div title="Add to case · note">Case</div>
-          </div>
-          {query.isLoading && <SkeletonRows n={10} />}
-          {!query.isLoading && rows.length === 0 && (
-            <div className="table__empty">
-              {c.data?.poolLoading
-                ? `Still loading ${c.data.poolPending} source${c.data.poolPending === 1 ? '' : 's'} — results will fill in.`
-                : c.data && c.data.poolEventCount === 0 && c.data.poolSkippedFiles.length > 0
-                ? `Nothing is loaded: ${c.data.poolSkippedFiles.length} staged source${c.data.poolSkippedFiles.length === 1 ? '' : 's'} could not be parsed into the workspace, so there is nothing to search yet. Sources → "not loaded" says why.`
-                : c.data && c.data.poolEventCount === 0
-                ? 'Nothing ingested yet — add logs on the Sources page. A case is optional; search works without one.'
-                : <>
-                    No events match this query. Try fewer filters or a broader time range.
-                    {colonTypoTerm && (
-                      <div className="search__tip">
-                        <span className="mono">{colonTypoTerm}</span> is being read as <span className="mono">field:value</span>,
-                        so it looks for a field named <span className="mono">{colonTypoTerm.slice(0, colonTypoTerm.indexOf(':'))}</span>.
-                        To search for the literal text, escape the colon:{' '}
-                        <button className="search__tip-fix" onClick={() => { const fixed = submitted.replace(colonTypoTerm, colonTypoTerm.replace(/:/g, '\\:')); setQ(fixed); setSubmitted(fixed); }}>
-                          <span className="mono">{colonTypoTerm.replace(/:/g, '\\:')}</span>
-                        </button>{' '}
-                        or wrap it in quotes.
-                      </div>
-                    )}
-                  </>}
+      <div className={cx('search-layout', railOpen && 'with-rail')}>
+        <section className="search__main">
+          {/* Search is where a missing source does the most damage: an unloaded file looks exactly
+              like "no events match". Say it on every result set, not only the empty one. */}
+          {(c.data?.poolSkippedFiles.length ?? 0) > 0 && (
+            <div className="notloaded notloaded--inline search__notloaded">
+              <Icon.Warn />
+              <span>
+                <b>{fmtInt(c.data!.poolSkippedFiles.length)}</b> source
+                {c.data!.poolSkippedFiles.length === 1 ? ' is' : 's are'} not loaded
+                ({fmtBytes(c.data!.poolSkippedFiles.reduce((n, s) => n + s.size, 0))}), so these results do NOT
+                include them: {c.data!.poolSkippedFiles.map((s) => s.displayName).join(', ')}.{' '}
+                <Link to="/ingest">Load them on Sources</Link>.
+              </span>
             </div>
           )}
-          {rows.map((e) => (
-            <div key={e.id} className="table__row table__row--sev results-grid clickable" style={{ ['--row-sev' as string]: `var(--sev-${e.sev})`, ...gridStyle }} role="link" tabIndex={0} onClick={() => nav(`/events/${encodeURIComponent(e.id)}`)} onKeyDown={(k) => { if (k.key === 'Enter') nav(`/events/${encodeURIComponent(e.id)}`); }}>
-              {colDefs.map((col) => {
-                const v = cellValue(e, col);
-                if (col.kind === 'sev') return <div key={col.key}><SevTag sev={e.sev} /></div>;
-                if (col.kind === 'file') {
-                  return (
-                    <div key={col.key} className="cell-mono cell-dim ellipsis res__cell" title={`${e.file}  ·  parsed as ${e.source}`}>
-                      <span className="res__file">{highlight(e.file, terms)}</span>
-                      <span className="res__family">{e.source}</span>
-                      <FilterPins term={termFor(col, e.file)} onAppend={appendToQuery} />
-                    </div>
-                  );
-                }
-                if (col.kind === 'ts') return <div key={col.key} className="cell-mono" style={{ color: 'var(--text-4)' }}>{fmtTs(e.ts)}</div>;
-                const isMessage = col.kind === 'raw' || col.kind === 'msg';
-                return (
-                  <div key={col.key}
-                    className={cx('cell-mono ellipsis res__cell', isMessage ? 'cell-bright' : '')}
-                    style={isMessage ? undefined : { fontSize: 'var(--fs-sm)' }}
-                    title={v || undefined}>
-                    {v ? highlight(v, terms) : <span className="muted">—</span>}
-                    {isMessage && !!e.labels?.length && <span className="row-labels">{e.labels.map((l) => <span key={l} className="tag tag--label">{l}</span>)}</span>}
-                    {!isMessage && v && <FilterPins term={termFor(col, v)} onAppend={appendToQuery} />}
+
+          <SearchHistogram h={histogram.data} loading={histogram.isFetching} />
+
+          {query.isError ? (
+            <div className="search__error"><ErrorState title="Search failed" error={query.error} onRetry={() => void query.refetch()} /></div>
+          ) : (
+            <div className="search__results" style={{ opacity: query.isFetching && !query.isFetchingNextPage && rows.length ? 0.6 : 1, transition: 'opacity var(--t-fast)' }}>
+              <div className="table__head results-grid" style={gridStyle}>
+                <div />
+                {colDefs.map((col) => (col.kind === 'ts' ? (
+                  <button key={col.key} className="table__sort" onClick={() => setSort((v) => (v === 'ts_desc' ? 'ts_asc' : 'ts_desc'))} title="Sort by timestamp">
+                    {col.label} <span className="table__sort-arrow">{sort === 'ts_desc' ? '↓' : '↑'}</span>
+                  </button>
+                ) : (
+                  <div key={col.key} title={col.kind === 'field' ? `parsed field: ${col.key}` : undefined}>{col.label}</div>
+                )))}
+                <div title="Add to case · note">Case</div>
+              </div>
+              <div className="search__rows">
+                {query.isLoading && <SkeletonRows n={10} />}
+                {!query.isLoading && rows.length === 0 && (
+                  <div className="table__empty">
+                    {c.data?.poolLoading
+                      ? `Still loading ${c.data.poolPending} source${c.data.poolPending === 1 ? '' : 's'} — results will fill in.`
+                      : c.data && c.data.poolEventCount === 0 && c.data.poolSkippedFiles.length > 0
+                      ? `Nothing is loaded: ${c.data.poolSkippedFiles.length} staged source${c.data.poolSkippedFiles.length === 1 ? '' : 's'} could not be parsed into the workspace, so there is nothing to search yet. Sources → "not loaded" says why.`
+                      : c.data && c.data.poolEventCount === 0
+                      ? 'Nothing ingested yet — add logs on the Sources page. A case is optional; search works without one.'
+                      : <>
+                          No events match this query. Try fewer filters or a broader time range.
+                          {colonTypoTerm && (
+                            <div className="search__tip">
+                              <span className="mono">{colonTypoTerm}</span> is being read as <span className="mono">field:value</span>,
+                              so it looks for a field named <span className="mono">{colonTypoTerm.slice(0, colonTypoTerm.indexOf(':'))}</span>.
+                              To search for the literal text, escape the colon:{' '}
+                              <button className="search__tip-fix" onClick={() => { const fixed = submitted.replace(colonTypoTerm, colonTypoTerm.replace(/:/g, '\\:')); setQ(fixed); setSubmitted(fixed); }}>
+                                <span className="mono">{colonTypoTerm.replace(/:/g, '\\:')}</span>
+                              </button>{' '}
+                              or wrap it in quotes.
+                            </div>
+                          )}
+                        </>}
                   </div>
-                );
-              })}
-              <div className="row-actions">
-                <AddToCaseButton event={e} compact />
-                {c.data && <NoteAboutButton caseId={c.data.id} compact refToAttach={{ kind: 'event', value: e.id, label: e.msg.slice(0, 60) }} />}
+                )}
+                {rows.map((e) => (
+                  <div key={e.id} className="table__row results-grid clickable" style={{ ['--row-sev' as string]: `var(--sev-${e.sev})`, ...gridStyle }} role="link" tabIndex={0} onClick={() => nav(`/events/${encodeURIComponent(e.id)}`)} onKeyDown={(k) => { if (k.key === 'Enter') nav(`/events/${encodeURIComponent(e.id)}`); }}>
+                    {/* The row opens on its severity, the way the template's does. It replaces the
+                        left rail rather than joining it: a rail AND a dot AND the level tag would
+                        state one fact three times on one line. */}
+                    <div className="res__dot" aria-hidden><i style={{ background: `var(--sev-${e.sev})` }} /></div>
+                    {colDefs.map((col) => {
+                      const v = cellValue(e, col);
+                      if (col.kind === 'sev') return <div key={col.key}><SevTag sev={e.sev} /></div>;
+                      if (col.kind === 'file') {
+                        return (
+                          <div key={col.key} className="cell-mono cell-dim ellipsis res__cell" title={`${e.file}  ·  parsed as ${e.source}`}>
+                            <span className="res__file">{highlight(e.file, terms)}</span>
+                            <span className="res__family">{e.source}</span>
+                            <FilterPins term={termFor(col, e.file)} onAppend={appendToQuery} />
+                          </div>
+                        );
+                      }
+                      if (col.kind === 'ts') return <div key={col.key} className="cell-mono cell-ts">{fmtTs(e.ts)}</div>;
+                      const isMessage = col.kind === 'raw' || col.kind === 'msg';
+                      return (
+                        <div key={col.key}
+                          className={cx('cell-mono ellipsis res__cell', isMessage ? 'cell-msg' : 'cell-small')}
+                          title={v || undefined}>
+                          {v ? highlight(v, terms) : <span className="muted">—</span>}
+                          {isMessage && !!e.labels?.length && <span className="row-labels">{e.labels.map((l) => <span key={l} className="tag tag--label">{l}</span>)}</span>}
+                          {!isMessage && v && <FilterPins term={termFor(col, v)} onAppend={appendToQuery} />}
+                        </div>
+                      );
+                    })}
+                    <div className="row-actions">
+                      <AddToCaseButton event={e} compact />
+                      {c.data && <NoteAboutButton caseId={c.data.id} compact refToAttach={{ kind: 'event', value: e.id, label: e.msg.slice(0, 60) }} />}
+                    </div>
+                  </div>
+                ))}
+                {query.hasNextPage && (
+                  <div className="search__more">
+                    <button className="btn" onClick={() => void query.fetchNextPage()} disabled={query.isFetchingNextPage}>
+                      {query.isFetchingNextPage && <span className="btn__spinner" />}Load {fmtInt(Math.min(PAGE, Math.max(0, total - rows.length)))} more
+                    </button>
+                    <div ref={sentinelRef} style={{ width: 1, height: 1 }} />
+                  </div>
+                )}
+              </div>
+
+              {/* The status strip: the quietest text on the screen, stating what the query cost.
+                  Never a place to put something the analyst has to act on. */}
+              <div className="table__foot search__statusbar">
+                <span>
+                  {query.isFetching && !query.isFetchingNextPage
+                    ? 'searching…'
+                    : `${fmtInt(rows.length)} of ${fmtInt(total)}${totalExact ? '' : '+'} loaded`}
+                </span>
+                {!totalExact && (
+                  <span className="search__floor" title="The exact count needs the search index, which is still building — this is at least this many.">
+                    count is a floor
+                  </span>
+                )}
+                <span className="qbar__gap" />
+                {indexState?.state === 'building' && (
+                  <span title="The vectorized search index is still being built; this query used the slower scan. It will speed up once the index is ready.">
+                    index warming {Math.round(indexState.pct)}%
+                  </span>
+                )}
+                {engine && (
+                  <span title={engine === 'cuda' ? 'Searched on the GPU (vectorized index on CUDA)' : engine === 'vector' ? 'Vectorized search on CPU (numpy)' : 'Sequential scan (small pool)'}>
+                    {engine === 'cuda' ? 'cuda' : engine === 'vector' ? 'cpu · vector' : 'cpu'}
+                    {tookMs != null ? ` · ${tookMs < 1 ? '<1' : Math.round(tookMs)} ms` : ''}
+                  </span>
+                )}
               </div>
             </div>
-          ))}
-          {rows.length > 0 && (
-            <div className="table__foot">
-              <span>{fmtInt(rows.length)} of {fmtInt(total)}{totalExact ? '' : '+'} loaded</span>
-              {query.hasNextPage && (
-                <button className="btn btn--sm" onClick={() => void query.fetchNextPage()} disabled={query.isFetchingNextPage}>
-                  {query.isFetchingNextPage && <span className="btn__spinner" />}Load {Math.min(PAGE, total - rows.length)} more
-                </button>
-              )}
-              <div ref={sentinelRef} style={{ width: 1, height: 1 }} />
-            </div>
           )}
-        </div>
-      )}
-      <div className="search__note">
-        <span>Rows are normalized across every parser — the same fields whether the line came from EVTX XML or an nginx string.</span>
-        <span className="search__note-syntax">
-          <b>Syntax</b> free text · <span className="mono">field:value</span> · AND / OR / NOT · &quot;quoted phrase&quot; ·{' '}
-          <span className="mono">\:</span> for a literal colon (<span className="mono">10.0.0.9\:3001</span>)
-        </span>
+
+          <div className="search__note">
+            <span>Rows are normalized across every parser — the same fields whether the line came from EVTX XML or an nginx string.</span>
+            <span className="search__note-syntax">
+              <b>Syntax</b> free text · <span className="mono">field:value</span> · AND / OR / NOT · &quot;quoted phrase&quot; ·{' '}
+              <span className="mono">\:</span> for a literal colon (<span className="mono">10.0.0.9\:3001</span>)
+            </span>
+          </div>
+        </section>
+
+        {/* The facet rail is on the RIGHT, after the answer in DOM order as well as on screen. */}
+        {railOpen && (
+          <FieldsRail
+            params={{ q: submitted, sources, sev: sevs, from: range.from, to: range.to }}
+            query={submitted}
+            onAppend={appendToQuery}
+            onRemove={removeFromQuery}
+            onClose={() => setRailOpen(false)}
+          />
+        )}
       </div>
-    </div>
-    </div>
     </div>
   );
 }

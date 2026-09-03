@@ -1,65 +1,61 @@
-/* ═══════ SEARCH · fields sidebar ═══════
-   A collapsible rail to the left of the results listing every field in the current result set.
-   Clicking a field expands its top values; clicking a value appends `field:value` to the query. */
-.search-layout {
-  display: flex;
-  align-items: flex-start;
-  gap: 16px;
-  min-width: 0;
-}
-.search__main {
-  flex: 1;
-  min-width: 0;
-}
-.fields-toggle {
-  padding: 0 10px;
-  flex: none;
-}
-.fields-toggle.open {
-  color: var(--accent);
-  border-color: var(--accent-border);
-}
+/* ═══════ SEARCH · fields rail ═══════
+   The template's facet rail: a full-height column in the chrome colour, separated from the results by
+   one rule, with its own 34px head. Clicking a field expands its top values; clicking a value appends
+   `field:value` to the query, and the +/− pins narrow to it or exclude it.
 
+   The rail renders on the RIGHT (`order`), which is where this design puts a facet rail, and it does
+   so by flex order rather than by DOM order so it lands there whichever side of the results the
+   markup places it. */
+/* The SPLIT (`.search-layout` / `.search__main`) belongs to the screen and lives in
+   `screens/search.css` — it used to be declared here too, and this file is imported LAST, so the
+   copy here was silently the one that won. One definition, in the file that owns the screen. */
 .fields-rail {
-  flex: 0 0 248px;
-  width: 248px;
-  position: sticky;
-  top: calc(var(--header-h) + 12px);
-  max-height: calc(100vh - var(--header-h) - 24px);
+  order: 2;
+  flex: 0 0 var(--rail-w);
+  width: var(--rail-w);
+  min-height: 0;
+  align-self: stretch;
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--border);
+  border-left: 1px solid var(--border);
   background: var(--panel);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-sm);
   overflow: hidden;
-  animation: fadeIn var(--t-med);
 }
+
+/* ── head: 34px, the name in the ONE label treatment, the count on the right in mono ── */
 .fields-rail__head {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 8px 8px 12px;
+  min-height: var(--toolbar-h);
+  padding: 0 6px 0 12px;
+  background: var(--panel-inset);
   border-bottom: 1px solid var(--border);
 }
 .fields-rail__title {
-  font-size: var(--fs-md);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
   font-weight: 600;
-  color: var(--text-bright);
-  letter-spacing: 0.02em;
+  letter-spacing: var(--ls-head);
+  text-transform: uppercase;
+  color: var(--muted-2);
 }
 .fields-rail__meta {
   flex: 1;
+  text-align: right;
   font-family: var(--font-mono);
-  font-size: var(--fs-xxs);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
   color: var(--muted-3);
   white-space: nowrap;
 }
+
 .fields-rail__filter {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 8px 6px 12px;
+  min-height: var(--toolbar-h);
+  padding: 0 6px 0 12px;
   border-bottom: 1px solid var(--border);
   color: var(--muted-2);
 }
@@ -86,6 +82,7 @@
   padding: 8px 10px;
   border-bottom: 1px solid var(--border);
 }
+/* a chip is a rectangle at the control radius — the only capsule in this design is a nav badge */
 .fields-chip {
   display: inline-flex;
   align-items: center;
@@ -95,7 +92,7 @@
   border: 1px solid var(--accent-border);
   background: var(--accent-bg);
   color: var(--accent);
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-md);
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
 }
@@ -110,10 +107,10 @@
   background: transparent;
   color: inherit;
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--fs-xl);
   line-height: 1;
   padding: 0 4px;
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-sm);
   opacity: 0.75;
 }
 .fields-chip__x:hover,
@@ -133,13 +130,16 @@
   color: var(--muted);
 }
 .fields-rail__note {
-  padding: 6px 12px;
+  padding: 7px 12px;
   border-top: 1px solid var(--border);
-  font-size: var(--fs-xxs);
-  color: var(--muted-2);
+  min-height: var(--status-h);
+  display: flex;
+  align-items: center;
+  font-size: var(--fs-xs);
+  color: var(--muted-3);
 }
 
-/* one field */
+/* ── one field: the name in mono, its cardinality on the right and quieter still ── */
 .field-row__head {
   width: 100%;
   display: flex;
@@ -155,7 +155,7 @@
   transition: background var(--t-fast), color var(--t-fast);
 }
 .field-row__head:hover {
-  background: var(--surface-1);
+  background: var(--row-hover);
   color: var(--text-bright);
 }
 .field-row.open .field-row__head {
@@ -177,30 +177,39 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--font-mono);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-md);
 }
-.field-row__count,
-.field-val__count {
+.field-row__count {
   flex: none;
   font-family: var(--font-mono);
   font-size: var(--fs-xxs);
-  color: var(--muted-3);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-4);
 }
 .field-row__values {
-  padding: 2px 6px 6px 22px;
+  padding: 2px 6px 8px 22px;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
 }
+
+/* ── one value: label left, figure right, then the meter ── */
 .field-val {
   display: flex;
   align-items: center;
-  border-radius: var(--radius-sm, 3px);
+  border-radius: var(--radius-sm);
+  /* The meter is driven by the row: `--val-on: 1` and `--val-pct: 37%` light it up. Until the markup
+     carries a ratio it stays collapsed rather than drawing an empty 0 % track under every value —
+     a meter that always reads zero is a claim about the data that nothing here can support. */
+  --val-on: 0;
+  --val-pct: 0%;
+  --val-bar: var(--accent-deep);
 }
 .field-val__btn {
   flex: 1;
   min-width: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 3px 6px;
@@ -213,12 +222,20 @@
   border-radius: inherit;
   transition: background var(--t-fast), color var(--t-fast);
 }
+.field-val__btn::after {
+  content: '';
+  flex: 1 0 100%;
+  height: calc(3px * var(--val-on));
+  margin-top: calc(4px * var(--val-on));
+  background: linear-gradient(to right, var(--val-bar) 0 var(--val-pct), var(--track) var(--val-pct) 100%);
+}
 .field-val__btn:hover {
-  background: var(--surface-1);
+  background: var(--row-hover);
   color: var(--text-bright);
 }
 .field-val.on {
   background: var(--accent-bg);
+  --val-bar: var(--accent);
 }
 .field-val.on .field-val__btn {
   color: var(--accent);
@@ -232,12 +249,29 @@
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
 }
+.field-val__count {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xxs);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-3);
+}
 .field-val__x {
   color: var(--accent);
   flex: none;
 }
+/* the + / − pins are DIMMED here, never hover-hidden: a control that only exists on hover is
+   unreachable by touch, and in a rail this narrow it is the only way to exclude a value */
+.fields-rail .pins {
+  opacity: 0.55;
+}
+.fields-rail .field-val:hover .pins,
+.fields-rail .field-val:focus-within .pins,
+.fields-rail .pins:focus-within {
+  opacity: 1;
+}
 .field-row__more {
-  padding: 3px 6px 0;
+  padding: 4px 6px 0;
   font-size: var(--fs-xxs);
   color: var(--muted-2);
 }
@@ -247,9 +281,10 @@
     flex-direction: column;
   }
   .fields-rail {
-    position: static;
     width: 100%;
     flex: none;
     max-height: 320px;
+    border-left: 0;
+    border-top: 1px solid var(--border);
   }
 }

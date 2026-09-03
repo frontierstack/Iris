@@ -4,7 +4,11 @@ import { api } from '../api/client';
 import type { MetricSample } from '../api/types';
 import { cx } from '../utils/format';
 
-/* ───────── tiny SVG line chart (no deps) ───────── */
+/* ───────── tiny SVG line chart (no deps) ─────────
+   EVERY colour here is a theme variable, never a literal: `color` on a Series is a `var(--…)` string
+   the browser resolves against the live theme, so the same chart is correct in all nine. The
+   gridline and the tick take theirs from CSS (`.perf__gridline`, `.perf__tick` in
+   styles/screens/settings.css) — a hard-coded stroke would be wrong in eight of them. */
 interface Series { key: string; label: string; color: string; values: (number | null)[]; unit?: string; max?: number }
 
 function LineChart({ series, height = 84, ymax, unit, fill = true }: { series: Series[]; height?: number; ymax?: number; unit?: string; fill?: boolean }) {
@@ -21,7 +25,10 @@ function LineChart({ series, height = 84, ymax, unit, fill = true }: { series: S
     <svg className="perf__chart" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden="true">
       {gridVals.map((g) => (
         <g key={g}>
-          <line x1={pad.l} x2={W - pad.r} y1={y(g)} y2={y(g)} className="perf__grid" />
+          {/* `perf__gridline`, NOT `perf__grid` — that name is already the class on the container
+              div holding the four charts, and one class doing two jobs is how the stroke ended up
+              being selected for by `.perf__grid line.perf__grid`. */}
+          <line x1={pad.l} x2={W - pad.r} y1={y(g)} y2={y(g)} className="perf__gridline" />
           <text x={pad.l - 6} y={y(g) + 3} textAnchor="end" className="perf__tick">{fmtTick(g, unit)}</text>
         </g>
       ))}
@@ -113,13 +120,19 @@ export function PerfPanel({ compact = false }: { compact?: boolean }) {
     <div className={cx('perf', compact && 'perf--compact')}>
       <div className="perf__head">
         <div className="perf__title">
-          <span className={cx('badge', live ? 'badge--ok' : '')}><span className={cx('badge__dot', live && 'pulse')} />{live ? 'live · 2 s' : 'paused'}</span>
+          <span className={cx('badge', live ? 'badge--ok' : '')}><span className={cx('badge__dot', live && 'perf__live-dot')} />{live ? 'live · 2 s' : 'paused'}</span>
           {cur && <span className="badge">{cur.active === 'cuda' ? 'processing on CUDA' : 'processing on CPU'}</span>}
           {gpuCount === 0 && !q.isLoading && <span className="badge badge--warn">no GPU telemetry</span>}
         </div>
         <div className="perf__ctl">
-          <div className="seg" role="radiogroup" aria-label="Window">
-            {WINDOWS.map((w) => <button key={w.id} className={cx('seg__btn', win === w.id && 'on')} onClick={() => setWin(w.id)}>{w.label}</button>)}
+          {/* `perf__seg`, not the shared `.seg`: AnomaliesScreen's segmented filter claims that name
+              too (defined at the bottom of styles/screens/settings.css), and it loads after
+              components.css — so this control was silently taking a filter chip's box. */}
+          <div className="perf__seg" role="radiogroup" aria-label="Window">
+            {WINDOWS.map((w) => (
+              <button key={w.id} role="radio" aria-checked={win === w.id}
+                className={cx('perf__seg-btn', win === w.id && 'on')} onClick={() => setWin(w.id)}>{w.label}</button>
+            ))}
           </div>
           <button className="btn btn--sm" onClick={() => setLive((v) => !v)}>{live ? 'Pause' : 'Resume'}</button>
         </div>

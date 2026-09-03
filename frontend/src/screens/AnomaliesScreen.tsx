@@ -100,7 +100,7 @@ function AnomalyRow({ a, open, onToggle }: { a: Anomaly; open: boolean; onToggle
         <div className="sev-cell"><SevTag sev={a.sev} /></div>
         <div className="anom__name">
           <span className="cell-bright">{a.name}</span>
-          <span className="cell-mono cell-dim" style={{ fontSize: 'var(--fs-xs)' }}>{a.ruleId}</span>
+          <span className="cell-mono cell-dim cell-sub">{a.ruleId}</span>
         </div>
         <div><span className={cx('badge', a.kind !== 'builtin' && 'badge--ok')}>{a.kind === 'builtin' ? 'built-in' : a.kind}</span></div>
         <div className="cell-mono num">{fmtInt(a.hits)}</div>
@@ -1144,7 +1144,7 @@ function RulesSection() {
               <div className="sev-cell"><SevTag sev={r.sev} /></div>
               <div className="rules__name">
                 <span className="cell-bright">{r.name}</span>
-                <span className="cell-mono cell-dim ellipsis" style={{ fontSize: 'var(--fs-xs)' }} title={r.description}>{r.id}{r.description ? ` · ${r.description}` : ''}</span>
+                <span className="cell-mono cell-dim ellipsis cell-sub" title={r.description}>{r.id}{r.description ? ` · ${r.description}` : ''}</span>
               </div>
               <div>
                 <span className={cx('badge', !r.builtin && 'badge--ok')}>{r.builtin ? 'built-in' : r.kind}</span>

@@ -1023,6 +1023,32 @@ interface Attachment { id:string /*generated on-disk name*/; name:string /*sanit
   A rejected upload (415/413/400) creates nothing — the case directory is only made once the bytes are accepted.
 
 ## Search field facets — added
+- `GET /api/events/histogram?q=&sources=&sev=&from=&to=&scope=&buckets=56` → `EventsHistogram`. When the events
+  matching THIS query happened, split by severity — the chart above the result list on Search. Takes the same
+  filters as `GET /api/events` through the same helper, and goes through `search_engine.search`, so the chart and
+  the list can never disagree about what matches; a chart derived from the fetched page would describe the page.
+  `buckets` is 8..240 and is a CEILING: the bucket size is the smallest step on a 1-2-5 time ladder (1s … 1y) that
+  fits the span, so an axis tick is always a round unit of time rather than "every 47 seconds".
+  Two fields carry what it will not claim:
+  * `exact:false` means the backend stopped reading matches before the end (`search._POSITIONS_CAP`), so the shape
+    is drawn from the first `counted` of `total` — the screen says so in words. Same rule as `totalExact`.
+  * `withoutTimestamp` counts matches with no parsed timestamp. They are NEVER placed in a bucket: a raw,
+    un-enriched source has no timestamps at all, and folding those in would draw a spike where the log is silent.
+  `levels` is the severity order the per-bucket `levels` arrays are indexed by, and it is `search._SEV_CODE`'s
+  order — the codes ARE the indices, so never reorder one without the other.
+```ts
+interface HistogramBucket { start:string; count:number; levels:number[] }   // levels[] indexed by EventsHistogram.levels
+interface EventsHistogram {
+  buckets: HistogramBucket[]; levels: Severity[]; bucketSec: number;
+  start: string|null; end: string|null;
+  total: number;          // matches, as `GET /api/events` would report them
+  counted: number;        // matches actually read for the chart
+  exact: boolean;         // false = counted < total, the shape is a prefix
+  withoutTimestamp: number;
+  peak: number;
+  engine?: 'cuda'|'vector'|'cpu'; tookMs?: number; index?: SearchIndexState;
+}
+```
 - `GET /api/events/fields?q=&sources=&sev=&from=&to=&scope=&limit=40` → `FieldFacetsResponse`. Takes the SAME filters as
   `GET /api/events` (identical parsing, shared helper in routers/events.py) so the Search fields sidebar always describes the
   current result set. Field names = every `Event.fields` key plus the fixed columns `host`, `user`, `source`, `file`, `sev`

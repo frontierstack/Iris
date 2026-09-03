@@ -1,0 +1,826 @@
+/* Search (SearchScreen.tsx) and the shared result-row rhythm */
+
+/* ═══════ SEARCH ═══════
+   THE LOG CONSOLE. This is the screen the design was drawn for, and it is the one place the whole
+   composition is visible at once: toolbar · scoping strip · histogram · result list · status bar,
+   each separated by a 1px rule and each on its own ground, with the RESULT LIST scrolling inside a
+   frame that does not. A page that scrolls as a whole cannot keep a column head or a status bar
+   where the analyst put them, and a log reader is read by scanning one column down hundreds of rows.
+
+   The facet rail is on the RIGHT, which is also its DOM order — the answer comes first for a screen
+   reader too. */
+.page.search {
+  height: calc(100vh - var(--header-h));
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  animation: none;   /* the frame does not fade in; only what is inside it changes */
+}
+
+/* ── the row you act in ── */
+.qbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px var(--page-pad);
+  border-bottom: 1px solid var(--border-2);
+  background: var(--bg);
+}
+.qbar--sub {
+  gap: 10px;
+  min-height: var(--toolbar-h);
+  padding: 0 var(--page-pad);
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.qbar__gap {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The thing you type in. It holds the caret and nothing else — hit counts and engine badges live in
+   the status bar at the bottom, where they cannot crowd it. */
+.qbox {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: var(--field-h);
+  padding: 0 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-md);
+  transition: border-color var(--t-fast);
+}
+.qbox:hover {
+  border-color: var(--border-hover);
+}
+.qbox:focus-within {
+  border-color: var(--accent);
+}
+/* A 12px ring at the nav glyphs' weight — the template's own search mark. */
+.qbox__icon {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid var(--muted-2);
+  border-radius: 50%;
+}
+.qbox:focus-within .qbox__icon {
+  border-color: var(--accent);
+}
+.qbox input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  box-shadow: none;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xl);
+  letter-spacing: -0.01em;
+}
+.qbox input:focus-visible {
+  box-shadow: none;
+}
+.qbox input::placeholder {
+  color: var(--muted-3);
+}
+.qbox__clear {
+  flex: none;
+  padding: 0 4px;
+  background: transparent;
+  color: var(--muted-2);
+  font-size: var(--fs-3xl);
+  line-height: 1;
+  cursor: pointer;
+}
+.qbox__clear:hover {
+  color: var(--text);
+}
+
+/* A secondary control on the scoping strip: shorter than a toolbar button, because the strip is
+   34px and a 30px button in it leaves no air. */
+.qbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-4);
+  font-size: var(--fs-md);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--t-fast), border-color var(--t-fast);
+}
+.qbtn:hover,
+.qbtn.open {
+  color: var(--text);
+  border-color: var(--border-hover);
+}
+.qbtn svg {
+  width: 11px;
+  height: 11px;
+  flex: none;
+  opacity: 0.85;
+}
+.qbtn__caret {
+  width: 9px;
+  height: 9px;
+  color: var(--muted-3);
+  transform: rotate(0deg);
+}
+
+/* ── which logs the query reads ── */
+.srcpick {
+  position: relative;
+  flex: none;
+}
+.srcpick__btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--field-h);
+  padding: 0 11px;
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-md);
+  background: var(--panel-2);
+  cursor: pointer;
+  transition: border-color var(--t-fast);
+  white-space: nowrap;
+}
+.srcpick__btn:hover,
+.srcpick__btn.open {
+  border-color: var(--border-hover);
+}
+.srcpick__btn.on {
+  border-color: var(--accent-deep);
+}
+.srcpick__k {
+  font-size: var(--fs-md);
+  color: var(--muted);
+}
+.srcpick__v {
+  font-size: var(--fs-md);
+  color: var(--text);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.srcpick__btn.on .srcpick__v {
+  color: var(--accent-soft);
+}
+.srcpick__caret {
+  width: 9px;
+  height: 9px;
+  color: var(--muted-3);
+}
+.srcpick__menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  width: 340px;
+  max-width: 80vw;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.srcpick__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: var(--toolbar-h);
+  padding: 0 12px;
+  background: var(--panel-inset);
+  border-bottom: 1px solid var(--border);
+}
+.srcpick__filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-2);
+  color: var(--muted-2);
+}
+.srcpick__filter input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  font-size: var(--fs-md);
+}
+.srcpick__list {
+  max-height: 320px;
+  overflow-y: auto;
+}
+.srcpick__row {
+  display: grid;
+  grid-template-columns: 14px 1fr auto;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 12px;
+  font-size: var(--fs-md);
+  color: var(--text-4);
+  cursor: pointer;
+  border-bottom: 1px solid var(--row-line);
+}
+.srcpick__row:last-child {
+  border-bottom: 0;
+}
+.srcpick__row:hover {
+  background: var(--row-hover);
+  color: var(--text);
+}
+.srcpick__row.on {
+  background: var(--selected);
+  color: var(--text);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.srcpick__row.bad span:first-of-type {
+  color: var(--bad);
+}
+.srcpick__n {
+  font-size: var(--fs-xxs);
+  color: var(--muted-3);
+}
+.srcpick__empty,
+.srcpick__foot {
+  padding: 10px 12px;
+  font-size: var(--fs-sm);
+  color: var(--muted-3);
+}
+.srcpick__foot {
+  border-top: 1px solid var(--border-2);
+  background: var(--panel-inset);
+}
+
+/* ── the histogram ── */
+.histo {
+  flex: none;
+  padding: 14px var(--page-pad) 8px;
+  border-bottom: 1px solid var(--border-2);
+}
+.histo__head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.histo__figs {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.histo__total {
+  font-size: var(--fs-stat);
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  color: var(--text-brightest);
+}
+.histo__label {
+  font-size: var(--fs-base);
+  color: var(--muted);
+}
+/* A rate, not a level: it is a proportion of the matches, so it is stated as one and tinted with the
+   colour of what it counts rather than shouting in a full severity tag. */
+.histo__rate {
+  font-size: var(--fs-sm);
+  color: var(--bad);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-sm);
+  padding: 1px 6px;
+}
+.histo__undated {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--muted-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 1px 6px;
+  cursor: help;
+}
+.histo__legend {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: var(--fs-sm);
+  color: var(--muted-2);
+}
+.histo__key {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.histo__key i {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-xs);
+}
+.histo__bucket {
+  font-family: var(--font-mono);
+  color: var(--muted-3);
+}
+.histo__plot {
+  position: relative;
+  height: 118px;
+}
+.histo__plot svg {
+  width: 100%;
+  height: 118px;
+  display: block;
+  overflow: visible;
+}
+.histo__grid {
+  stroke: var(--grid-line);
+  stroke-width: 1;
+}
+.histo__axis {
+  stroke: var(--border-strong);
+  stroke-width: 1;
+}
+/* The scale sits ON the plot, on the page's own ground, so it needs no gutter of its own. */
+.histo__y {
+  position: absolute;
+  left: 0;
+  top: -5px;
+  height: 124px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  pointer-events: none;
+  font-size: var(--fs-xxs);
+  color: var(--muted-3);
+}
+.histo__y span {
+  background: var(--bg);
+  padding-right: 4px;
+}
+.histo__empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--fs-md);
+  color: var(--muted-3);
+}
+.histo__ticks {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 7px;
+  font-size: var(--fs-xxs);
+  color: var(--muted-3);
+}
+/* A partial read is never presented as the whole picture — same rule as a floored count. */
+.histo__partial {
+  margin-top: 8px;
+  font-size: var(--fs-sm);
+  color: var(--warn);
+}
+
+/* ── the body: answer, then facets ── */
+.search-layout {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+}
+.search__main {
+  flex: 1;
+  order: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.search__notloaded {
+  flex: none;
+  margin: 12px var(--page-pad) 0;
+}
+.search__results {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* The list scrolls; the head above it and the status bar below it do not. */
+.search__rows {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.search__more {
+  display: flex;
+  justify-content: center;
+  padding: 18px;
+}
+.search__statusbar {
+  flex: none;
+  border-top: 1px solid var(--border);
+}
+.search__floor {
+  cursor: help;
+}
+.search__error {
+  padding: var(--page-pad);
+}
+
+/* The result table is FLUSH here, not a card: it is the screen's content, and a rounded box inside a
+   frame that already has rules is a box in a box. */
+.search .table__head,
+.search .table__row {
+  border-radius: 0;
+}
+.search .table__head {
+  flex: none;
+  border-top: 0;
+}
+.cell-ts {
+  color: var(--muted);
+}
+.cell-msg {
+  color: var(--text-2);
+  font-size: var(--fs-base);
+  letter-spacing: -0.01em;
+}
+.cell-small {
+  font-size: var(--fs-sm);
+}
+/* ── the result row ──
+   ONE LINE. A log reader is scanned down a column over hundreds of rows, and this design's row is a
+   single line of it — so the file cell states `name · parser` inline rather than stacking two lines,
+   which was costing 44px of a 67px row and made eight results fill the viewport where twenty fit.
+   Nothing is hidden to buy that: the parser family is still on the row, in a dimmer colour, and the
+   full "file · parsed as source" sentence is still the cell's title. */
+.search .res__file,
+.search .res__family {
+  display: inline;
+  line-height: 1.4;
+}
+.search .res__family {
+  color: var(--muted-3);
+  font-size: var(--fs-xxs);
+}
+.search .res__family::before {
+  content: ' · ';
+  color: var(--muted-4);
+}
+/* The filter pins sit OVER the end of the cell rather than in its flow, so a cell that has them is
+   exactly as tall as one that does not. They stay dimmed, never hidden. */
+.search .res__cell .pins {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  margin-left: 0;
+  background: linear-gradient(90deg, transparent, var(--bg) 30%);
+  padding-left: 10px;
+}
+.search .table__row:hover .res__cell .pins {
+  background: linear-gradient(90deg, transparent, var(--row-hover) 30%);
+}
+/* The row's own controls set its height: a 26px button in a 35px row is what made the list 43px a
+   row and fitted twelve results where the template fits twenty. They are 22px here — still a real
+   touch target, and still dimmed rather than hidden. */
+.search .row-actions {
+  opacity: 0.6;
+  transition: opacity var(--t-fast);
+  gap: 4px;
+}
+.search .row-actions .btn {
+  height: 22px;
+  min-width: 22px;
+  padding: 0 5px;
+}
+.search .row-actions .btn.btn--icon {
+  width: 22px;
+}
+.search .table__row:hover .row-actions,
+.search .table__row:focus-within .row-actions {
+  opacity: 1;
+}
+/* the hover COLOUR is `.table__row.clickable:hover` in components.css and is not restated here —
+   this only keeps the severity rail visible through the ring */
+.search .table__row.results-grid:hover {
+  box-shadow: inset 2px 0 0 var(--row-sev, transparent), inset 0 0 0 1px var(--border-strong);
+}
+/* The row's severity dot, centred in its own 22px column — where the template opens every log row. */
+.res__dot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+.res__dot > i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  display: block;
+}
+.results-grid {
+  grid-template-columns: 22px 150px 84px 1fr 84px;
+}
+
+.search__note {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  padding: 10px var(--page-pad);
+  border-top: 1px solid var(--border-2);
+  font-size: var(--fs-sm);
+  color: var(--muted-3);
+}
+.search__note-syntax b {
+  font-weight: 600;
+  color: var(--muted);
+  margin-right: 4px;
+}
+
+/* ── the time-range popover ── */
+.search__range {
+  position: relative;
+  flex: none;
+}
+.range-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  width: 320px;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.range-pop__presets {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+.range-pop__custom {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+/* the "+N more" chip is a control, not a filter — it must not read as a selectable source */
+.chip.chip--more {
+  border-style: dashed;
+  color: var(--muted-2);
+}
+.chip.chip--more:hover {
+  color: var(--text);
+}
+
+/* ═══════ TIMELINE ═══════ */
+.stats {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+.stat {
+  flex: 1;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  padding: 14px 16px;
+  min-width: 0;
+}
+.stat__value {
+  font-family: var(--font-mono);
+  font-size: var(--fs-stat);
+  font-weight: 700;
+  color: var(--text-bright);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stat__label {
+  margin-top: 3px;
+  font-size: var(--fs-md);
+  color: var(--muted-2);
+}
+.timeline {
+  display: flex;
+  flex-direction: column;
+}
+.cluster {
+  display: grid;
+  grid-template-columns: 118px 1fr;
+  gap: 0;
+}
+.cluster__time {
+  padding: 0 16px 0 0;
+  text-align: right;
+}
+.cluster__start {
+  font-family: var(--font-mono);
+  font-size: var(--fs-base);
+  color: var(--text-bright);
+}
+.cluster__span {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--muted-3);
+}
+.cluster__body {
+  border-left: 1px solid var(--scroll-thumb);
+  padding: 0 0 26px 22px;
+  position: relative;
+}
+.cluster:last-child .cluster__body {
+  padding-bottom: 6px;
+}
+.cluster__dot {
+  position: absolute;
+  left: -5px;
+  top: 4px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+.cluster__head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+.cluster__title {
+  font-size: var(--fs-3xl);
+  font-weight: 600;
+  color: var(--text-bright);
+}
+.cluster__tag {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xxs);
+  padding: 2px 6px;
+  border: 1px solid currentColor;
+}
+.cluster__meta {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--muted-3);
+}
+.cluster__why {
+  margin-top: 4px;
+  font-size: var(--fs-base);
+  color: var(--text-4);
+  line-height: 1.55;
+  max-width: 760px;
+  text-wrap: pretty;
+}
+.cluster__events {
+  margin-top: 11px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+}
+.cluster-ev {
+  display: grid;
+  grid-template-columns: 78px 104px 1fr 96px;
+  gap: 12px;
+  padding: 8px 13px;
+  border-bottom: 1px solid var(--border-2);
+  align-items: center;
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+  transition: background var(--t-fast);
+}
+.cluster-ev:last-child {
+  border-bottom: 0;
+}
+.cluster-ev:hover,
+.cluster-ev:focus-visible {
+  background: var(--hover);
+}
+.cluster-ev > * {
+  min-width: 0;
+}
+.cluster__more {
+  padding: 8px 13px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  border-top: 1px solid var(--border-2);
+  width: 100%;
+  text-align: left;
+  transition: color var(--t-fast), background var(--t-fast);
+}
+.cluster__more:hover {
+  color: var(--accent);
+  background: var(--hover);
+}
+.cluster__actions {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+}
+
+/* ═══════ SEARCH / TIMELINE / REPORT polish ═══════ */
+.search__input,
+.search__range-btn {
+  border-radius: var(--radius-md);
+}
+.range-pop {
+  border-radius: var(--radius-lg);
+}
+.results-grid .cell-mono {
+  font-variant-numeric: tabular-nums;
+}
+.stat {
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+.cluster__events {
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.cluster__body {
+  border-left: 3px solid var(--cluster-sev, var(--scroll-thumb));
+  padding-left: 20px;
+}
+.cluster__dot {
+  left: -7px;
+  top: 3px;
+  width: 11px;
+  height: 11px;
+  border: 2px solid var(--bg);
+}
+.cluster__card {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: var(--radius-lg);
+  padding: 14px 16px;
+  box-shadow: var(--shadow-sm);
+}
+.cluster__tag {
+  border-radius: var(--radius-xs);
+}
+.report__paper,
+.report__ai {
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+.report__paper {
+  padding: 32px 36px;
+}
+.report__title {
+  letter-spacing: -0.01em;
+  font-size: 26px;
+}
+.report__summary {
+  font-size: var(--fs-3xl);
+  color: var(--text-2);
+  line-height: 1.75;
+}
+.report__section {
+  margin-top: 30px;
+  padding-top: 22px;
+  border-top: 1px solid var(--border-2);
+}
+.report__section .eyebrow {
+  color: var(--accent);
+}
+.ioc {
+  border-radius: var(--radius-sm);
+}
+.detail__head {
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+}
+.raw,
+.sample {
+  border-radius: var(--radius-md);
+}
+.detection {
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+.dropzone__actions .btn {
+  white-space: nowrap;
+}
+
+.detail__backrow { display: flex; gap: 6px; margin-bottom: 12px; }

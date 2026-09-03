@@ -401,6 +401,31 @@ export interface EventsPage {
   totalExact?: boolean;
 }
 
+/** One column of the histogram above the result list. `levels` is indexed by `EventsHistogram.levels`. */
+export interface HistogramBucket { start: string; count: number; levels: number[] }
+/** `GET /api/events/histogram` — when the events matching THIS query happened, split by severity.
+ *
+ *  It goes through the same search path as the result list, so the two can never disagree about what
+ *  matches. Two fields carry what it will not claim: `exact` is false when the backend stopped
+ *  reading matches before the end (the shape is then drawn from the first `counted` of them, and the
+ *  screen says so), and `withoutTimestamp` counts events that have no parsed time at all — a raw
+ *  source has none, and folding those into a bucket would draw a spike where the evidence is silent. */
+export interface EventsHistogram {
+  buckets: HistogramBucket[];
+  levels: Severity[];
+  bucketSec: number;
+  start: string | null;
+  end: string | null;
+  total: number;
+  counted: number;
+  exact: boolean;
+  withoutTimestamp: number;
+  peak: number;
+  engine?: 'cuda' | 'vector' | 'cpu';
+  tookMs?: number;
+  index?: SearchIndexState;
+}
+
 export interface TimelineStats { window: string; clusters: number; entities: number; egress: string }
 export interface Timeline { stats: TimelineStats; clusters: Cluster[]; status?: DerivedState }
 

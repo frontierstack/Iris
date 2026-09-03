@@ -29,27 +29,37 @@ const DEFAULT_LIMIT = 50;
 const DEFAULT_MAX_EDGES = 20_000;   // matches routers/graph.DEFAULT_MAX_EDGES
 
 /* ── Visual vocabulary for typed nodes ─────────────────────────────────────────
-   One short glyph and one hue per entity type, so a glance tells an IP from a user
-   from a file. Colours are theme tokens where they exist; the rest are muted so
-   severity (ring) still reads on top. */
+   One short glyph and one hue per entity type, so a glance tells an IP from a user from a file.
+   This IS the canvas palette: the hue is the node's ring, its glyph, the swatch on its filter chip
+   and the type word in its tooltip, so all four say the same thing about the same entity.
+
+   A theme TOKEN is used wherever one carries the meaning — `var(--accent)` for an address, which is
+   what the accent already means everywhere else in the app, and `var(--muted)` for the
+   infrastructure types the node ranking already demotes; graphPaint.hue() resolves those per theme.
+   The rest are literal, because telling the entity types apart needs a hue each and the palette
+   declares five level colours plus one accent: borrowing a level colour would make an untagged
+   domain indistinguishable from a node carrying a medium detection, since the ring states severity
+   when there is one and type when there is not. They are tuned to the template's own register
+   instead — the desaturated, mid-value family the level colours sit in, and no green (§1: there is
+   no green in this palette). */
 const TYPE_META: Record<EntityType, { glyph: string; label: string; hue: string }> = {
   ip:       { glyph: 'IP', label: 'IP address',  hue: 'var(--accent)' },
-  user:     { glyph: 'U',  label: 'account',     hue: '#c9a3ff' },
-  host:     { glyph: 'H',  label: 'host',        hue: '#7fb2ff' },
-  process:  { glyph: 'P',  label: 'process',     hue: '#ffb86b' },
-  pid:      { glyph: '#',  label: 'process id',  hue: '#f0a56b' },
-  file:     { glyph: 'F',  label: 'file',        hue: '#8fe3c8' },
-  hash:     { glyph: '⌗',  label: 'hash',        hue: '#8fe3c8' },
-  domain:   { glyph: 'D',  label: 'domain',      hue: '#f7d774' },
-  url:      { glyph: 'L',  label: 'url',         hue: '#f7d774' },
-  port:     { glyph: ':',  label: 'port',        hue: '#9aa8b5' },
-  email:    { glyph: '@',  label: 'email',       hue: '#c9a3ff' },
-  key:      { glyph: 'K',  label: 'credential',  hue: '#ff8fa3' },
-  session:  { glyph: 'S',  label: 'session',     hue: '#9aa8b5' },
-  pod:      { glyph: 'Po', label: 'pod',         hue: '#7fb2ff' },
-  service:  { glyph: 'Sv', label: 'service',     hue: '#7fb2ff' },
-  registry: { glyph: 'R',  label: 'registry',    hue: '#8fe3c8' },
-  other:    { glyph: '•',  label: 'other',       hue: '#9aa8b5' },
+  user:     { glyph: 'U',  label: 'account',     hue: '#a58fd8' },
+  host:     { glyph: 'H',  label: 'host',        hue: '#6f9fd8' },
+  process:  { glyph: 'P',  label: 'process',     hue: '#d8974f' },
+  pid:      { glyph: '#',  label: 'process id',  hue: '#c98a5f' },
+  file:     { glyph: 'F',  label: 'file',        hue: '#5fb8a8' },
+  hash:     { glyph: '⌗',  label: 'hash',        hue: '#5fb8a8' },
+  domain:   { glyph: 'D',  label: 'domain',      hue: '#cbb96e' },
+  url:      { glyph: 'L',  label: 'url',         hue: '#cbb96e' },
+  port:     { glyph: ':',  label: 'port',        hue: 'var(--muted)' },
+  email:    { glyph: '@',  label: 'email',       hue: '#a58fd8' },
+  key:      { glyph: 'K',  label: 'credential',  hue: '#d8707a' },
+  session:  { glyph: 'S',  label: 'session',     hue: 'var(--muted)' },
+  pod:      { glyph: 'Po', label: 'pod',         hue: '#6f9fd8' },
+  service:  { glyph: 'Sv', label: 'service',     hue: '#6f9fd8' },
+  registry: { glyph: 'R',  label: 'registry',    hue: '#5fb8a8' },
+  other:    { glyph: '•',  label: 'other',       hue: 'var(--muted)' },
 };
 const REL_LABEL: Record<Relation, string> = {
   auth_from: 'authenticated from', connected_to: 'connected to', ran: 'ran', spawned: 'spawned', wrote: 'wrote',
@@ -830,13 +840,16 @@ export function GraphScreen() {
           min link events <input type="number" min={1} value={minCount} onChange={(e) => setMinCount(Math.max(1, Number(e.target.value) || 1))} aria-describedby="graph-mincount-help" />
         </label>
         <span id="graph-mincount-help" className="graph__hint">links seen ≥ N times</span>
+        <span className="graph__filters-sep" />
         <label className="graph__num" title="How CONNECTED an entity is. Hides every node with fewer than this many links in the graph being shown — the lone leaves hanging off a busy host. A different question from min link events: an IP seen once, linked to one busy host, survives any link-event threshold but not this one.">
           min connections <input type="number" min={1} max={100} value={minDegree} onChange={(e) => setMinDegree(Math.max(1, Math.min(100, Number(e.target.value) || 1)))} aria-describedby="graph-mindeg-help" />
         </label>
         <span id="graph-mindeg-help" className="graph__hint">
           nodes with ≥ N links{minDegree > 1 && stats?.hiddenByDegree ? ` · ${fmtInt(stats.hiddenByDegree)} hidden` : ''}
         </span>
+        <span className="graph__filters-sep" />
         <label className="graph__num" title="Caps how many nodes are drawn, ranked by detections, then links, then events.">max nodes <input type="number" min={10} max={2000} step={50} value={limit} onChange={(e) => setLimit(Math.min(2000, Math.max(10, Number(e.target.value) || DEFAULT_LIMIT)))} /></label>
+        <span className="graph__filters-sep" />
         <label className="graph__num" title="Keeps the strongest N links by event count; analyst and AI links are never dropped. Fewer links draw faster.">max links <input type="number" min={100} max={200000} step={1000} value={maxEdges} onChange={(e) => setMaxEdges(Math.min(200000, Math.max(100, Number(e.target.value) || DEFAULT_MAX_EDGES)))} /></label>
         {focus && (
           <span className="graph__focus">
@@ -949,7 +962,7 @@ export function GraphScreen() {
 
         <div className="graph__legend">
           <span className="graph__legend-chip"><i className="graph__legend-dot" style={{ background: 'var(--node-ring)' }} /> size = events</span>
-          <span className="graph__legend-chip"><i className="graph__legend-line" /> arrow = relation</span>
+          <span className="graph__legend-chip"><i className="graph__legend-line" /> line = relation</span>
           <span className="graph__legend-chip"><i className="graph__legend-line graph__legend-line--bad" /> failed / denied</span>
           <span className="graph__legend-chip"><i className="graph__legend-line graph__legend-line--ai" /> AI / analyst link</span>
           <span className="graph__legend-chip"><i className="graph__legend-dot graph__legend-dot--sev" /> ring = detection severity</span>

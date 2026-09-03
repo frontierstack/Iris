@@ -1,17 +1,28 @@
-/* ═══════ ENTITY GRAPH v2 — query bar, typed filters, typed edges, AI review, path finder ═══════
-   The canvas/side-panel skeleton (.graph, .graph__canvas, .graph__side, .node, .edge …) is still in
-   screens.css. This file adds the v2 chrome on top and restyles edges/nodes for typed data. */
+/* ═══════ ENTITY GRAPH — the chrome around the canvas ═══════
+   Query bar, filter panel, source picker, focus chip, path finder, AI review, and the side-panel
+   blocks. The canvas frame and the panel's own primitives are in styles/screens/graph.css, which is
+   imported BEFORE this file.
 
-/* the page now stacks: query bar / filters / (canvas + side) */
+   The composition the template asks for, applied here:
+     * the row you act in is a TOOLBAR — scope, the thing you type in (flex: 1), then the actions;
+     * the filter row is a PANEL — its own ground, a 1px rule, 6px radius;
+     * every count is a CHIP at 5px, never a capsule;
+     * every label surface is the ONE label treatment (.lbl in base.css): the UI face, 10-10.5px,
+       weight 600, uppercase, letter-spaced, in --muted-2 / --muted-3 on its own ground;
+     * every colour is a token. */
+
 .page.graph {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
+/* Canvas on the left, the entity inspector on the right. NOT --rail-w: that metric is the facet
+   rail's, measured for a column of short faceted values, and this panel carries prose (a relation's
+   `why`, the AI narrative) plus a three-part relation row. 340 is what that content needs. */
 .graph__body {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 340px;
-  gap: 14px;
+  gap: 12px;
   min-height: 0;
   flex: 1;
 }
@@ -19,33 +30,35 @@
   .graph__body { grid-template-columns: 1fr; }
 }
 
-/* ── query bar ── */
+/* ── the toolbar ── */
 .graph__querybar {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex-wrap: wrap;
 }
+/* The thing you type in. --field-h so it lines up with .btn--lg and with the query box on every
+   other screen; --panel-2 because that is the ground every control in this design sits on. */
 .graph__q {
   flex: 1;
   min-width: 260px;
   display: flex;
   align-items: center;
-  gap: 9px;
-  height: 40px;
-  padding: 0 12px;
-  border: 1px solid var(--border-strong);
-  background: var(--panel);
+  gap: 8px;
+  height: var(--field-h);
+  padding: 0 11px;
+  border: 1px solid var(--border-input);
+  background: var(--panel-2);
   border-radius: var(--radius-md);
   color: var(--muted-2);
-  transition: border-color var(--t-fast), background var(--t-fast), box-shadow var(--t-fast);
+  transition: border-color var(--t-fast), box-shadow var(--t-fast);
 }
 .graph__q:hover { border-color: var(--border-hover); }
 .graph__q:focus-within {
-  border-color: var(--accent-border);
-  background: var(--panel-2);
+  border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-glow);
 }
+.graph__q svg { flex: none; }
 .graph__q input {
   flex: 1;
   border: 0;
@@ -67,23 +80,27 @@
   line-height: 1;
 }
 .graph__q-clear:hover { color: var(--text-bright); }
-/* The node/link count is the graph's "how much am I looking at" — a chip, so it reads as state rather
-   than as a stray sentence in the toolbar. */
+
+/* "How much am I looking at" — state, so a chip, on the inset ground the table heads use. */
 .graph__count {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   padding: 5px 10px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-md);
   background: var(--panel-inset);
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: var(--fs-xs);
   color: var(--muted);
   white-space: nowrap;
 }
+/* A graph that is missing links it does not mention is the silent-omission bug, so the disclosure
+   is stated inside the count and is a step brighter than the count around it. */
+.graph__hidden { color: var(--text-4); }
 
-/* ── filter row ── */
+/* ── the filter panel ── */
 .graph__filters {
   display: flex;
   align-items: center;
@@ -91,67 +108,89 @@
   flex-wrap: wrap;
   padding: 10px 12px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   background: var(--panel);
 }
 .graph__filters-sep {
   width: 1px;
-  height: 16px;
+  height: 18px;
   background: var(--border);
   margin: 0 6px;
 }
+/* The prose that explains a numeric control belongs to the control before it, not to the label
+   after it — without that it reads as one run: "links seen >= N times MIN CONNECTIONS". It is set
+   quieter than a label for the same reason, and the rules between the groups do the rest. */
 .chip--type .chip__swatch {
   display: inline-block;
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: var(--type-hue);
-  margin-right: 5px;
   vertical-align: 0;
 }
 .chip--type.on {
   border-color: color-mix(in srgb, var(--type-hue) 55%, transparent);
   background: color-mix(in srgb, var(--type-hue) 12%, transparent);
 }
+
+/* A numeric filter: the ONE label treatment, then the field. Same treatment as the "Types" and
+   "Relations" group labels beside them, so the panel states its groups one way and not three. */
 .graph__num {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  font-family: var(--font-mono);
+  gap: 7px;
+  font-family: var(--font-ui);
   font-size: var(--fs-xxs);
-  color: var(--muted-3);
+  font-weight: 600;
+  letter-spacing: var(--ls-head);
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  color: var(--muted-3);
+  white-space: nowrap;
 }
 .graph__num input {
-  width: 58px;
-  padding: 2px 6px;
-  font-size: var(--fs-xs);
+  width: 66px;
+  height: 26px;
+  padding: 0 7px;
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-xs);
+  font-weight: 400;
+  letter-spacing: 0;
+  text-align: right;
 }
+/* What the number above actually means. The quietest text in the panel, in the mono face. */
 .graph__hint {
+  font-family: var(--font-mono);
   font-size: var(--fs-xxs);
   color: var(--muted-3);
-  font-family: var(--font-mono);
+  white-space: nowrap;
   margin-left: -2px;
 }
+
+/* The pair a graph finding arrived about. Naming only the focus reported half of the link that was
+   clicked, so when a flagged pair is on screen this chip states the pair. */
 .graph__focus {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: var(--fs-xs);
-  color: var(--muted);
-  padding: 2px 8px;
+  padding: 4px 9px;
   border: 1px solid var(--accent-border);
+  border-radius: var(--radius-md);
   background: var(--accent-bg);
-  border-radius: var(--radius-pill);
+  font-size: var(--fs-xs);
+  color: var(--text-4);
 }
-.graph__focus b { color: var(--text-bright); font-family: var(--font-mono); font-weight: 500; }
+.graph__focus b {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  color: var(--text-bright);
+}
+.graph__focus-arrow { color: var(--accent); margin: 0 2px; }
 
 /* ── the canvas the graph is painted into ──
-   Replaces the old .graph__svg. One element, sized in CSS pixels with the backing store scaled by
-   devicePixelRatio in graphPaint.ts. Pointer events belong to the CONTAINER (.graph__canvas), which owns
-   pan/zoom/drag and does its own hit testing, so the canvas itself never takes a hit. */
+   One element, sized in CSS pixels with the backing store scaled by devicePixelRatio in
+   graphPaint.ts. Pointer events belong to the CONTAINER (.graph__canvas), which owns pan/zoom/drag
+   and does its own hit testing, so the canvas itself never takes a hit. */
 .graph__gl {
   position: absolute;
   inset: 0;
@@ -159,8 +198,9 @@
   pointer-events: none;
 }
 
-/* Off-screen but focusable list of the drawn nodes: a <canvas> is opaque to assistive tech and to Tab,
-   so the entities it shows are also real buttons here. Not `display:none` — that would remove them. */
+/* Off-screen but focusable list of the drawn nodes: a <canvas> is opaque to assistive tech and to
+   Tab, so the entities it shows are also real buttons here. Not `display: none` — that would
+   remove them. */
 .graph__a11y {
   position: absolute;
   width: 1px;
@@ -182,42 +222,26 @@
   clip-path: none;
   z-index: 5;
   background: var(--panel);
-  border: 1px solid var(--accent-border);
+  border: 1px solid var(--accent);
   border-radius: var(--radius-sm);
-  padding: 4px 8px;
+  padding: 5px 9px;
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
   color: var(--text-bright);
 }
 
-/* ── typed edges ── */
-.edge { stroke: var(--edge); transition: opacity var(--t-fast); }
-.edge--on { stroke: var(--accent); }
-.edge--bad { stroke: var(--sev-high); }
-.edge--bad.edge--on { stroke: var(--sev-critical); }
-.edge--ai { stroke-dasharray: 5 4; stroke: var(--accent); }
-.edge--path { stroke: var(--accent); stroke-dasharray: none; filter: url(#g-glow-soft); }
-.edge--dim { opacity: 0.12 !important; }
-/* the arrowhead inherits the path stroke via context-stroke; Firefox < 120 falls back to accent */
-#g-arrow path { fill: var(--edge); }
-
-/* ── nodes: focus / path / in-case ── */
-.node--path .node__disc { stroke-width: 2.4; }
-.node--incase .node__label { fill: var(--text-bright); }
-.node__glyph { font-family: var(--font-mono); font-weight: 600; letter-spacing: -0.02em; pointer-events: none; }
-.node__kind { font-family: var(--font-mono); font-size: 8.5px; fill: var(--muted-2); pointer-events: none; }
-
 /* ── tooltip / legend additions ── */
 .graph__tip-type {
-  font-family: var(--font-mono);
+  font-family: var(--font-ui);
   font-size: var(--fs-xxs);
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: var(--ls-head);
   margin-right: 6px;
 }
 .graph__tip-hint {
-  margin-top: 6px;
-  padding-top: 5px;
+  margin-top: 7px;
+  padding-top: 6px;
   border-top: 1px solid var(--border-2);
   font-size: var(--fs-xxs);
   color: var(--muted-3);
@@ -226,7 +250,7 @@
 .graph__legend-line--ai { background: repeating-linear-gradient(90deg, var(--accent) 0 4px, transparent 4px 7px); }
 .graph__legend-dot--sev { background: conic-gradient(var(--sev-critical), var(--sev-high), var(--sev-medium), var(--sev-critical)); }
 
-/* ── side panel: entity ── */
+/* ── side panel: the selected entity ── */
 .graph__ent-glyph {
   border: 1px solid;
   border-radius: var(--radius-sm);
@@ -240,17 +264,44 @@
   font-size: var(--fs-sm);
   flex: 0 0 auto;
 }
+/* "473 detections · max high" is a disclosure, not a badge: the per-rule breakdown opens under it. */
 .graph__ent-det {
-  margin-top: 8px;
-  display: inline-block;
-  padding: 2px 8px;
+  margin-top: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
   border: 1px solid;
-  border-radius: var(--radius-pill);
-  font-family: var(--font-mono);
-  font-size: var(--fs-xxs);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  border-radius: var(--radius-md);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  line-height: 1.5;
 }
+.graph__ent-det--btn { cursor: pointer; background: transparent; font: inherit; }
+.graph__ent-det--btn:hover,
+.graph__ent-det--btn.on { background: color-mix(in srgb, currentColor 10%, transparent); }
+.graph__det-list { margin-top: 8px; display: flex; flex-direction: column; gap: 3px; }
+.graph__det-row {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-inset);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--t-fast), border-color var(--t-fast);
+}
+.graph__det-row:hover { border-color: var(--border-hover); background: var(--panel-2); }
+.graph__det-dot { width: 8px; height: 8px; border-radius: 50%; }
+.graph__det-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.graph__det-id { font-family: var(--font-mono); color: var(--muted-2); font-size: var(--fs-sm); }
+.graph__det-n { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--text-2); }
 .graph__ent-actions {
   margin-top: 12px;
   display: flex;
@@ -267,12 +318,12 @@
   border-radius: var(--radius-md);
   font-size: var(--fs-sm);
 }
-.graph__path-chain { line-height: 1.9; }
+.graph__path-chain { line-height: 2; }
 .graph__path-node {
-  background: var(--panel);
+  background: var(--panel-2);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
-  padding: 1px 6px;
+  padding: 2px 6px;
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
   color: var(--text-bright);
@@ -290,7 +341,8 @@
   flex: 0 0 auto;
 }
 .link-item--proposed {
-  border: 1px dashed var(--accent-border);
+  border-color: var(--accent-border);
+  border-style: dashed;
   background: var(--accent-bg);
 }
 .link-item--ai .link-item__name::after {
@@ -298,7 +350,7 @@
   color: var(--accent);
   font-size: 0.8em;
 }
-.link-item__actions { display: flex; gap: 6px; margin-top: 6px; }
+.link-item__actions { display: flex; gap: 6px; margin-top: 8px; }
 .link-item__remove {
   margin-left: 8px;
   color: var(--muted-3);
@@ -316,7 +368,7 @@ button.link-item__name {
 }
 button.link-item__name:hover { color: var(--accent); }
 
-/* ── AI review panel ── */
+/* ── AI review ── */
 .graph__ai { border-color: var(--accent-border); }
 .graph__ai-think {
   font-family: var(--font-mono);
@@ -339,12 +391,12 @@ button.link-item__name:hover { color: var(--accent); }
   border: 1px solid var(--danger-border);
   background: var(--danger-bg);
   color: var(--bad);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   font-size: var(--fs-sm);
 }
 
 /* ── recent events for the selected node ── */
-.graph__tl { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+.graph__tl { display: flex; flex-direction: column; gap: 1px; margin-top: 4px; }
 .graph__tl-row {
   display: grid;
   grid-template-columns: 62px 1fr;
@@ -353,74 +405,28 @@ button.link-item__name:hover { color: var(--accent); }
   text-align: left;
   background: transparent;
   cursor: pointer;
-  padding: 3px 4px;
+  padding: 4px;
   border-radius: var(--radius-sm);
   font-size: var(--fs-xs);
 }
-.graph__tl-row:hover { background: var(--hover); }
+.graph__tl-row:hover { background: var(--row-hover); }
 .graph__tl-msg {
   color: var(--text-3);
   border-left: 2px solid;
-  padding-left: 6px;
+  padding-left: 7px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* ── side panel: each block reads as a card ───────────────────────────────────
-   Selected entity / relations / recent events / AI review were four stacked lists separated only by a
-   gap, so on a busy graph the panel read as one column of text. Panels, with their own padding. */
-.graph__side > .panel,
-.graph__side > .graph__panel {
-  padding: 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--panel);
-}
+/* ── side panel: each block reads as a card ──
+   Selected entity / relations / recent events / AI review were four stacked lists separated only by
+   a gap, so on a busy graph the panel read as one column of text. They are .panel cards now and
+   take that class's own padding, ground, rule and radius — nothing is restated here. */
 .graph__side .eyebrow { color: var(--muted-2); }
-.graph__side .link-list { display: flex; flex-direction: column; gap: 4px; }
-.graph__side .link-item {
-  padding: 7px 8px;
-  border-radius: var(--radius-sm);
-  border: 1px solid transparent;
-  transition: background var(--t-fast), border-color var(--t-fast);
-}
-.graph__side .link-item:hover {
-  background: var(--panel-inset);
-  border-color: var(--border);
-}
-.graph__side .kv-list { gap: 6px; }
+.graph__side .kv-list { gap: 7px; }
 
-/* the number inputs in the filter row: same height and rhythm as the chips beside them */
-.graph__num {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--fs-xs);
-  color: var(--muted);
-  white-space: nowrap;
-}
-.graph__num input {
-  width: 68px;
-  height: 26px;
-  padding: 0 6px;
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  text-align: right;
-}
-.graph__focus {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
-  border: 1px solid var(--accent-border);
-  border-radius: var(--radius-pill);
-  background: var(--accent-bg);
-  font-size: var(--fs-xs);
-  color: var(--text-2);
-}
-
-/* ── source selector ──────────────────────────────────────────────────────────
+/* ── source selector ──
    The graph is drawn from the log files you pick, and nothing is picked by default: every source at
    once is a hairball, and the analyst's first question about an entity is which log it came from. */
 .graph__srcpick { position: relative; }
@@ -443,8 +449,10 @@ button.link-item__name:hover { color: var(--accent); }
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 8px 10px;
+  height: var(--toolbar-h);
+  padding: 0 10px;
   border-bottom: 1px solid var(--border);
+  background: var(--panel-inset);
 }
 .graph__srcmenu-acts { display: flex; gap: 4px; }
 .graph__srclist { overflow-y: auto; padding: 4px; }
@@ -459,10 +467,24 @@ button.link-item__name:hover { color: var(--accent); }
   cursor: pointer;
   min-width: 0;
 }
-.graph__srcrow:hover { background: var(--panel-inset); }
+.graph__srcrow:hover { background: var(--row-hover); }
 .graph__srcrow.on { color: var(--text-bright); }
 
-/* nothing picked yet: an empty canvas would read as "no entities found", which is a lie about the pool */
+/* The case set sits above the file list: it is a different KIND of selection — a scope, not a file. */
+.graph__srccase {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-inset);
+}
+.graph__srccase .graph__srcrow { flex: 1; border: 1px solid transparent; background: none; text-align: left; }
+.graph__srccase .graph__srcrow.on { border-color: var(--accent-border); background: var(--accent-bg); color: var(--accent); }
+.graph__srccase .graph__srcrow:disabled { opacity: 0.5; cursor: default; }
+
+/* Nothing picked yet: an empty canvas would read as "no entities found", which is a lie about the
+   pool. So the screen states what it is waiting for, and offers the way forward. */
 .graph__pick {
   display: flex;
   gap: 16px;
@@ -476,24 +498,11 @@ button.link-item__name:hover { color: var(--accent); }
   color: var(--muted);
 }
 .graph__pick svg { flex: none; width: 22px; height: 22px; color: var(--accent); margin-top: 2px; }
-.graph__pick-title { font-size: var(--fs-2xl); font-weight: 600; color: var(--text-bright); }
+.graph__pick-title { font-size: var(--fs-3xl); font-weight: 600; color: var(--text-brightest); }
 .graph__pick-body { margin-top: 6px; line-height: 1.6; font-size: var(--fs-base); }
 .graph__pick-acts { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
 
-/* the case-set entry sits above the file list: it is a different KIND of selection (a scope, not a file) */
-.graph__srccase {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px;
-  border-bottom: 1px solid var(--border);
-  background: var(--panel-inset);
-}
-.graph__srccase .graph__srcrow { flex: 1; border: 1px solid transparent; background: none; text-align: left; }
-.graph__srccase .graph__srcrow.on { border-color: var(--accent-border); background: var(--accent-bg); color: var(--accent); }
-.graph__srccase .graph__srcrow:disabled { opacity: 0.5; cursor: default; }
-
-/* "entities but no relations" — a real answer that an empty canvas cannot give */
+/* "Entities but no relations" — a real answer that an empty canvas cannot give. */
 .graph__note {
   position: absolute;
   left: 50%;
@@ -504,32 +513,12 @@ button.link-item__name:hover { color: var(--accent); }
   gap: 10px;
   max-width: 640px;
   padding: 10px 14px;
-  border: 1px solid var(--warn-border, var(--border-strong));
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
   border-radius: var(--radius-md);
   background: var(--panel);
-  box-shadow: var(--shadow);
   font-size: var(--fs-base);
   color: var(--muted);
   z-index: 5;
 }
 .graph__note svg { flex: none; color: var(--warn); margin-top: 2px; }
 .graph__note b { color: var(--text-bright); }
-
-/* the detections badge is a disclosure: the per-rule breakdown sits under it */
-.graph__ent-det--btn { cursor: pointer; background: transparent; font: inherit; }
-.graph__ent-det--btn:hover, .graph__ent-det--btn.on { background: color-mix(in srgb, currentColor 10%, transparent); }
-.graph__det-list { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
-.graph__det-row {
-  display: grid; grid-template-columns: 8px minmax(0, 1fr) auto auto; gap: 8px; align-items: center;
-  padding: 5px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm);
-  background: var(--surface-1); color: var(--text); font: inherit; font-size: var(--fs-sm); text-align: left; cursor: pointer;
-}
-.graph__det-row:hover { border-color: var(--accent-border); background: var(--surface-2); }
-.graph__det-dot { width: 8px; height: 8px; border-radius: 50%; }
-.graph__det-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.graph__det-id { font-family: var(--font-mono); color: var(--muted); font-size: 11px; }
-.graph__det-n { font-family: var(--font-mono); color: var(--text-2); }
-
-/* The pair a graph finding arrived about, stated in the focus chip: naming only the focus reported
-   half of the link that was clicked. */
-.graph__focus-arrow { color: var(--accent); margin: 0 2px; }

@@ -13,43 +13,44 @@
   grid-template-columns: 1fr;
 }
 
+/* A card is REGIONS, not one padded box: an identity head on the inset ground, the counts and the
+   dates on the card's own ground, and the actions in a footer — each separated by a 1px rule. That is
+   the template's composition (sidebar · header · toolbar · body · status bar) at card scale, and it is
+   what stops four different kinds of thing reading as one paragraph.
+   Nothing lifts and nothing glows: separation is a rule, not a blur, so hover moves the BORDER. */
 .case-card {
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 0;
   min-width: 0;
-  padding: 18px 20px 14px;
+  padding: 0;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--panel);
   cursor: pointer;
-  /* the lift on hover is 1px and shadow-only: a card that jumps is noise on a page of twenty */
-  transition: border-color 0.12s ease, background 0.12s ease, box-shadow 0.12s ease, transform 0.12s ease;
+  overflow: clip;   /* not `hidden` — see the sticky-container gotcha in CLAUDE.md */
+  transition: border-color var(--t-fast), background var(--t-fast);
 }
 .case-card:hover {
   border-color: var(--border-hover);
-  background: var(--panel-2);
-  box-shadow: var(--shadow-sm);
-  transform: translateY(-1px);
 }
 .case-card:focus-visible {
   outline: none;
-  border-color: var(--accent-border);
-  box-shadow: var(--glow);
+  border-color: var(--accent);
 }
 .case-card--active {
-  border-color: var(--accent-border);
-  background: color-mix(in srgb, var(--accent) 5%, var(--panel));
+  border-color: var(--accent-deep);
 }
-/* quiet left rule marks the active case without shouting */
+/* quiet left rail marks the active case without shouting — the same 2px inset rail the active nav
+   item carries, square, because the only capsule in this design is the nav's numeric badge */
 .case-card--active::before {
   content: '';
   position: absolute;
-  inset: 10px auto 10px 0;
+  inset: 0 auto 0 0;
   width: 2px;
-  border-radius: var(--radius-pill);
   background: var(--accent);
+  z-index: 1;
 }
 .case-card--editing {
   cursor: default;
@@ -60,6 +61,12 @@
   align-items: flex-start;
   gap: 10px;
   min-width: 0;
+  padding: 12px 16px;
+  background: var(--panel-inset);
+  border-bottom: 1px solid var(--border);
+}
+.case-card--active .case-card__head {
+  background: var(--accent-bg);
 }
 .case-card__ident {
   flex: 1;
@@ -76,16 +83,18 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: var(--fs-2xl);
+  font-size: var(--fs-3xl);
   font-weight: 600;
-  letter-spacing: -0.01em;
-  color: var(--text-bright);
+  letter-spacing: 0;
+  color: var(--text-brightest);
 }
+/* the id and the analyst are context, in the mono face like every other identifier in the app */
 .case-card__uid {
-  margin-top: 4px;
+  margin-top: 3px;
   display: flex;
   align-items: center;
   gap: 6px;
+  font-family: var(--font-mono);
   font-size: var(--fs-xs);
   color: var(--muted-2);
   overflow: hidden;
@@ -100,15 +109,18 @@
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  padding: 12px 16px 0;
 }
+/* A chip is a figure with the word that names it beside it — the number in the mono face, tabular,
+   the word in the UI face in `--muted`. Rectangular: a capsule here is the loudest wrong note. */
 .case-chip {
   display: inline-flex;
   align-items: baseline;
-  gap: 5px;
-  padding: 4px 9px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  background: var(--panel-inset);
+  gap: 6px;
+  padding: 3px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--panel-2);
   font-size: var(--fs-xs);
   color: var(--muted);
   white-space: nowrap;
@@ -116,16 +128,20 @@
 .case-chip b {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  font-weight: 600;
-  color: var(--text-bright);
+  font-feature-settings: 'tnum' 1;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  color: var(--text-brightest);
 }
-.case-chip--quiet { color: var(--muted-2); background: transparent; }
+.case-chip--quiet { color: var(--muted-2); background: transparent; border-color: var(--border); }
+.case-chip--quiet b { color: var(--text-3); }
 /* Authored, not extracted — the same distinction the graph draws with a dashed ring. */
-.case-chip--accent { color: var(--accent); border-color: var(--accent-border); }
-.case-graph { display: flex; flex-direction: column; gap: 8px; }
+.case-chip--accent { color: var(--accent-soft); border-color: var(--accent-deep); background: var(--accent-bg); }
+.case-chip--accent b { color: var(--accent); }
+.case-graph { display: flex; flex-direction: column; gap: 10px; }
 .case-graph__chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.case-card--active .case-chip { border-color: color-mix(in srgb, var(--accent) 22%, var(--border)); }
 
+/* A figure and the word that names it. Never a figure labelled by a second figure. */
 .case-card__stats {
   display: flex;
   gap: 22px;
@@ -138,17 +154,18 @@
   min-width: 0;
 }
 .case-stat__v {
-  font-family: var(--font-mono, ui-monospace, monospace);
+  font-family: var(--font-mono);
   font-size: var(--fs-stat);
+  font-weight: 500;
+  letter-spacing: -0.02em;
   line-height: 1.1;
   color: var(--text-brightest);
   font-variant-numeric: tabular-nums;
 }
 .case-stat__k {
-  font-size: var(--fs-xxs);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--muted-2);
+  font-family: var(--font-ui);
+  font-size: var(--fs-base);
+  color: var(--muted);
 }
 
 .case-card__meta {
@@ -156,25 +173,30 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 4px 8px;
+  padding: 10px 16px 12px;
   font-size: var(--fs-xs);
-  color: var(--text-4);
+  color: var(--muted);
 }
 .case-card__meta b {
-  font-weight: 500;
-  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-weight: 400;
+  color: var(--text-4);
 }
 .case-card__sep {
-  color: var(--muted-3);
+  color: var(--muted-4);
 }
 
+/* The footer is its own region on the inset ground, separated by a rule — the same relationship the
+   status bar has to a result list. */
 .case-card__actions {
   display: flex;
   gap: 6px;
   align-items: center;
   flex-wrap: wrap;
   margin-top: auto;
-  padding-top: 12px;
-  border-top: 1px solid var(--border-2);
+  padding: 9px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--panel-inset);
   /* Dimmed, never hidden: a control that appears only on hover is unreachable by touch and invisible
      to anyone scanning the page — and "why can I not delete a case" is the bug that produces. */
   opacity: 0.72;
@@ -191,30 +213,35 @@
 .export-menu {
   position: relative;
 }
+/* `var(--radius)` and `var(--bg-2)` were undefined here, so the menu had square corners and no hover
+   fill in every theme. A menu is a control surface: 5px radius, on the chrome ground. */
 .export-menu__list {
   position: absolute;
   right: 0;
   top: calc(100% + 6px);
   z-index: 30;
-  min-width: 300px;
-  padding: 6px;
+  min-width: 320px;
+  padding: 4px;
   background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-lg, 0 12px 32px rgba(0, 0, 0, 0.35));
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
 }
+/* the menu's own head, on the inset ground with a rule under it — same shape as a rail head */
 .export-menu__head {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 6px 8px 8px;
-  border-bottom: 1px solid var(--border-2);
-  margin-bottom: 4px;
+  gap: 3px;
+  padding: 8px 10px;
+  margin: -4px -4px 4px;
+  background: var(--panel-inset);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono);
   font-size: var(--fs-sm);
-  color: var(--text);
+  color: var(--text-2);
 }
 .export-menu__item {
   display: grid;
@@ -224,7 +251,7 @@
   width: 100%;
   padding: 7px 8px;
   border: 0;
-  border-radius: var(--radius-sm, 6px);
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text);
   text-align: left;
@@ -232,9 +259,9 @@
   cursor: pointer;
 }
 .export-menu__item:hover:not(:disabled),
-.export-menu__item:focus-visible { background: var(--panel-2, var(--bg-2)); }
+.export-menu__item:focus-visible { background: var(--panel-2); }
 .export-menu__item:disabled { opacity: 0.6; cursor: default; }
-.export-menu__label { font-weight: 600; font-size: var(--fs-sm); }
+.export-menu__label { font-weight: 600; font-size: var(--fs-sm); color: var(--text-bright); }
 .export-menu__hint { color: var(--muted); font-size: var(--fs-xs); }
 
 .case-card__edit {
@@ -246,11 +273,13 @@
 }
 .case-card__edit input {
   width: 100%;
-  padding: 4px 8px;
+  padding: 5px 9px;
   font-size: var(--fs-lg);
 }
 
-/* ── delete confirmation body ── */
+/* ── delete confirmation body ──
+   What is actually being deleted, one line per thing, only what is there. A figure and the word that
+   names it — never a column of zeros, and never a figure labelled by another figure. */
 .case-del__list {
   list-style: none;
   margin: 0 0 12px;
@@ -272,11 +301,14 @@
 .case-del__list--empty { color: var(--text-3); line-height: 1.5; }
 .case-del__n {
   flex: 0 0 auto;
-  min-width: 52px;
-  font-family: var(--font-mono, ui-monospace, monospace);
+  min-width: 56px;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  letter-spacing: -0.02em;
   color: var(--text-brightest);
   text-align: right;
   font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
 }
 .case-del__l {
   color: var(--text-3);
@@ -315,8 +347,31 @@
 }
 .case-card__actions {
   gap: 8px;
-  padding-top: 10px;
 }
+
+/* ── Recently deleted ─────────────────────────────────────────────────────────
+   A restore panel is a REGION: its own head on the inset ground with a rule under it, then the rows.
+   The left marker is the level's colour on a 1px rule, not a coloured slab. */
+.cases .cases__trash {
+  padding: 0;
+  border-radius: var(--radius-lg);
+  border-left-width: 2px;
+  background: var(--panel);
+  overflow: clip;
+}
+.cases .cases__trash-head {
+  margin: 0;
+  padding: 9px 14px;
+  background: var(--panel-inset);
+  border-bottom: 1px solid var(--border);
+}
+.cases .cases__trash-row {
+  padding: 8px 14px;
+  border-top: 0;
+  border-bottom: 1px solid var(--row-line);
+}
+.cases .cases__trash-row:last-child { border-bottom: 0; }
+.cases__trash-hint { font-size: var(--fs-xs); color: var(--muted); }
 
 /* ── Case DETAIL: section headings sit with the box they describe ──────────────
    .sec__hint is right-aligned globally (margin-left:auto), which on a full-width
@@ -357,12 +412,18 @@
 /* ── Toolbar: find a case, order the list ─────────────────────────────────────
    Only rendered above 3 cases. Below that a filter is furniture; above it, scrolling a grid of
    twenty cards to find one by name is the actual cost of the page. */
+/* THE TOOLBAR: the row you act in, bounded by its own rule on the chrome ground so the grid below
+   reads as the answer to it rather than as more of the same page. */
 .cases__toolbar {
   display: flex;
-  align-items: flex-end;
-  gap: 12px;
+  align-items: center;
+  gap: 10px 14px;
   flex-wrap: wrap;
   margin-top: 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--panel-inset);
 }
 .cases__search {
   position: relative;
@@ -372,6 +433,7 @@
 }
 .cases__search input {
   width: 100%;
+  height: 30px;
   padding-left: 30px;
   padding-right: 26px;
 }
@@ -401,11 +463,23 @@
   align-items: center;
   gap: 8px;
 }
-.cases__sort .field__label { margin: 0; }
+/* the one label treatment: uppercase UI face, 10.5/600, --ls-head, --muted-2 (see `.lbl`) */
+.cases__sort .field__label {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: var(--ls-head);
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+.cases__sort select { height: 30px; padding-top: 0; padding-bottom: 0; }
+/* the quietest text in the toolbar, in the mono face — it states what the filter cost, nothing to act on */
 .cases__count {
   margin-left: auto;
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: var(--fs-xs);
   color: var(--muted-3);
-  padding-bottom: 6px;
+  white-space: nowrap;
 }

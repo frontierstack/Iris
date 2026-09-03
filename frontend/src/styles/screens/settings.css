@@ -1,0 +1,1000 @@
+/* Settings (SettingsScreen.tsx, PerfPanel.tsx)
+   ═══════════════════════════════════════════════════════════════════════════
+   The observability-console language, applied to the screen where the app is configured.
+   Read docs/DESIGN_LANGUAGE.md before changing anything here; the rules this file obeys are:
+
+     · a section is a `--panel` CARD with a `--panel-inset` head and a 1px `--border` rule between
+       them. No shadow — separation is a rule, not a blur, so `box-shadow: var(--shadow-sm)` on a
+       section is gone.
+     · nothing lifts and nothing glows. The theme cards used to `translateY(-1px)` on hover and
+       carry `0 0 0 2px var(--accent-glow)` when selected; selection is now the accent as a border
+       plus an `inset 2px 0 0` rail, which is how the sidebar marks its active item.
+     · ONE label treatment. A field label, a chart-card title and the nav group label are the same
+       object as a table head: the UI face, 10.5px/600, `--ls-head`, `--muted-2`. `.lbl` in base.css
+       is the shared class and everything here matches it rather than inventing a second.
+     · rectangular. 5px (`--radius-md`) on every control, 6px (`--radius-lg`) on a panel, 3px
+       (`--radius-sm`) on a tag. Nothing on this screen is a capsule.
+     · NO literal colour. Every value is a theme variable — a hex here is a value that is wrong in
+       eight of the nine themes.
+
+   The `.anomalies` block at the bottom of this file is NOT this screen's. It is where `.segbar`,
+   `.seg`, `.fig` and `.sec__meta` are defined for AnomaliesScreen; it is left exactly as it was.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ═══════ Layout: a sticky sub-nav beside a column of section cards ═══════ */
+.settings {
+  max-width: 1180px;
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+
+/* ── The sub-nav ──
+   Its own panel, and the active item carries the accent as an inset rail — the same marker the
+   sidebar uses, so the two navs in view at once read as one system. */
+.settings__nav {
+  position: sticky;
+  top: calc(var(--header-h) + var(--page-pad));
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+}
+.settings__nav-head {
+  padding: 5px 9px 7px;
+}
+.settings__nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: var(--radius-md);
+  color: var(--text-4);
+  font-size: var(--fs-lg);
+  font-weight: 500;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.settings__nav-item:hover {
+  background: var(--hover);
+  color: var(--text-bright);
+}
+.settings__nav-item.active {
+  background: var(--nav-active);
+  color: var(--text-brightest);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.settings__sections {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-width: 0;
+}
+
+/* ═══════ A section card ═══════ */
+.settings__section {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  overflow: clip;
+  scroll-margin-top: calc(var(--header-h) + var(--page-pad));
+}
+.settings__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 11px 16px;
+  background: var(--panel-inset);
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+/* the collapsible head is a <button>; `.settings__head--btn` lives in anomalies.css and loads after
+   this file, so these need the extra `.settings` to hold their own ground */
+.settings .settings__head--btn {
+  background: var(--panel-inset);
+  border-radius: 0;
+}
+.settings .settings__head--btn:hover {
+  background: var(--hover);
+}
+/* anomalies.css dims the title to --text-bright on hover; here the title is already the brightest
+   thing in the head, so hovering it must not take brightness away */
+.settings .settings__head--btn:hover .settings__title {
+  color: var(--text-brightest);
+}
+.settings__head-main {
+  min-width: 0;
+}
+.settings__title {
+  font-size: var(--fs-3xl);
+  font-weight: 600;
+  color: var(--text-brightest);
+  letter-spacing: -0.01em;
+}
+.settings__desc {
+  margin-top: 2px;
+  font-size: var(--fs-md);
+  color: var(--muted);
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+/* a closed card is its head alone — the rule under it would be a divider with nothing to divide */
+.settings__section.collapsed .settings__head {
+  border-bottom: 0;
+}
+.settings__body {
+  padding: var(--panel-pad) 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.settings__foot {
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--panel-inset);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.settings__section--danger {
+  border-color: var(--danger-border);
+}
+.settings__section--danger .settings__title {
+  color: var(--bad);
+}
+
+/* ── The one label treatment ──
+   `.field__label` is a shared component, so this is scoped: on this screen a field label is a label
+   surface like any other. The badges and paths that sit INSIDE one are content, not labels, and are
+   unwound — uppercasing a masked key or a stored token would misstate it. */
+.settings .field__label {
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: var(--ls-head);
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+.settings .field__label .badge,
+.settings .field__label .pill,
+.settings .field__label .mono,
+.settings .field__label code {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+}
+
+/* ── Network posture ──
+   Same language as the case screen's inactive note: a left rule in --warn, no section chrome, and
+   nothing at all when there is nothing to say. A permanent banner is one the analyst stops reading,
+   which is how "verifyTls is off" survived long enough to be a red-team find. */
+.settings__security {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+.settings__security-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--warn);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  background: var(--panel-2);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+  line-height: 1.55;
+}
+.settings__security-item svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--warn);
+}
+
+/* ═══════ Appearance ═══════ */
+.themes {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+.theme-card {
+  width: 100%;
+  padding: 8px;
+  text-align: left;
+  cursor: pointer;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--panel-2);
+  transition: border-color var(--t-fast), background var(--t-fast);
+}
+.theme-card:hover {
+  border-color: var(--border-hover);
+  background: var(--hover);
+}
+/* selected is a rule, never a glow */
+.theme-card.on {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.theme-card.on .theme-card__name {
+  color: var(--accent);
+}
+/* The preview's own colours are the THEME being previewed and are set inline from theme metadata —
+   that is the one place a literal is correct, because the point is to show a palette this document
+   is not rendered in. */
+.theme-card__preview {
+  height: 64px;
+  border: 1px solid;
+  border-radius: var(--radius-sm);
+  display: flex;
+  overflow: hidden;
+}
+.theme-card__side {
+  width: 22%;
+  border-right: 1px solid;
+}
+.theme-card__main {
+  flex: 1;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.theme-card__line {
+  height: 3px;
+  width: 70%;
+}
+.theme-card__line.short {
+  width: 40%;
+}
+.theme-card__accent {
+  height: 6px;
+  width: 30%;
+  margin-top: auto;
+}
+.theme-card__name {
+  margin-top: 8px;
+  font-size: var(--fs-base);
+  font-weight: 500;
+  color: var(--text-bright);
+}
+.theme-card__desc {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+/* the font cards are the same object as a theme card, so they take the same selected marker */
+.settings .fontpick__item.on {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.density {
+  display: flex;
+  gap: 8px;
+}
+
+/* ═══════ Compute ═══════ */
+.compute-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.gpu-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.gpu {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--panel-inset);
+  padding: 10px 12px;
+}
+.gpu__row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+}
+.gpu__name {
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
+  color: var(--text-bright);
+}
+.gpu__mem {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-xs);
+  color: var(--muted-2);
+}
+.gpu .bar {
+  margin-top: 7px;
+  height: 4px;
+}
+.gpu .bar__fill {
+  height: 4px;
+}
+.compute-modes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.compute-error {
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-md);
+  background: var(--danger-bg);
+  color: var(--bad);
+  padding: 8px 12px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  word-break: break-word;
+}
+/* the expected CPU-install case — informational, so it must not read as a failure */
+.compute-note {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--panel-2);
+  color: var(--muted);
+  padding: 8px 12px;
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+}
+
+/* ── Machine & worker sizing ──
+   What the PROCESS may use and the pools Iris derived from it. Each tile is a figure and the word
+   that names it: `--fs-stat` in the mono face at 500 with -0.02em, the name beside it in the UI
+   face. Never a figure labelled with a second figure. */
+.res-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 4px 0 2px;
+}
+.res-tile {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--panel-inset);
+}
+.res-tile__n {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-stat);
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  color: var(--accent);
+  min-width: 2ch;
+  text-align: right;
+}
+.res-tile__l {
+  font-size: var(--fs-base);
+  line-height: 1.35;
+  color: var(--muted);
+}
+.res-tile__l .muted {
+  font-size: var(--fs-xs);
+  color: var(--muted-3);
+}
+
+/* ═══════ AI assistant ═══════ */
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.slider-row input[type='range'] {
+  flex: 1;
+  max-width: 260px;
+}
+.slider-row__val {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-base);
+  color: var(--accent);
+  min-width: 18px;
+}
+.ai-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.provider-fixed {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--panel-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
+  color: var(--text-bright);
+}
+.advanced {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--panel-inset);
+}
+.advanced__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  min-height: var(--toolbar-h);
+  padding: 6px 12px;
+  font-size: var(--fs-base);
+  font-weight: 500;
+  color: var(--text-3);
+}
+.advanced__head:hover {
+  color: var(--text-bright);
+}
+.advanced__caret {
+  transform: rotate(-90deg);
+  transition: transform var(--t-fast);
+  width: 12px;
+  height: 12px;
+}
+.advanced__caret.open {
+  transform: none;
+}
+.advanced__body {
+  padding: 4px 12px 12px;
+  border-top: 1px solid var(--border-2);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.ai-cta {
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--panel-inset);
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+.ai-cta__title {
+  font-size: var(--fs-3xl);
+  font-weight: 600;
+  color: var(--text-bright);
+}
+.ai-cta__body {
+  font-size: var(--fs-base);
+  color: var(--text-4);
+  line-height: 1.55;
+  text-wrap: pretty;
+}
+
+/* ═══════ System prompts ═══════ */
+.sp-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.sp-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--panel-inset);
+}
+.sp-row--editing {
+  border-color: var(--accent-border);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.sp-row__main {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+.sp-row__name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-weight: 500;
+  color: var(--text-bright);
+}
+.sp-row__meta {
+  margin-top: 2px;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+/* dimmed, never hover-hidden — a control that only exists on hover is unreachable by touch */
+.sp-row__actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  opacity: 0.85;
+}
+.sp-row__actions:hover,
+.sp-row:focus-within .sp-row__actions {
+  opacity: 1;
+}
+.sp-row__effective {
+  flex-basis: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-2);
+}
+.sp-pre {
+  margin: 0;
+  max-height: 360px;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-md);
+  background: var(--panel-deep);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-3);
+}
+.sp-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-md);
+  background: var(--panel-inset);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.sp-builtin {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+}
+.sp-textarea {
+  width: 100%;
+  min-height: 200px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  resize: vertical;
+}
+.sp-textarea--tall {
+  min-height: 420px;
+}
+.sp-modes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sp-mode {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 8px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+.sp-mode.active {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+}
+.sp-mode__name {
+  font-weight: 500;
+  color: var(--text-bright);
+}
+.sp-mode__desc {
+  grid-column: 2;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+/* ═══════ MCP server ═══════
+   The snippet label is a FILE PATH, so it keeps the mono face and its own case — a path is
+   case-sensitive and uppercasing it would misstate it. That is why it is not a `.field__label`. */
+.mcp-block__label {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--muted-2);
+  overflow-wrap: anywhere;
+}
+.settings .mcp-code {
+  border-radius: var(--radius-md);
+}
+.settings .mcp-tab {
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+}
+
+/* ═══════ Data ═══════ */
+.data-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+/* ═══════ Live processing (PerfPanel.tsx) ═══════
+   Only ever rendered here, so its composition lives with the screen it composes. Every colour the
+   charts draw with — stroke, area fill, gridline, tick — is a theme variable; the series colours
+   come from the `--sev-*` ramp and `--accent` and are passed in from the component. */
+.settings .perf__card-title {
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: var(--ls-head);
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+.settings .perf__card {
+  border-radius: var(--radius-lg);
+  background: var(--panel-inset);
+}
+/* a figure and the word that names it */
+.settings .perf__tile {
+  border-radius: var(--radius-md);
+  background: var(--panel-inset);
+}
+.settings .perf__tile-v {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-4xl);
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+.settings .perf__tile-l {
+  font-size: var(--fs-base);
+  color: var(--muted);
+}
+/* the chart's own ink */
+.perf__gridline {
+  stroke: var(--grid-line);
+  stroke-width: 1;
+}
+.settings .perf__tick {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xxs);
+  fill: var(--muted-2);
+}
+.settings .perf__legend i {
+  border-radius: var(--radius-xs);
+}
+/* The window selector. Its own class rather than the shared `.seg`, which AnomaliesScreen's
+   segmented filter (defined at the bottom of this file) also claims. */
+.perf__seg {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--panel-2);
+  overflow: hidden;
+}
+.perf__seg-btn {
+  padding: 0 10px;
+  height: 26px;
+  border: 0;
+  background: transparent;
+  color: var(--text-4);
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.perf__seg-btn + .perf__seg-btn {
+  border-left: 1px solid var(--border);
+}
+.perf__seg-btn:hover {
+  background: var(--hover);
+  color: var(--text-bright);
+}
+.perf__seg-btn.on {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+.perf__seg-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+/* The ONE animation in this design: the live-tail dot fades. It is used here and nowhere else. */
+.perf__live-dot {
+  animation: livePulse 2s ease-in-out infinite;
+}
+
+@media (max-width: 1150px) {
+  .settings {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .settings__nav {
+    position: static;
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+  .settings__nav-head {
+    flex-basis: 100%;
+    padding-bottom: 2px;
+  }
+  .data-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .themes {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (max-width: 720px) {
+  .res-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .compute-modes {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ANOMALIES — the restyle
+   ───────────────────────────────────────────────────────────────────────────
+   Everything here is SCOPED to `.anomalies`. The page was asked to look newer and more
+   professional, and the four things that made it not are the same mistake in different places:
+   a decorative signal drawn louder than the information it labels.
+
+     - the accent-green numbered eyebrow was the loudest thing on a closed card, above the title;
+     - table heads were uppercase letter-spaced mono, the treatment this UI already moved away
+       from for pills and badges (sentence case is the UI face here);
+     - severity was stated TWICE per row, as a rail and as an uppercase mono word;
+     - one rule producing twenty-six findings drew twenty-six identical bright headlines, with the
+       thing that actually differs set underneath in body text.
+
+   Nothing animates, nothing glows, no control is hover-hidden. Kept scoped rather than applied to
+   `.table` globally so Search / Sources / Cases are not restyled by a change nobody asked for.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Card heads ────────────────────────────────────────────────────────────
+   The index is a quiet ordinal, not a headline. The section NAME sits beside it in the page's own
+   type rather than terminal mono, and the title below is the brightest thing in the head — which
+   is the whole point of a head. */
+.anomalies .sec__eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  color: var(--muted-2);
+}
+.anomalies .sec__idx {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xxs);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-3);
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+}
+.anomalies .sec--card { padding: 16px 18px; gap: 24px; }
+.anomalies .sec--card .sec__title { font-size: var(--fs-4xl); letter-spacing: -0.01em; }
+.anomalies .sec__summary { margin-top: 5px; max-width: 88ch; }
+
+/* Figures live in the head so a CLOSED card still says how much is behind it. They replace the
+   counts the summary used to carry as prose — a sentence for what the section IS, figures for how
+   much of it there is — so nothing is stated twice. */
+.sec__meta {
+  display: flex;
+  align-items: flex-start;
+  gap: 22px;
+  padding-right: 4px;
+}
+.fig { text-align: right; line-height: 1.15; }
+.fig__v {
+  font-family: var(--font-mono);
+  font-size: var(--fs-stat);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  color: var(--text-brightest);
+}
+.fig__l {
+  margin-top: 3px;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.fig--warn .fig__v { color: var(--warn); }
+.fig--accent .fig__v { color: var(--accent); }
+.fig--quiet .fig__v { color: var(--text-3); }
+.anomalies .sec__right { align-items: flex-start; gap: 20px; padding-top: 2px; }
+/* figures are what the section IS, the buttons are what you can DO to it — a hairline keeps the two
+   from reading as one row of controls */
+.sec__meta + .sec__actions {
+  border-left: 1px solid var(--border);
+  padding-left: 20px;
+  margin-left: -2px;
+}
+
+/* ── The COLLAPSED card ────────────────────────────────────────────────────
+   Closed is the state this page is usually in — four of these stack into the overview — so it has to
+   be the state that looks composed, and it did not: each card was as tall as its prose ran, so the
+   four heads sat at four different heights with their controls scattered down the right edge, and a
+   three-line paragraph was doing the work of a caption.
+
+   Closed: the summary is clamped to ONE line, the padding tightens and every card shares a minimum
+   height, so the four are the same height and read as one set — two lines was tried first and left
+   the cards at three different heights, which is the thing that looked wrong. Open: the clamp lifts
+   and the full text is there beside the body it describes. Nothing is lost, it is deferred to the
+   moment it is worth reading, and the numbers that a closed card must still carry are in the
+   figures, not in the prose.
+
+   The whole head is the target. It used to look inert until the pointer reached the Expand pill on
+   the far right, a long way from the title anyone is actually aiming at. */
+.anomalies .sec--closed { padding-top: 14px; padding-bottom: 14px; min-height: 74px; }
+.anomalies .sec--closed .sec__summary {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+  overflow: hidden;
+}
+.anomalies .sec--closed:hover {
+  background: var(--surface-2);
+  box-shadow: inset 2px 0 0 var(--accent-border);
+}
+.anomalies .sec--closed:hover .sec__title { color: var(--accent); }
+.anomalies .sec--closed:hover .sec__eyebrow { color: var(--text-4); }
+.anomalies .sec--closed:hover .sec__idx { border-color: var(--accent-border); color: var(--text-3); }
+/* the toggle's focus ring has to trace the CARD, not a rectangle floating inside it */
+.anomalies .sec--card .sec__toggle:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--accent-border);
+  border-radius: var(--radius-md);
+}
+/* Expand/Collapse is a STATE control, so it reads as text with a glyph rather than as a button
+   competing with the real actions beside it — and it keeps the same width in both states, or the
+   head twitches sideways every time a card opens. */
+.anomalies .sec__state {
+  justify-content: center;
+  min-width: 104px;
+  padding: 6px 12px;
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  letter-spacing: 0;
+  color: var(--muted-2);
+  background: var(--panel-2);
+}
+.anomalies .sec-card > .sec--card:hover .sec__state {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+.anomalies .sec-card { transition: border-color var(--t-fast); }
+.anomalies .sec-card:hover { border-color: var(--border-strong); }
+/* an OPEN card is the one being worked in: its head keeps its own surface and divider so the body
+   below reads as belonging to it */
+.anomalies .sec--open { background: var(--surface-1); }
+
+/* ── The filter bar ────────────────────────────────────────────────────────
+   One control, one answer: a segmented group instead of four loose pills. Sized to the input
+   beside it so the strip has a single height. */
+.anomalies .anom__toolbar {
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--panel-2);
+  border-color: var(--border);
+}
+.anomalies .anom__toolbar-label {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+.anomalies .anom__toolbar-gap { flex: 1 1 auto; }
+
+/* The segmented control is a SHARED primitive and lives in components.css — three screens
+   use it, and it was declared here and in one other stylesheet at the same time. */
+
+.anomalies .anom__count {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+.anomalies .anom__count b {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-bright);
+  font-weight: 500;
+  margin-right: 2px;
+}
+.anomalies .anom__search { flex: 0 1 250px; }
+.anomalies .anom__search input { height: 28px; }
+
+/* The table head, the row floor and focus ring, the severity pill and tabular numerals all moved to
+   components.css and now apply to every table in the app — on request, after this page proved them.
+   A second copy scoped to `.anomalies` would be the thing that drifts. What stays below is only what
+   is genuinely this page's. Rows here carry a two-line name cell, so they get a taller floor. */
+.anomalies .table__row { min-height: 42px; }
+
+/* ── Timestamps ────────────────────────────────────────────────────────────
+   A stamp is read as a date first and a time second, and the column an analyst runs their eye down
+   is the time. One string, two weights — not two fields. */
+.tscell { display: inline-flex; align-items: baseline; gap: 7px; font-size: var(--fs-xs); }
+.tscell__d { color: var(--muted-2); }
+.tscell__t { color: var(--text-2); font-variant-numeric: tabular-nums; }
+
+/* ── Anomaly rows ──────────────────────────────────────────────────────── */
+.anomalies .anom__name .cell-bright { font-weight: 500; }
+.anomalies .anom__sources { align-items: center; flex-wrap: nowrap; overflow: hidden; }
+.anomalies .anom__detail { background: var(--panel-inset); }
+.anomalies .anom__sample { border-radius: var(--radius-sm); padding-left: 6px; padding-right: 6px; }
+
+/* ── Graph findings ────────────────────────────────────────────────────────
+   Four columns, not five: the rule name is no longer a column of its own because it was the same
+   string twenty-six times. It is the label under the sentence that differs. */
+.gfind-grid {
+  grid-template-columns:
+    minmax(84px, 0.42fr) minmax(320px, 4fr) minmax(64px, 0.36fr) minmax(168px, 0.85fr);
+}
+.gfind__what { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.gfind__line { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.gfind__summary {
+  min-width: 0;
+  color: var(--text-bright);
+  font-size: var(--fs-base);
+  line-height: 1.45;
+}
+.gfind__rule {
+  font-size: var(--fs-xs);
+  color: var(--muted-2);
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.gfind__sep { color: var(--muted-3); }
+.gfind__rule .cell-mono { font-size: var(--fs-xxs); color: var(--muted-3); }
+/* the two links ARE the point of the row — dimmed, never hover-hidden (a control that exists only
+   on hover is unreachable by touch) */
+.anomalies .gfind__go,
+.anomalies .excl__go,
+.anomalies .rules__actions { opacity: 0.82; }
+.anomalies .table__row:hover .gfind__go,
+.anomalies .table__row:hover .excl__go,
+.anomalies .table__row:hover .rules__actions,
+.anomalies .table__row:focus-within .gfind__go,
+.anomalies .table__row:focus-within .excl__go,
+.anomalies .table__row:focus-within .rules__actions { opacity: 1; }
+.anomalies .gfind__go .btn svg { width: 12px; height: 12px; }
+
+/* ── Rule catalogue ────────────────────────────────────────────────────── */
+.anomalies .rules__name .cell-bright { font-weight: 500; }
+.anomalies .rules__pattern { color: var(--muted-2); }
+/* 104 rules, most of which have not fired: a column of bright zeros buries the handful that did.
+   The zero still has to be READABLE — "this rule found nothing" is an answer, not an absence. */
+.anomalies .rules__hits--zero { color: var(--muted-3); }
+
+/* ── Suggested exclusions ──────────────────────────────────────────────── */
+.anomalies .excl-suggest { border-radius: var(--radius-md); }
+.anomalies .excl-suggest__row { background: var(--panel-2); }

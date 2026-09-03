@@ -1,0 +1,381 @@
+/* Event detail (EventDetailScreen.tsx)
+ *
+ * The observability template's composition, applied to one event: the identity block, then a stack of
+ * PANELS — each a rectangle on `--panel` with a `--border` rule and a 34px `--panel-inset` head that
+ * states what it holds in the one label treatment (`.lbl`). Nothing here floats, nothing lifts, and
+ * separation is a 1px rule rather than a shadow.
+ *
+ * Every selector is prefixed `.detail`, deliberately: `screens/cases.css` carries the earlier
+ * event-detail rules and is imported AFTER this file, so an unprefixed rule here would lose to it.
+ * The prefix is also true — these are the event detail screen's surfaces and nothing else's.
+ */
+
+.detail {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  gap: var(--page-pad);
+  align-items: start;
+}
+.detail__main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--page-pad);
+  min-width: 0;
+}
+.detail__side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--page-pad);
+  min-width: 0;
+}
+
+/* ── the panel, and its head ──
+   One shape for every block on this screen. The head is the template's table head: 34px, on the inset
+   ground, the name in the UI face uppercase at 10.5/600, and the count on the right as a tabular
+   figure. A panel whose count is the whole point of it never repeats that count in its body. */
+.detail .dpanel {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: var(--radius-lg);
+  overflow: clip;
+  min-width: 0;
+}
+.detail .dpanel__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: var(--toolbar-h);
+  padding: 0 14px;
+  background: var(--panel-inset);
+  border-bottom: 1px solid var(--border);
+}
+.detail .dpanel__head + .dpanel__head {
+  border-top: 1px solid var(--border);
+}
+/* the head's own right-hand statement: a file name, a line number, a count — always mono, always
+   quieter than the label it sits beside */
+.detail .dpanel__meta {
+  margin-left: auto;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--muted-2);
+  white-space: nowrap;
+}
+.detail .dpanel__meta .num {
+  color: var(--text-4);
+}
+.detail .dpanel__meta--file {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: block;
+  max-width: 46%;
+}
+.detail .dpanel__note {
+  font-size: var(--fs-sm);
+  color: var(--muted-3);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.detail .dpanel__body {
+  padding: 14px;
+}
+.detail .dpanel__empty {
+  padding: 16px 14px;
+  font-size: var(--fs-base);
+  color: var(--muted);
+  line-height: 1.6;
+  text-wrap: pretty;
+}
+/* a table inside a panel brings its own frame; the panel is already the frame */
+.detail .dpanel .table {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+/* `.detail__backrow` is shared with the case screen, which relies on its 12px bottom margin. Here the
+   column's own gap already provides the space, so only the event detail copy loses it. */
+.detail .detail__backrow {
+  margin-bottom: 0;
+}
+
+/* ── the identity block ──
+   A 2px severity rail down the left edge, the message, then the facts. The rail is a rule, not a
+   lozenge: this design has one capsule in it and it is a nav badge. */
+.detail .detail__head {
+  display: flex;
+  align-items: stretch;
+  gap: 14px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+}
+.detail .detail__sevbar {
+  width: 2px;
+  flex: 0 0 2px;
+  height: auto;
+  align-self: stretch;
+  border-radius: 0;
+}
+.detail__ident {
+  flex: 1;
+  min-width: 0;
+}
+.detail .detail__title {
+  font-size: var(--fs-4xl);
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--text-brightest);
+  word-break: break-word;
+}
+.detail__actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* ── the facts ──
+   Each fact is a bordered rectangle on the control ground at the control radius, with its name in the
+   ONE label treatment (uppercase UI face, 10.5/600, `--ls-head`, `--muted-2`) and its value in mono.
+   The event id leads, because it is what every note, indicator and report citation has to quote. */
+.detail .detail__facts {
+  margin-top: 9px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.detail .detail__fact {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--panel-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-2);
+}
+.detail .detail__fact i {
+  font-family: var(--font-ui);
+  font-style: normal;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: var(--ls-head);
+  text-transform: uppercase;
+  color: var(--muted-2);
+  flex: none;
+}
+.detail .detail__fact--file {
+  overflow: hidden;
+  white-space: nowrap;
+  max-width: 320px;
+}
+.detail .detail__fact--file span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.detail .detail__fact--ts {
+  color: var(--text-bright);
+}
+.detail .detail__fact--id {
+  color: var(--accent);
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+}
+/* The severity fact is a fact like the others, so it keeps the chip: what unwinds is the PILL inside
+   it, back to a dot and a word (`components.css` does that), because a pill inside a chip is a box in
+   a box. Stripping the chip as well left one fact floating among a row of bordered rectangles. The
+   coloured dot is that chip's label, which is why it carries no `<i>` of its own. */
+.detail .detail__fact:has(.sev) {
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+}
+.detail .detail__fact .sev {
+  font-size: var(--fs-xs);
+}
+
+/* ── parsed fields ──
+   A two-column definition list that stays readable when a value is a 200-character path. The key is
+   mono and dim, the value is mono and bright, and the rule between them is the soft one. */
+.detail .fields-grid {
+  padding: 14px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 26px;
+}
+.detail .field-kv {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  border-bottom: 1px solid var(--border-2);
+  padding-bottom: 7px;
+  min-width: 0;
+}
+.detail .field-kv__k {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--muted-2);
+  flex-shrink: 0;
+}
+.detail .field-kv__v {
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
+  color: var(--text-2);
+  text-align: right;
+  word-break: break-all;
+}
+.detail .field-kv:hover .field-kv__v {
+  color: var(--text-brightest);
+}
+
+/* ── the raw line, as the log recorded it ── */
+.detail .raw {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: var(--panel-deep);
+  padding: 12px 14px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  line-height: 1.7;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 260px;
+}
+
+/* ── the file excerpt ──
+   ONE horizontal scroller for the whole block (`.filectx__body`), with the line numbers sticky at its
+   left edge. Never put `overflow-x` on a line: that gives every line in the excerpt its own scrollbar
+   and lets them drift out of alignment with each other. */
+.detail .filectx {
+  margin-top: 0;
+  border: 0;
+  border-radius: 0;
+  background: var(--panel-deep);
+}
+.detail .filectx__body {
+  overflow-x: auto;
+  padding: 6px 0;
+}
+.detail .filectx__line {
+  display: grid;
+  grid-template-columns: 66px 1fr;
+  gap: 14px;
+  padding: 1px 14px 1px 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.65;
+  color: var(--muted-2);
+  white-space: pre;
+  min-width: max-content;
+}
+.detail .filectx__line.current {
+  background: var(--accent-bg);
+  color: var(--text-bright);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.detail .filectx__n {
+  color: var(--muted-3);
+  text-align: right;
+  user-select: none;
+  padding-right: 0;
+  position: sticky;
+  left: 0;
+  background: inherit;
+}
+.detail .filectx__line:not(.current) .filectx__n {
+  background: var(--panel-deep);
+}
+
+/* ── correlated events ── */
+.detail .corr-grid {
+  grid-template-columns: 76px 1fr 190px;
+}
+.detail .corr__reason {
+  display: flex;
+  justify-content: flex-end;
+  min-width: 0;
+}
+.detail .corr__reason .tag {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.detail .corr__ts {
+  font-size: var(--fs-sm);
+}
+.detail .corr__msg {
+  color: var(--text-2);
+}
+
+/* ── detections ──
+   Each rule is its own rectangle carrying its level as a 2px left rule. The level colour arrives
+   inline on `border-left-color` (it is data, not decoration); every other edge is the shared rule. */
+.detail .detections {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.detail .detection {
+  border: 1px solid var(--border);
+  border-left-width: 2px;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: var(--panel-2);
+  padding: 8px 10px;
+}
+.detail .detection__name {
+  font-size: var(--fs-lg);
+  color: var(--text-bright);
+  font-weight: 600;
+  line-height: 1.35;
+}
+.detail .detection__meta {
+  margin-top: 3px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--muted-2);
+}
+
+/* ── entities ── */
+.detail .entity-chips {
+  margin-top: 0;
+  padding: 12px 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* ── frequency baseline ── */
+.detail .baseline {
+  margin-top: 0;
+  padding: 12px 14px;
+  font-size: var(--fs-base);
+  color: var(--text-3);
+  line-height: 1.6;
+  text-wrap: pretty;
+}
+
+@media (max-width: 1100px) {
+  .detail {
+    grid-template-columns: 1fr;
+  }
+}

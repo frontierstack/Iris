@@ -74,7 +74,7 @@ export function AutoMapAll() {
                 {r.source && <span className="badge">{r.source}</span>}
                 {r.confidence !== undefined && <span className="badge">{Math.round(r.confidence * 100)}%</span>}
                 {r.status === 'applied' && r.events !== undefined && (
-                  <span className="muted mono" style={{ fontSize: 'var(--fs-xs)' }}>{fmtInt(r.events)} events · {r.newState}</span>
+                  <span className="automap__num">{fmtInt(r.events)} events · {r.newState}</span>
                 )}
               </div>
               {r.fields?.length ? (
@@ -83,7 +83,7 @@ export function AutoMapAll() {
                 </div>
               ) : null}
               {r.rationale && <div className="automap__why">{r.rationale}</div>}
-              {(r.reason || r.error) && <div className="automap__why" style={{ color: 'var(--bad)' }}>{r.reason || r.error}</div>}
+              {(r.reason || r.error) && <div className="automap__why automap__why--bad">{r.reason || r.error}</div>}
             </div>
           ))}
         </div>

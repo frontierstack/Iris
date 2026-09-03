@@ -86,6 +86,14 @@ _CONFIRM_CHUNK = 8192
 # the same exact predicate that confirms index candidates anyway. This is the cap on that walk,
 # which is Python per event (~2 us): past it, invalidating and rebuilding is the better trade.
 _TAIL_MAX = 50_000
+
+# `positions=True` asks for EVERY matching position rather than a page of rows, which the histogram
+# endpoint needs (a chart drawn from 200 rows would describe the page, not the query). On the exact
+# vector path that costs nothing - the candidate array already IS the answer. On the confirm and scan
+# paths it is a Python walk at ~0.4 us an event, so it is bounded here and the caller is TOLD when it
+# stopped: `positionsExact: False` means the shape is drawn from the first N matches, which the UI
+# says in words. Same rule as `totalExact` - a figure is exact or visibly not.
+_POSITIONS_CAP = 400_000
 # Share of FREE device memory the index plus its working room may claim. Not 1.0: the driver, the
 # graph's device arrays and cupy's own pools live there too, and an OOM mid-query is answered by
 # falling back to a path that takes 40x longer.
@@ -838,8 +846,14 @@ def invalidate() -> None:
 
 def search(events: list[Event], ts: np.ndarray, version: int, q: str, lo: int, hi: int,
            src_set: set[str], sev_set: set[str], offset: int, limit: int, desc: bool = False,
-           whole_pool: bool = True) -> dict[str, Any]:
+           whole_pool: bool = True, positions: bool = False) -> dict[str, Any]:
     """Return {'rows', 'total', 'engine', 'tookMs', 'candidates'} for the given filters.
+
+    `positions=True` additionally returns `positions` (an ascending int array of every matching
+    index into `events`, capped at `_POSITIONS_CAP`), `sevCodes` (`_SEV_CODE` per position) and
+    `positionsExact`. It exists so an AGGREGATE over the whole match set - the timestamp histogram
+    the Search screen draws - goes through this one implementation rather than a second one that
+    could disagree with it about what matches.
 
     `events` is always ascending by timestamp, so newest-first is just a reversed walk — no re-sort.
 
@@ -914,6 +928,13 @@ def search(events: list[Event], ts: np.ndarray, version: int, q: str, lo: int, h
     rows: list[Event] = []
     total = 0
     exact_total = True
+    # Only touched when `positions=True`; the two lists are the confirm/scan paths' accumulators and
+    # `pos_out`/`sev_out` the exact path's, which needs no walk.
+    pos_list: list[int] = []
+    sev_list: list[int] = []
+    pos_out: Optional[np.ndarray] = None
+    sev_out: Optional[np.ndarray] = None
+    pos_exact = True
     if cand_idx is not None:
         order = cand_idx[::-1] if desc else cand_idx
         # Both filter masks are EXACT (severity by code, source by equality on the label/file/id
@@ -927,6 +948,11 @@ def search(events: list[Event], ts: np.ndarray, version: int, q: str, lo: int, h
             total = int(cand_idx.shape[0])
             for i in order[offset:offset + limit].tolist():
                 rows.append(events[i])
+            if positions:
+                # The candidate array IS the match set here, already ascending: no walk at all.
+                pos_out = cand_idx[:_POSITIONS_CAP]
+                pos_exact = int(cand_idx.shape[0]) <= _POSITIONS_CAP
+                sev_out = _sev_codes_for(events, pos_out, idx, m)
         else:
             # The CONFIRM pass: an approximate ATOM in the query (a `field:value` upper bound, a `ts:`
             # atom, a negated field) means the mask is a superset, so every candidate has to go
@@ -953,6 +979,10 @@ def search(events: list[Event], ts: np.ndarray, version: int, q: str, lo: int, h
             # never drop one from a page it belongs on.
             want = offset + limit
             budget = max(want + _SCAN_COUNT_AHEAD, _SCAN_COUNT_AHEAD)
+            # A positions caller wants the whole match set, not a page, so its ceiling is its own.
+            # It is still a ceiling: this branch is a Python walk and an unbounded one is seconds.
+            if positions:
+                budget = max(budget, _POSITIONS_CAP)
             stop = False
             n_cand = int(order.shape[0])
             for s in range(0, n_cand, _CONFIRM_CHUNK):
@@ -966,6 +996,9 @@ def search(events: list[Event], ts: np.ndarray, version: int, q: str, lo: int, h
                         continue
                     if offset <= total < want:
                         rows.append(e)
+                    if positions:
+                        pos_list.append(i)
+                        sev_list.append(_SEV_CODE.get(e.sev, 4))
                     total += 1
                     if total >= budget:
                         exact_total = False
@@ -982,6 +1015,8 @@ def search(events: list[Event], ts: np.ndarray, version: int, q: str, lo: int, h
         # an analyst might quote has to be exact or VISIBLY not, never silently approximate.
         want = offset + limit
         budget = max(want + _SCAN_COUNT_AHEAD, _SCAN_COUNT_AHEAD)
+        if positions:
+            budget = max(budget, _POSITIONS_CAP)
         for i in (range(hi - 1, lo - 1, -1) if desc else range(lo, hi)):
             e = events[i]
             if src_set and e.source not in src_set and e.sourceId not in src_set and e.file not in src_set:
@@ -992,17 +1027,56 @@ def search(events: list[Event], ts: np.ndarray, version: int, q: str, lo: int, h
                 continue
             if offset <= total < want:
                 rows.append(e)
+            if positions:
+                pos_list.append(i)
+                sev_list.append(_SEV_CODE.get(e.sev, 4))
             total += 1
             if total >= budget:
                 exact_total = False
                 break
-    return {"rows": rows, "total": total, "totalExact": exact_total,
-            "engine": engine, "tookMs": round((time.perf_counter() - t0) * 1000.0, 1),
-            "candidates": int(cand_idx.shape[0]) if cand_idx is not None else n,
-            "indexBytes": idx.bytes if idx else 0,
-            "index": {**index_status(), "poolVersion": version,
-                      # the answer to "it says ready, so why did this query scan?"
-                      "used": idx is not None}}
+    out: dict[str, Any] = {
+        "rows": rows, "total": total, "totalExact": exact_total,
+        "engine": engine, "tookMs": round((time.perf_counter() - t0) * 1000.0, 1),
+        "candidates": int(cand_idx.shape[0]) if cand_idx is not None else n,
+        "indexBytes": idx.bytes if idx else 0,
+        "index": {**index_status(), "poolVersion": version,
+                  # the answer to "it says ready, so why did this query scan?"
+                  "used": idx is not None}}
+    if positions:
+        if pos_out is None:
+            # The walking paths visit each match in ascending index order (a positions caller passes
+            # desc=False), so the list is already sorted and needs no second pass.
+            pos_out = np.asarray(pos_list, dtype=np.int64)
+            sev_out = np.asarray(sev_list, dtype=np.int8)
+            pos_exact = not (len(pos_list) >= _POSITIONS_CAP)
+        out["positions"] = pos_out
+        out["sevCodes"] = sev_out
+        out["positionsExact"] = pos_exact
+    return out
+
+
+def _sev_codes_for(events: list[Event], pos: np.ndarray, idx: Optional[SearchIndex], m: int) -> np.ndarray:
+    """`_SEV_CODE` per position, vectorised off the index where the index covers the position.
+
+    The index already holds a severity code per pool position, so for the covered prefix this is one
+    gather instead of a Python attribute read per event. A rolling append leaves a tail the index does
+    not describe (see `note_append`); that tail is bounded by `_TAIL_MAX`, so reading it per event is
+    the same bounded walk the tail confirmation already does.
+    """
+    out = np.full(pos.shape[0], 4, dtype=np.int8)
+    if pos.shape[0] == 0:
+        return out
+    if idx is not None:
+        covered = pos < m
+        if covered.any():
+            table = compute.asnumpy(idx.sev) if idx.on_gpu else np.asarray(idx.sev)
+            out[covered] = table[pos[covered]]
+        rest = np.flatnonzero(~covered)
+    else:
+        rest = np.arange(pos.shape[0])
+    for k in rest.tolist():
+        out[k] = _SEV_CODE.get(events[int(pos[k])].sev, 4)
+    return out
 
 
 # How the index cache learns what pool it is indexing. `search.py` must not import the store (cycle),

@@ -21,6 +21,14 @@ export const Icon = {
     <svg {...base} {...p}><circle cx="7.1" cy="7.1" r="4.35" /><path d="m10.25 10.25 3.15 3.15" /></svg>
   ),
   /* Timeline: an axis with end caps and two events marked on it */
+  /* The time-range control's glyph. A clock face, drawn on the same 16px grid as the rest: two
+     hands and a ring, no tick marks — at 11px the marks are one grey smudge. */
+  Clock: (p: P) => (
+    <svg {...base} {...p}>
+      <circle cx="8" cy="8" r="5.9" />
+      <path d="M8 4.6V8l2.4 1.6" />
+    </svg>
+  ),
   Timeline: (p: P) => (
     <svg {...base} {...p}>
       <path d="M2.6 8h10.8M2.6 6.3v3.4M13.4 6.3v3.4" />
@@ -61,8 +69,16 @@ export const Icon = {
   Sparkle: (p: P) => (
     <svg {...base} {...p}><path d="M2.5 3.5h11v7H6.5L3.5 13v-2.5h-1z" /><path d="M5.5 6.5h5M5.5 8.5h3" /></svg>
   ),
+  /* Sliders: three tracks, each broken by its knob. The knobs used to be filled with
+     `var(--bg-sidebar)` to punch a hole through the track — which assumes the icon is drawn on the
+     sidebar's ground, and it is not (it sits in toolbars on `--panel` and `--panel-2`, where the
+     knockout is the wrong colour in every theme whose chrome and panel differ). The tracks now stop
+     either side of each knob, so the glyph needs no ground at all. */
   Sliders: (p: P) => (
-    <svg {...base} {...p}><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11" /><circle cx="6" cy="4.5" r="1.4" fill="var(--bg-sidebar)" /><circle cx="10.5" cy="8" r="1.4" fill="var(--bg-sidebar)" /><circle cx="5" cy="11.5" r="1.4" fill="var(--bg-sidebar)" /></svg>
+    <svg {...base} {...p}>
+      <path d="M2.5 4.5h1.5M8 4.5h5.5M2.5 8h6.5M12.5 8h1M2.5 11.5h.5M7 11.5h6.5" />
+      <circle cx="6" cy="4.5" r="1.4" /><circle cx="10.5" cy="8" r="1.4" /><circle cx="5" cy="11.5" r="1.4" />
+    </svg>
   ),
   Fit: (p: P) => (
     <svg {...base} {...p}><path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10" /></svg>

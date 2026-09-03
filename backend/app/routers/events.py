@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 from collections import Counter, deque
+# `datetime.UTC` is 3.11+; the CUDA runtime image is Python 3.10, so the whole app failed to
+# import on it. `timezone.utc` is what every other module here uses and works on both.
+from datetime import datetime, timezone
 from itertools import chain, repeat
 from dataclasses import dataclass, field
 from typing import Optional
@@ -22,6 +25,13 @@ router = APIRouter(prefix="/events", tags=["events"])
 _FIELDS_SCAN_CAP = 20_000
 # Fixed event columns that are offered as facets alongside the parser-specific Event.fields keys.
 _FIXED_COLUMNS = ("host", "user", "source", "file", "sev")
+# The order `events_histogram` reports its per-bucket level arrays in. It is `search._SEV_CODE`'s
+# order, because the codes ARE the indices into these arrays — never re-order one without the other.
+_SEV_ORDER = ("critical", "high", "medium", "low", "info")
+
+
+def _iso(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _search_filters(sources: str, sev: str, from_: Optional[str], to: Optional[str], scope: str) -> tuple:
@@ -77,6 +87,92 @@ def list_events(q: str = "", sources: str = "", sev: str = "", from_: Optional[s
     return {"total": total, "totalExact": bool(res.get("totalExact", True)),
             "rows": out, "engine": res["engine"], "tookMs": res["tookMs"],
             "candidates": res["candidates"], "index": res["index"]}
+
+
+# The histogram's bucket is chosen from a 1-2-5 ladder so an axis tick is always a round unit of
+# time. Picking `span / buckets` directly gives boundaries like "every 47 seconds", which no analyst
+# can read a time off.
+_BUCKET_LADDER = (
+    1, 2, 5, 10, 15, 30,                                    # seconds
+    60, 120, 300, 600, 900, 1800,                           # minutes
+    3600, 7200, 10800, 21600, 43200,                        # hours
+    86400, 172800, 604800,                                  # days, weeks
+    2592000, 7776000, 31536000,                             # months, quarters, years
+)
+
+
+def _bucket_size(span: float, want: int) -> float:
+    """The smallest ladder step that fits the span into `want` buckets or fewer."""
+    ideal = max(span, 1.0) / max(want, 1)
+    for step in _BUCKET_LADDER:
+        if step >= ideal:
+            return float(step)
+    return float(_BUCKET_LADDER[-1])
+
+
+@router.get("/histogram")
+def events_histogram(q: str = "", sources: str = "", sev: str = "",
+                     from_: Optional[str] = Query(None, alias="from"), to: Optional[str] = None,
+                     buckets: int = Query(56, ge=8, le=240),
+                     scope: str = Query("all", pattern="^(all|case)$")) -> dict:
+    """When the events matching this query happened, split by severity.
+
+    This is the chart above the result list, and it is the query's OWN shape: it goes through
+    `search_engine.search` with the same filters the list endpoint uses, so the two can never
+    disagree about what matches. Drawing it from the fetched page instead would describe the page.
+
+    Two things it will not do:
+
+    * It never claims a total it did not count. `search(positions=True)` is bounded (`_POSITIONS_CAP`),
+      and when it stops early `exact` is False and the response says how many it actually read — the
+      screen prints that rather than a shape presented as the whole picture.
+    * An event with no parsed timestamp is counted in `withoutTimestamp`, never folded into a bucket
+      it cannot honestly claim. Two-phase ingest means a raw source has no timestamps at all, so
+      inventing one for the chart would draw a spike where the evidence says nothing.
+    """
+    events, ts, version, lo, hi, src_set, sev_set = _search_filters(sources, sev, from_, to, scope)
+    res = search_engine.search(events, ts, version, q, lo, hi, src_set, sev_set, 0, 1,
+                               desc=False, whole_pool=scope != "case", positions=True)
+    pos = res.get("positions")
+    codes = res.get("sevCodes")
+    empty = {"buckets": [], "levels": list(_SEV_ORDER), "bucketSec": 0.0, "start": None, "end": None,
+             "total": int(res["total"]), "counted": 0, "exact": bool(res.get("positionsExact", True)),
+             "withoutTimestamp": 0, "peak": 0, "engine": res["engine"], "tookMs": res["tookMs"],
+             "index": res["index"]}
+    if pos is None or pos.shape[0] == 0:
+        return empty
+
+    t_all = ts[pos] if ts.shape[0] else np.zeros(0, dtype=np.float64)
+    dated = np.isfinite(t_all)
+    undated = int(pos.shape[0] - int(dated.sum()))
+    t_all = t_all[dated]
+    codes = codes[dated] if codes is not None else np.full(t_all.shape[0], 4, dtype=np.int8)
+    if t_all.shape[0] == 0:
+        return {**empty, "counted": int(pos.shape[0]), "withoutTimestamp": undated}
+
+    first, last = float(t_all.min()), float(t_all.max())
+    size = _bucket_size(last - first, buckets)
+    n_bins = int((last - first) // size) + 1
+    origin = float(int(first // size) * size)
+    # One int per event into a bin index, then one bincount per level: no Python loop over events.
+    bins = np.minimum(((t_all - origin) // size).astype(np.int64), n_bins - 1)
+    per_level = [np.bincount(bins[codes == code], minlength=n_bins)[:n_bins].tolist()
+                 for code in range(len(_SEV_ORDER))]
+    totals = np.bincount(bins, minlength=n_bins)[:n_bins]
+
+    return {"buckets": [{"start": _iso(origin + i * size),
+                         "count": int(totals[i]),
+                         "levels": [lvl[i] for lvl in per_level]}
+                        for i in range(n_bins)],
+            "levels": list(_SEV_ORDER),
+            "bucketSec": size,
+            "start": _iso(origin), "end": _iso(origin + n_bins * size),
+            "total": int(res["total"]),
+            "counted": int(pos.shape[0]),
+            "exact": bool(res.get("positionsExact", True)),
+            "withoutTimestamp": undated,
+            "peak": int(totals.max()) if n_bins else 0,
+            "engine": res["engine"], "tookMs": res["tookMs"], "index": res["index"]}
 
 
 def _facets(rows: list[Event]) -> tuple[dict[str, int], dict[str, dict[str, int]], dict[str, list[str]]]:

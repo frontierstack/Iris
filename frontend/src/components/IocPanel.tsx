@@ -42,9 +42,9 @@ function IocRow({ ioc }: { ioc: Ioc }) {
         <div>
           <span className="tag">{ioc.kind}</span>
           {ioc.addedBy === 'ai' && (
-            <span className="badge" style={{ marginLeft: 4 }} title="Recorded by the AI assistant during an investigation">AI</span>
+            <span className="badge ioc__by" title="Recorded by the AI assistant during an investigation">AI</span>
           )}
-          {ioc.addedBy === 'analyst' && <span className="badge badge--ok" style={{ marginLeft: 4 }} title="Added by hand">manual</span>}
+          {ioc.addedBy === 'analyst' && <span className="badge badge--ok ioc__by" title="Added by hand">manual</span>}
         </div>
         <div className="ioc__id" title={ioc.note || ioc.value}>
           <div className="cell-mono cell-bright ellipsis">{ioc.value}</div>
@@ -58,14 +58,14 @@ function IocRow({ ioc }: { ioc: Ioc }) {
           {ioc.files.slice(0, 2).map((f) => <span key={f} className="tag">{f}</span>)}
           {ioc.files.length > 2 && <span className="tag">+{ioc.files.length - 2}</span>}
         </div>
-        <div className="cell-mono cell-dim" style={{ fontSize: 'var(--fs-xs)' }}>{ioc.firstSeen ? fmtTs(ioc.firstSeen) : '—'}</div>
+        <div className="cell-mono cell-dim ioc__seen">{ioc.firstSeen ? fmtTs(ioc.firstSeen) : '—'}</div>
         <div className="ioc__caret"><Icon.Chevron style={{ transform: open ? 'rotate(180deg)' : undefined }} /></div>
       </div>
       {open && (
         <div className="ioc__detail">
           <div className="ioc__detail-head">
-            <span className="eyebrow">Seen in</span>
-            <span style={{ display: 'flex', gap: 6 }}>
+            <span className="lbl">Seen in</span>
+            <span className="ioc__detail-acts">
               <button className="btn btn--sm" onClick={() => nav(`/search?q=${encodeURIComponent(ioc.value)}`)}>
                 <Icon.Search /> Search every occurrence
               </button>
@@ -207,7 +207,7 @@ export function IocPanel({ scope = 'all', adding = false, onAddingDone }: { scop
       {!!extracted.length && (
         <div className="ioc-extracted">
           <button className="ioc-extracted__head" onClick={() => setShowExtracted((v) => !v)} aria-expanded={showExtracted}>
-            <span className="eyebrow">Extracted automatically</span>
+            <span className="lbl">Extracted automatically</span>
             <span className="ioc-extracted__hint">
               {fmtInt(extracted.length)} value{extracted.length === 1 ? '' : 's'} the extractor pulled out of
               {scope === 'case' ? ' the events on this case' : ' the workspace'} — not curated, no reason attached

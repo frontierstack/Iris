@@ -1,79 +1,97 @@
-/* Iris themes — every theme defines the full variable set. Default is iris-dark (mockup palette). */
+/* Iris themes — every theme defines the full variable set. Default is iris-dark.
+ *
+ * THE DEFAULT PALETTE IS THE OBSERVABILITY TEMPLATE, LITERALLY.
+ * Every value in the `iris-dark` block below is a hex lifted from the design template
+ * ("App redesign with observability template") rather than a value picked to look similar to it:
+ * #0d0f11 ground, #101315 chrome, #161a1d controls, #23282c / #1c2124 / #262b2f rules,
+ * #e4e9ea → #4d565b text ramp, #35c2c8 accent, #e2695f / #e0a33c / #35c2c8 for error / warn / info.
+ * A colour that is merely "close" is what turns a copied design into an imitation of one, so when
+ * a surface here needs a new shade, take it from the template's own ramp instead of mixing a new
+ * one — the ramp is: 0d0f11 · 101315 · 131719 · 15191c · 161a1d · 171b1e · 181f22 · 1b2427 ·
+ * 1c2124 · 1e2327 · 23282c · 253034 · 262b2f · 2b3237 · 2c3236 · 3a434a · 3a4247.
+ */
 
 :root,
 :root[data-theme='iris-dark'] {
   color-scheme: dark;
-  --bg: #0a0b0a;
-  --bg-sidebar: #0c0e0c;
-  --panel: #0e110e;
-  --panel-2: #101310;
-  --panel-deep: #0a0c0a;
-  --panel-inset: #0b0d0b;
-  --hover: #101410;
-  --selected: #111611;
-  --nav-active: #141914;
-  --border: #1c211c;
-  --border-2: #161a16;
-  --border-strong: #2b332b;
-  --border-hover: #3d4a3d;
-  --track: #1a1f1a;
-  --text: #d6dcd4;
-  --text-bright: #e6ece4;
-  --text-brightest: #eef3ec;
-  --text-2: #b7bfb5;
-  --text-3: #9fa89d;
-  --text-4: #8d968b;
-  --muted: #5c665b;
-  --muted-2: #6b756a;
-  --muted-3: #4e574d;
-  --accent: #6ee787;
-  --accent-hover: #a6f5b4;
-  --accent-bg: #132015;
-  --accent-bg-hover: #183020;
-  --accent-border: #2c4130;
-  --on-accent: #08110a;
-  --accent-glow: rgba(110, 231, 135, 0.28);
-  --chip-bg: #151915;
-  --chip-border: #262d26;
-  --tag-bg: #161a16;
-  --tag-border: #242a24;
-  --avatar-bg: #1b2a1e;
-  --avatar-border: #2c4130;
-  --grid-dot: #171c17;
-  --graph-bg: #0d0f0d;
-  --node-fill: #1c2a1e;
-  --node-ring: #38513d;
-  --node-ring-sel: #bdf7cb;
-  --edge: #242c25;
-  --scroll-thumb: #232823;
-  --scroll-thumb-hover: #2f362f;
-  --scroll-track: #0d0f0d;
-  --sev-critical: #ff6b5e;
-  --sev-high: #ffa657;
-  --sev-medium: #e3c96e;
-  --sev-low: #6f7a6d;
-  --sev-info: #5c8f6a;
-  --sev-critical-bg: #2a1512;
-  --sev-high-bg: #2a2012;
-  --sev-medium-bg: #26230f;
-  --sev-low-bg: #171a17;
-  --sev-info-bg: #12201a;
-  --ok: #6ee787;
-  --warn: #e3c96e;
-  --bad: #ff6b5e;
-  --danger-bg: #2a1512;
-  --danger-border: #4a2520;
+  --bg: #0d0f11;
+  --bg-sidebar: #101315;
+  --panel: #101315;
+  --panel-2: #161a1d;
+  --panel-deep: #0d0f11;
+  --panel-inset: #131719;
+  --hover: #171b1e;
+  --row-hover: #15191c;
+  --selected: #181f22;
+  --nav-active: #1b2427;
+  --border: #23282c;
+  --border-2: #1c2124;
+  --border-strong: #262b2f;
+  --border-hover: #3a434a;
+  --border-input: #2c3236;
+  --row-line: #171b1e;
+  --grid-line: #1e2327;
+  --track: #1c2124;
+  --text: #e4e9ea;
+  --text-bright: #f1f5f6;
+  --text-brightest: #ffffff;
+  --text-2: #d3dadd;
+  --text-3: #b9c2c6;
+  --text-4: #9aa4a9;
+  --muted: #8a949a;
+  --muted-2: #6d777c;
+  --muted-3: #5d666b;
+  --muted-4: #4d565b;
+  --accent: #35c2c8;
+  --accent-hover: #4ad3d8;
+  --accent-soft: #9fd9db;
+  --accent-deep: #2f7f86;
+  --accent-bg: #122528;
+  --accent-bg-hover: #173135;
+  --accent-border: #2f7f86;
+  --on-accent: #08181a;
+  --accent-glow: rgba(53, 194, 200, 0.24);
+  --chip-bg: #161a1d;
+  --chip-border: #262b2f;
+  --tag-bg: #161a1d;
+  --tag-border: #262b2f;
+  --avatar-bg: #253034;
+  --avatar-border: #2f7f86;
+  --grid-dot: #1c2124;
+  --graph-bg: #0d0f11;
+  --node-fill: #17282b;
+  --node-ring: #2f7f86;
+  --node-ring-sel: #9fd9db;
+  --edge: #2b3237;
+  --scroll-thumb: #2b3237;
+  --scroll-thumb-hover: #3a434a;
+  --scroll-track: #0d0f11;
+  --sev-critical: #e2695f;
+  --sev-high: #e0a33c;
+  --sev-medium: #c9b45f;
+  --sev-low: #7f8a90;
+  --sev-info: #35c2c8;
+  --sev-critical-bg: #2a1a19;
+  --sev-high-bg: #2a2116;
+  --sev-medium-bg: #24210f;
+  --sev-low-bg: #191d20;
+  --sev-info-bg: #12262a;
+  --ok: #35c2c8;
+  --warn: #e0a33c;
+  --bad: #e2695f;
+  --danger-bg: #2a1a19;
+  --danger-border: #3a2220;
   --shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
-  --overlay: rgba(4, 6, 4, 0.6);
-  --radius-xs: 3px;
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
+  --overlay: rgba(6, 8, 9, 0.66);
+  --radius-xs: 2px;
+  --radius-sm: 3px;
+  --radius-md: 5px;
+  --radius-lg: 6px;
   --radius-pill: 999px;
-  --surface-1: #111511;
-  --surface-2: #151a15;
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.02) inset;
-  --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.42);
+  --surface-1: #131719;
+  --surface-2: #161a1d;
+  --shadow-sm: none;
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
   --shadow-lg: var(--shadow);
   --glow: 0 0 0 3px var(--accent-glow);
 }
@@ -148,6 +166,13 @@
   --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.42);
   --shadow-lg: var(--shadow);
   --glow: 0 0 0 3px var(--accent-glow);
+  --row-hover: var(--hover);
+  --border-input: var(--border-strong);
+  --row-line: var(--border-2);
+  --grid-line: var(--border-2);
+  --muted-4: var(--muted-3);
+  --accent-soft: var(--accent-hover);
+  --accent-deep: var(--accent-border);
 }
 
 :root[data-theme='midnight-blue'] {
@@ -220,6 +245,13 @@
   --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.42);
   --shadow-lg: var(--shadow);
   --glow: 0 0 0 3px var(--accent-glow);
+  --row-hover: var(--hover);
+  --border-input: var(--border-strong);
+  --row-line: var(--border-2);
+  --grid-line: var(--border-2);
+  --muted-4: var(--muted-3);
+  --accent-soft: var(--accent-hover);
+  --accent-deep: var(--accent-border);
 }
 
 :root[data-theme='solar'] {
@@ -292,6 +324,13 @@
   --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.42);
   --shadow-lg: var(--shadow);
   --glow: 0 0 0 3px var(--accent-glow);
+  --row-hover: var(--hover);
+  --border-input: var(--border-strong);
+  --row-line: var(--border-2);
+  --grid-line: var(--border-2);
+  --muted-4: var(--muted-3);
+  --accent-soft: var(--accent-hover);
+  --accent-deep: var(--accent-border);
 }
 
 :root[data-theme='paper'] {
@@ -364,6 +403,13 @@
   --shadow-md: 0 6px 18px rgba(40, 40, 30, 0.12);
   --shadow-lg: var(--shadow);
   --glow: 0 0 0 3px var(--accent-glow);
+  --row-hover: var(--hover);
+  --border-input: var(--border-strong);
+  --row-line: var(--border-2);
+  --grid-line: var(--border-2);
+  --muted-4: var(--muted-3);
+  --accent-soft: var(--accent-hover);
+  --accent-deep: var(--accent-border);
 }
 
 :root[data-theme='nord'] {
@@ -436,6 +482,13 @@
   --shadow-md: 0 6px 18px rgba(10, 14, 20, 0.45);
   --shadow-lg: var(--shadow);
   --glow: 0 0 0 3px var(--accent-glow);
+  --row-hover: var(--hover);
+  --border-input: var(--border-strong);
+  --row-line: var(--border-2);
+  --grid-line: var(--border-2);
+  --muted-4: var(--muted-3);
+  --accent-soft: var(--accent-hover);
+  --accent-deep: var(--accent-border);
 }
 
 :root[data-theme='ember'] {
@@ -508,6 +561,13 @@
   --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.5);
   --shadow-lg: var(--shadow);
   --glow: 0 0 0 3px var(--accent-glow);
+  --row-hover: var(--hover);
+  --border-input: var(--border-strong);
+  --row-line: var(--border-2);
+  --grid-line: var(--border-2);
+  --muted-4: var(--muted-3);
+  --accent-soft: var(--accent-hover);
+  --accent-deep: var(--accent-border);
 }
 
 :root[data-theme='daylight'] {
@@ -580,6 +640,13 @@
   --shadow-md: 0 6px 18px rgba(30, 40, 60, 0.12);
   --shadow-lg: var(--shadow);
   --glow: 0 0 0 3px var(--accent-glow);
+  --row-hover: var(--hover);
+  --border-input: var(--border-strong);
+  --row-line: var(--border-2);
+  --grid-line: var(--border-2);
+  --muted-4: var(--muted-3);
+  --accent-soft: var(--accent-hover);
+  --accent-deep: var(--accent-border);
 }
 
 :root[data-theme='contrast'] {
@@ -652,4 +719,11 @@
   --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.7);
   --shadow-lg: var(--shadow);
   --glow: 0 0 0 3px var(--accent-glow);
+  --row-hover: var(--hover);
+  --border-input: var(--border-strong);
+  --row-line: var(--border-2);
+  --grid-line: var(--border-2);
+  --muted-4: var(--muted-3);
+  --accent-soft: var(--accent-hover);
+  --accent-deep: var(--accent-border);
 }

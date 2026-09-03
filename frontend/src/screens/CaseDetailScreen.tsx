@@ -139,6 +139,9 @@ export function CaseDetailScreen() {
 
       {snap && snap.events > 0 && (
         <div className="case-detail__sev">
+          {/* The one label treatment (`.lbl`): the bar and its legend are a region, and a region
+              without a label is a graphic nobody can name. */}
+          <span className="lbl case-detail__sev-lbl">Severity across this case</span>
           <SevBar sev={snap.sev} total={snap.events} />
           <div className="case-detail__sev-legend">
             {SEVERITIES.filter((s) => (snap.sev[s] ?? 0) > 0).map((s) => (

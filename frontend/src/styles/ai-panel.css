@@ -1,0 +1,1198 @@
+/* The AI assistant panel and the conversation it renders (components/AiPanel.tsx,
+   PromptPicker.tsx, PromptEditorDialog.tsx, and the AI dressing on FloatingWindow.tsx).
+
+   THIS SURFACE IS THE "MODERN AI ASSISTANT CHAT INTERFACE" TEMPLATE, transcribed.
+   Composition, typography, shapes, sizes, spacing and interactions come from
+   `.template-extract-ai/Assistant Chat.dc.html` and are kept literally: a 58px header with a brand
+   lozenge and a serif wordmark, a CENTRED 792px thread column with 34px between messages, a
+   right-aligned user BUBBLE with the 20/20/7/20 corner, an assistant answer set in a SERIF at
+   19px/1.66, an unnumbered collapsible steps card behind a 1px left rule, an artifact card, and a
+   22px-radius composer pinned to the bottom of the scroller with a 34px round send button.
+
+   THE ONE DELIBERATE DEVIATION IS COLOUR. The template's own hexes are not used; every value below
+   is an Iris theme token, so the panel belongs to the same app as every other screen and works in
+   all nine themes. The mapping is:
+       the template's near-black ground   -> --bg
+       raised card / bubble / composer    -> --panel-2
+       the darker side canvas             -> --panel-inset
+       its two hairline alphas            -> --border-2 / --border-strong (hover --border-hover)
+       the light "fill" and its dark text -> --accent on --on-accent
+       the text ramp, brightest to dimmest-> --text / --text-2 / --text-4 / --muted / --muted-2 /
+                                             --muted-3 / --muted-4
+   NO LITERAL COLOUR APPEARS ANYWHERE IN THIS FILE — not a hex, not an rgb(), not even in a
+   comment. That is a hard rule in this repo: a hard-coded shade is a value that is wrong in eight
+   of the nine themes, and a hex quoted in a comment is the one that gets copied into a rule later.
+
+   Sizes here ARE absolute px rather than the `--fs-*` ramp, on purpose: they are the template's own
+   measurements and the point of this screen is that it reads like a document, not like a table.
+
+   The product rules the design does not get to change, all still enforced by the markup this file
+   dresses: a control is DIMMED, never hover-hidden; a WRITE is drawn differently from a READ (the
+   accent rail and the `write` tag) and is repeated in the changes card with a Revert; a WARNING is
+   never folded into the steps card; and there are no step numbers anywhere — a model-turn boundary
+   is a break in the rail, not a "step 12". */
+
+/* ══════════════════ shared primitives that happen to live in this file ══════════════════
+   `.kbd` and `.badge` are used across the app (Layout, Search, Ingest, Settings, the case screens).
+   They are NOT part of the assistant and must not be restyled with it. */
+.kbd {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xxs);
+  padding: 1px 5px;
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-sm);
+  min-width: 16px;
+  text-align: center;
+  display: inline-block;
+  background: var(--panel-inset);
+  color: var(--muted-2);
+}
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  padding: 2px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-3);
+  letter-spacing: 0;
+  line-height: 1.5;
+}
+.badge--ok {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+.badge--bad {
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--bad);
+}
+.badge--warn {
+  border-color: var(--sev-medium);
+  background: var(--sev-medium-bg);
+  color: var(--sev-medium);
+}
+.badge__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+/* ══════════════════ the assistant ══════════════════ */
+
+/* The template's three animations, all of them opacity-only — nothing here animates a colour. */
+@keyframes aicCaret { 0%, 45% { opacity: 1; } 55%, 100% { opacity: 0.12; } }
+@keyframes aicStepIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes aicPulse { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
+
+.aic {
+  /* Newsreader is BUNDLED (@fontsource/newsreader, imported in main.tsx). Iris makes no runtime
+     network request for a font, so there is no <link> to Google Fonts anywhere in this app. */
+  --aic-serif: 'Newsreader', 'Iowan Old Style', Georgia, 'Times New Roman', serif;
+  --aic-head-h: 58px;
+  --aic-col: 792px;
+  --aic-pad: 26px;
+  font-family: var(--font-ui);
+  color: var(--text);
+}
+@media (prefers-reduced-motion: reduce) {
+  .aic *, .aic *::before, .aic *::after { animation: none !important; }
+}
+
+/* ───────── the docked shell ─────────
+   A slide-over on the page ground, separated by ONE rule. The template's thread wants a real
+   measure for 19px serif prose, so the panel is wider than the old 560px — at 560 the answer ran
+   to about 46 characters a line, which is the "squeezed" complaint the analyst already made once. */
+.ai-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 680px;
+  max-width: 96vw;
+  background: var(--bg);
+  border-left: 1px solid var(--border);
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  animation: slideInRight var(--t-slow);
+  overflow: hidden;
+}
+
+/* ───────── header (58px) ───────── */
+.aic__head {
+  flex: 0 0 auto;
+  height: var(--aic-head-h);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 12px 0 18px;
+  border-bottom: 1px solid var(--border-2);
+  background: var(--bg);
+  min-width: 0;
+}
+.aic__brand { display: flex; align-items: center; gap: 9px; flex: 0 0 auto; }
+.aic__mark {
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  background: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+.aic__mark i {
+  display: block;
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: var(--on-accent);
+  transform: rotate(45deg);
+}
+.aic__wordmark {
+  font-family: var(--aic-serif);
+  font-size: 18px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--text);
+  white-space: nowrap;
+}
+.aic__rule { width: 1px; height: 20px; background: var(--border); flex: 0 0 auto; }
+.aic__ident { display: flex; align-items: baseline; gap: 10px; min-width: 0; flex: 0 1 auto; }
+.aic__title {
+  font-size: 13.5px;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.aic__stamp {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.aic__spacer { flex: 1 1 0; }
+
+/* The template's two header controls: a bordered mono pill and a 34px square icon button. */
+.aic__pill {
+  appearance: none;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--text-4);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  line-height: 1;
+  padding: 8px 13px;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  white-space: nowrap;
+  flex: 0 0 auto;
+  transition: color var(--t-fast), border-color var(--t-fast), background-color var(--t-fast);
+}
+/* also worn by the one LINK in this panel (the "open settings" call to action), so it has to lay
+   out as a box and drop the underline a bare <a> would carry */
+a.aic__pill { display: inline-block; text-decoration: none; }
+.aic__pill:hover:not(:disabled) { border-color: var(--border-hover); color: var(--text); }
+.aic__pill:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.aic__pill:disabled { opacity: 0.45; cursor: not-allowed; }
+.aic__pill.is-on { border-color: var(--accent-border); color: var(--accent); background: var(--accent-bg); }
+.aic__iconbtn {
+  appearance: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  transition: color var(--t-fast), border-color var(--t-fast);
+}
+.aic__iconbtn svg { width: 14px; height: 14px; }
+.aic__iconbtn:hover { border-color: var(--border-hover); color: var(--text); }
+.aic__iconbtn:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+
+/* ───────── thread + optional side canvas ───────── */
+.aic__shell { flex: 1; min-height: 0; display: flex; }
+.aic__thread {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  scrollbar-gutter: stable;
+}
+.aic__column {
+  width: 100%;
+  max-width: var(--aic-col);
+  margin: 0 auto;
+  padding: 30px var(--aic-pad) 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 34px;
+  min-width: 0;
+}
+/* The empty state centres in the space above the composer, which only works if the column is the
+   flexible child — the dock's `margin-top: auto` puts it at the bottom either way. */
+.aic__column--hero { flex: 1 1 auto; justify-content: center; }
+
+/* The composer is sticky INSIDE the scroller (the template's own arrangement), with a scrim that
+   fades the transcript into the ground behind it. `margin-top: auto` is what pins it to the bottom
+   of a short conversation. Stop lives in here, so it is reachable for the whole run. */
+.aic__dock {
+  position: sticky;
+  bottom: 0;
+  margin-top: auto;
+  padding: 26px var(--aic-pad) 22px;
+  background: linear-gradient(to top, var(--bg) 42%, var(--bg) 74%, transparent);
+  z-index: 2;
+}
+.aic__dockin {
+  max-width: var(--aic-col);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.aic__jump {
+  align-self: center;
+  appearance: none;
+  border: 1px solid var(--border-strong);
+  background: var(--panel-2);
+  color: var(--text-4);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 7px 13px;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+}
+.aic__jump:hover { border-color: var(--border-hover); color: var(--text); }
+
+/* ───────── a user message: the bubble ───────── */
+.aic-user { display: flex; flex-direction: column; align-items: flex-end; gap: 7px; min-width: 0; }
+.aic-user__bubble {
+  max-width: 80%;
+  background: var(--panel-2);
+  border: 1px solid var(--border-2);
+  border-radius: 20px 20px 7px 20px;
+  padding: 13px 17px;
+  font-size: 15.5px;
+  line-height: 1.56;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.aic-user__ctx {
+  max-width: 80%;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted-2);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+/* Dimmed, never hover-hidden — a control that only exists on hover is unreachable by touch. */
+.aic-micros { display: flex; align-items: center; gap: 4px; opacity: 0.42; transition: opacity var(--t-fast); }
+.aic-user:hover .aic-micros,
+.aic-micros:focus-within { opacity: 1; }
+.aic-micro {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-4);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  padding: 5px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.aic-micro:hover { background: var(--hover); color: var(--text); }
+.aic-micro:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+.aic-micro--stamp { cursor: default; color: var(--muted-3); }
+.aic-micro--stamp:hover { background: transparent; color: var(--muted-3); }
+
+/* ───────── an assistant message ───────── */
+.aic-asst { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+
+/* THE STEPS CARD. Unnumbered, by design: the sequence is the order of the rows and a model-turn
+   boundary is a GAP in the rail. The dot pulses only while the run is live. */
+.aic-steps {
+  border: 1px solid var(--border-2);
+  background: var(--panel-inset);
+  border-radius: 14px;
+  overflow: hidden;
+}
+.aic-steps__head {
+  appearance: none;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  padding: 12px 14px;
+  text-align: left;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  transition: color var(--t-fast);
+}
+.aic-steps__head:hover { color: var(--text); }
+.aic-steps__head:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
+.aic-steps__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  flex: 0 0 auto;
+}
+.aic-steps__dot--live { animation: aicPulse 1.5s ease-in-out infinite; }
+.aic-steps__dot--idle { background: var(--muted-3); }
+.aic-steps__sum { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aic-steps__chev {
+  width: 11px;
+  height: 11px;
+  flex: 0 0 auto;
+  color: var(--muted-2);
+  transform: rotate(-90deg);
+  transition: transform var(--t-fast);
+}
+.aic-steps__chev--open { transform: rotate(0deg); }
+.aic-steps__body { padding: 2px 14px 14px 20px; display: flex; flex-direction: column; }
+.aic-step {
+  padding: 8px 0 8px 14px;
+  border-left: 1px solid var(--border);
+  animation: aicStepIn 260ms ease both;
+  min-width: 0;
+}
+/* the break that replaced the step numbers */
+.aic-step--turn { margin-top: 12px; border-left-color: var(--accent-deep); }
+
+/* One tool CALL and its RESULT in ONE card — they used to be two lines with nothing binding them.
+   `writes` is read in exactly one place in the TSX; this is the rail it draws. */
+.tcall { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.tcall--write {
+  margin-left: -15px;
+  padding-left: 13px;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.tcall--bad { box-shadow: inset 2px 0 0 var(--bad); margin-left: -15px; padding-left: 13px; }
+.aic .tcall__lead { font-size: 12.5px; line-height: 1.55; color: var(--text-4); }
+.aic .tcall__lead .md-p { margin: 0 0 4px; }
+.tcall__head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.tcall__glyph { width: 12px; height: 12px; flex: 0 0 auto; color: var(--muted-2); }
+.tcall--write .tcall__glyph { color: var(--accent); }
+.tcall__name {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+  color: var(--text-2);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tcall__kind {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+  border: 1px solid var(--accent-border);
+  background: var(--accent-bg);
+  border-radius: var(--radius-pill);
+  padding: 2px 7px;
+  line-height: 1.3;
+}
+.tcall__ms, .tcall__unknown {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted-3);
+}
+.tcall__ms + .tcall__unknown, .tcall__unknown + .tcall__ms { margin-left: 0; }
+.tcall__args { margin: 0; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.tcall__arg { display: flex; gap: 10px; min-width: 0; align-items: baseline; }
+.tcall__arg dt { flex: 0 0 auto; font-family: var(--font-mono); font-size: 11.5px; color: var(--muted-2); }
+.tcall__arg dd {
+  margin: 0;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tcall__more {
+  align-self: flex-start;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+.tcall__more:hover { color: var(--text); }
+.tcall__more:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.tcall__result {
+  display: flex;
+  gap: 7px;
+  align-items: flex-start;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.tcall__result svg { flex: 0 0 auto; width: 11px; height: 11px; margin-top: 3px; color: var(--ok); }
+.tcall__result span { min-width: 0; overflow-wrap: anywhere; }
+.tcall__result--bad, .tcall__result--bad svg { color: var(--bad); }
+.tcall__pending { color: var(--muted-3); }
+
+/* Nothing was CALLED — the agent simply said something. A collapsible card labelled "0 tool calls"
+   around one sentence is chrome, not structure. */
+.aic-bare { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.aic .aic-bare__note { font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); line-height: 1.55; }
+
+/* ───────── THE ANSWER, set in a serif ─────────
+   This is the single most recognisable thing in the template: the answer reads like a document and
+   everything around it is mono or sans. */
+.aic .aic-prose {
+  font-family: var(--aic-serif);
+  font-size: 19px;
+  line-height: 1.66;
+  letter-spacing: 0.002em;
+  color: var(--text);
+  text-wrap: pretty;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.aic .aic-prose > *:first-child { margin-top: 0; }
+.aic .aic-prose > *:last-child { margin-bottom: 0; }
+/* `.md-p` keeps `white-space: pre-wrap` from notes.css — deliberate and documented: analysts type
+   real line breaks and reflowing them would silently change every note already on disk. */
+.aic .aic-prose .md-p { margin: 0 0 16px; }
+.aic .aic-prose .md-h1, .aic .aic-prose .md-h2 {
+  font-family: var(--aic-serif);
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: var(--text-bright);
+  margin: 26px 0 10px;
+  line-height: 1.3;
+}
+.aic .aic-prose .md-h1 { font-size: 25px; }
+.aic .aic-prose .md-h2 { font-size: 21px; }
+.aic .aic-prose .md-h3 {
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: var(--ls-head);
+  text-transform: uppercase;
+  color: var(--muted-2);
+  margin: 24px 0 8px;
+}
+.aic .aic-prose > .md-h1:first-child,
+.aic .aic-prose > .md-h2:first-child,
+.aic .aic-prose > .md-h3:first-child { margin-top: 0; }
+.aic .aic-prose ul, .aic .aic-prose ol { margin: 0 0 16px; padding-left: 24px; }
+.aic .aic-prose li { margin: 6px 0; font-size: 18px; line-height: 1.6; }
+.aic .aic-prose li > ul, .aic .aic-prose li > ol { margin: 6px 0 2px; }
+.aic .aic-prose .md-quote {
+  margin: 0 0 16px;
+  font-family: var(--aic-serif);
+  font-size: 18px;
+  color: var(--text-3);
+}
+.aic .aic-prose .md-hr { margin: 24px 0; }
+/* Data stays in the mono face at a data size — an event id is not prose. */
+.aic .aic-prose .md-code, .aic .aic-prose .md-data, .aic .aic-prose .md-time {
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.aic .aic-prose .md-pre {
+  margin: 0 0 16px;
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--border-2);
+  border-radius: 14px;
+  background: var(--panel-inset);
+  padding: 13px 16px 15px;
+}
+.aic .aic-prose .md-pre code { font-family: var(--font-mono); font-size: 12.5px; line-height: 1.82; color: var(--text-2); }
+.aic .aic-prose .md-tablewrap { max-width: 100%; overflow-x: auto; margin: 0 0 16px; border-radius: 10px; }
+.aic .aic-prose .md-table { min-width: 0; font-family: var(--font-ui); font-size: 12.5px; }
+/* the same measure, one size down, where prose is commentary rather than the answer */
+.aic .aic-prose--quiet { font-size: 16.5px; color: var(--text-3); }
+.aic .aic-prose--quiet li { font-size: 16px; }
+
+/* The streaming caret. Included on the analyst's explicit instruction that this template's UX
+   supersedes the earlier note that the panel carries no caret. */
+.aic-caret {
+  display: inline-block;
+  width: 9px;
+  height: 19px;
+  background: var(--accent);
+  border-radius: 2px;
+  animation: aicCaret 1s steps(1, end) infinite;
+  margin-top: -8px;
+}
+
+/* ───────── the artifact card: what this run changed in the case ───────── */
+.aic-art {
+  border: 1px solid var(--border-2);
+  background: var(--panel-inset);
+  border-radius: 14px;
+  overflow: hidden;
+}
+.aic-art__head { display: flex; align-items: center; gap: 14px; padding: 14px 16px; min-width: 0; }
+.aic-art__tile {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+.aic-art__tile svg { width: 15px; height: 15px; }
+.aic-art__ident { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.aic-art__name { font-family: var(--aic-serif); font-size: 16px; color: var(--text); }
+.aic-art__meta { font-family: var(--font-mono); font-size: 11px; color: var(--muted-2); }
+.aic-art__act {
+  appearance: none;
+  flex: 0 0 auto;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--text-4);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 7px 12px;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  line-height: 1;
+  transition: color var(--t-fast), border-color var(--t-fast);
+}
+.aic-art__act:hover:not(:disabled) { border-color: var(--border-hover); color: var(--text); }
+.aic-art__act:disabled { opacity: 0.5; cursor: not-allowed; }
+.aic-art__act:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.aic-art__list {
+  list-style: none;
+  margin: 0;
+  padding: 12px 16px 14px;
+  border-top: 1px solid var(--border-2);
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.aic-change { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+.aic-change__glyph { width: 12px; height: 12px; margin-top: 3px; color: var(--accent); flex: 0 0 auto; }
+.aic-change__text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
+.aic-change__summary { font-size: 13.5px; line-height: 1.5; color: var(--text-2); overflow-wrap: anywhere; }
+.aic-change__kind {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+.aic-change--undone { opacity: 0.55; }
+.aic-change--undone .aic-change__summary { text-decoration: line-through; }
+.aic-change--undone .aic-change__glyph { color: var(--muted-2); }
+.aic-change__tag {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  padding: 2px 7px;
+}
+
+/* ───────── the actions row under an answer ───────── */
+.aic-acts { display: flex; align-items: center; gap: 3px; margin-top: -2px; opacity: 0.4; transition: opacity var(--t-fast); }
+.aic-asst:hover .aic-acts,
+.aic-acts:focus-within { opacity: 1; }
+.aic-acts__spacer { flex: 1; }
+.aic-acts__time { font-family: var(--font-mono); font-size: 10.5px; color: var(--muted-3); }
+
+/* ───────── warnings, notes, run metadata ─────────
+   A warning is an EVIDENCE-INTEGRITY signal. It is rendered outside the steps card and is never
+   folded, in any state of the run. */
+.aic-warn {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  border: 1px solid var(--danger-border);
+  background: var(--danger-bg);
+  border-radius: 14px;
+  padding: 12px 14px;
+  color: var(--bad);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.aic-warn svg { width: 13px; height: 13px; flex: 0 0 auto; margin-top: 2px; }
+.aic-note { font-size: 13px; line-height: 1.55; color: var(--muted); text-wrap: pretty; }
+.aic-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--muted-3);
+}
+.aic-state {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+  flex: 0 0 auto;
+}
+.aic-state--running { color: var(--accent); }
+.aic-state--error { color: var(--bad); }
+.aic-busy {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+
+/* ───────── the empty state ─────────
+   A 40px/300 serif line, and nothing else. The template offers suggestion pills here; Iris does
+   NOT — "no canned AI prompt suggestions, one free-text objective" is a standing instruction from
+   the analyst and it outranks the design. */
+.aic-hero {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  padding: 40px 24px;
+  text-align: center;
+}
+.aic-hero__title {
+  margin: 0;
+  font-family: var(--aic-serif);
+  font-weight: 300;
+  font-size: 40px;
+  line-height: 1.15;
+  letter-spacing: -0.015em;
+  color: var(--text);
+}
+.aic-hero__body {
+  max-width: 58ch;
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--muted);
+  text-wrap: pretty;
+}
+.aic-hero__ctx {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted-2);
+  overflow-wrap: anywhere;
+}
+.aic-hero__ctx b { font-weight: 400; color: var(--muted-3); letter-spacing: 0.08em; text-transform: uppercase; }
+
+/* ───────── the composer ───────── */
+.aic-comp {
+  border: 1px solid var(--border-input);
+  background: var(--panel-2);
+  border-radius: 22px;
+  padding: 14px 14px 11px;
+  box-shadow: var(--shadow-md);
+  display: block;
+  min-width: 0;
+}
+.aic-comp:focus-within { border-color: var(--accent-deep); }
+.aic-comp--live { opacity: 0.92; }
+.aic-comp__input {
+  width: 100%;
+  display: block;
+  resize: none;
+  background: transparent;
+  border: 0;
+  outline: none;
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 15.5px;
+  line-height: 1.55;
+  min-height: 24px;
+  max-height: 150px;
+  overflow-y: auto;
+  padding: 0 2px 4px;
+}
+.aic-comp__input:focus, .aic-comp__input:focus-visible { border: 0; box-shadow: none; outline: none; }
+.aic-comp__input::placeholder { color: var(--muted-2); }
+.aic-comp__input:disabled { cursor: not-allowed; }
+.aic-comp__bar { display: flex; align-items: center; gap: 8px; padding-top: 6px; min-width: 0; }
+.aic-comp__hint {
+  margin-left: auto;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: var(--muted-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.aic-comp__send {
+  appearance: none;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-pill);
+  border: 0;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  transition: transform var(--t-fast), opacity var(--t-fast);
+}
+.aic-comp__send:hover:not(:disabled) { transform: scale(1.06); }
+.aic-comp__send:disabled { opacity: 0.4; cursor: not-allowed; }
+.aic-comp__send:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.aic-comp__arrow { display: block; margin-top: -1px; }
+.aic-comp__stop { display: block; width: 10px; height: 10px; border-radius: 3px; background: var(--on-accent); }
+.aic-comp__note {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.55;
+  letter-spacing: 0.02em;
+  color: var(--muted-3);
+  text-wrap: pretty;
+  padding: 0 6px;
+}
+
+/* ───────── the right-hand canvas panel: the conversation history ─────────
+   The template's 470px canvas, on its own darker ground, with a 52px head (serif name, mono state,
+   a pill-group of tabs, close), a body of numbered mono lines and a foot carrying a mono summary.
+   It appears only where there is ROOM (see CANVAS_MIN_CONTENT in AiPanel.tsx); below that width it
+   takes the whole panel, because 470px of canvas beside 90px of thread is neither. */
+.aic-canvas {
+  flex: 0 0 470px;
+  min-width: 0;
+  min-height: 0;
+  border-left: 1px solid var(--border-2);
+  background: var(--panel-inset);
+  display: flex;
+  flex-direction: column;
+}
+/* Too narrow for a canvas BESIDE the thread, so it becomes the reading column — inside the same
+   scroller, ABOVE the sticky composer. Stop has to stay reachable for the whole run whatever else is
+   on screen, and a second composer would be a second copy that eventually drifts. */
+.aic-canvas--full {
+  flex: 1 1 auto;
+  border-left: 0;
+  background: transparent;
+  min-height: 0;
+}
+.aic-canvas--full .aic-canvas__body { overflow: visible; }
+.aic-canvas--full .aic-canvas__head { position: sticky; top: 0; z-index: 1; background: var(--bg); }
+.aic-canvas--full .aic-canvas__foot { border-top: 0; }
+.aic-canvas__head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px 0 18px;
+  height: 52px;
+  border-bottom: 1px solid var(--border-2);
+  min-width: 0;
+}
+.aic-canvas__name { font-family: var(--aic-serif); font-size: 16px; color: var(--text); white-space: nowrap; }
+.aic-canvas__state {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-3);
+  white-space: nowrap;
+}
+.aic-canvas__tabs {
+  display: flex;
+  gap: 2px;
+  background: var(--panel-2);
+  padding: 3px;
+  border-radius: var(--radius-pill);
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+.aic-canvas__tab {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  padding: 6px 12px;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  line-height: 1;
+}
+.aic-canvas__tab.is-on { background: var(--accent); color: var(--on-accent); }
+.aic-canvas__tab:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+.aic-canvas__close {
+  appearance: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  border: 0;
+  background: transparent;
+  color: var(--muted-2);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.aic-canvas__close:hover { background: var(--hover); color: var(--text); }
+.aic-canvas__body { flex: 1; min-height: 0; overflow: auto; padding: 10px 0 20px; }
+.aic-canvas__foot {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border-2);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--muted-2);
+}
+.aic-canvas__foot .aic-art__act { margin-left: auto; }
+
+/* the history rows, laid out as the canvas's numbered mono lines */
+.aic-hist { list-style: none; margin: 0; padding: 0; }
+.aic-hist__row { display: flex; align-items: stretch; gap: 2px; }
+.aic-hist__row:hover { background: var(--hover); }
+.aic-hist__open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+  color: inherit;
+  padding: 11px 8px 11px 18px;
+}
+.aic-hist__open:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
+.aic-hist__n {
+  flex: 0 0 22px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted-4);
+  user-select: none;
+}
+.aic-hist__text { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.aic-hist__prompt {
+  font-family: var(--aic-serif);
+  font-size: 15px;
+  line-height: 1.42;
+  color: var(--text-2);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.aic-hist__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--muted-2);
+  min-width: 0;
+}
+.aic-hist__writes { color: var(--accent); }
+.aic-hist__del {
+  appearance: none;
+  flex: 0 0 auto;
+  width: 34px;
+  border: 0;
+  background: transparent;
+  color: var(--muted-3);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.55;
+  transition: opacity var(--t-fast), color var(--t-fast);
+}
+.aic-hist__del svg { width: 13px; height: 13px; }
+.aic-hist__del:hover { opacity: 1; color: var(--bad); }
+.aic-hist__del:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; opacity: 1; }
+.aic-hist__empty {
+  padding: 26px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  text-align: left;
+}
+.aic-hist__empty-title { font-family: var(--aic-serif); font-size: 20px; font-weight: 400; color: var(--text-2); }
+.aic-hist__empty-body { font-size: 12.5px; line-height: 1.6; color: var(--muted); text-wrap: pretty; }
+
+/* ───────── the assistant is off ───────── */
+.ai-cta {
+  margin: 0 auto;
+  max-width: 58ch;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  align-items: flex-start;
+  padding: 40px 0;
+}
+.ai-cta__title { font-family: var(--aic-serif); font-size: 28px; font-weight: 400; color: var(--text); }
+.ai-cta__body { font-size: 13.5px; line-height: 1.65; color: var(--muted); text-wrap: pretty; }
+
+/* ───────── the detached shell ─────────
+   Same body, same controls, same composer — only the frame changes. The window's own title bar IS
+   the template header (FloatingWindow takes it as `head`), so there is never a header above a
+   header, and the whole bar stays the drag handle. */
+.floatwin--aic { background: var(--bg); }
+.floatwin--aic .floatwin__head {
+  padding: 0;
+  gap: 0;
+  height: var(--aic-head-h);
+  min-height: var(--aic-head-h);
+  background: var(--bg);
+  border-bottom: 0;
+}
+.floatwin--aic .floatwin__head > .aic__head { flex: 1 1 auto; min-width: 0; }
+.floatwin--aic .floatwin__body--flush { background: var(--bg); }
+.aic-win__title { display: inline-flex; align-items: center; gap: 8px; }
+
+/* ══════════════════ the prompt picker (the composer's mode pill) ══════════════════
+   The template's mode pill: mono, uppercase, a capsule, no fill. It opens a real MENU rather than a
+   native <select>, which takes the OS's styling and cannot show a description per row. */
+.ppick { position: relative; min-width: 0; flex: 0 1 auto; }
+.ppick__btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  padding: 7px 11px;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  line-height: 1;
+  transition: color var(--t-fast), border-color var(--t-fast);
+}
+.ppick__btn:hover:not(:disabled), .ppick.open .ppick__btn { border-color: var(--border-hover); color: var(--text); }
+.ppick__btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.ppick__btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.ppick__btn-label { color: var(--muted-3); flex: 0 0 auto; }
+.ppick__btn-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-4); }
+.ppick.open .ppick__btn-name, .ppick__btn:hover .ppick__btn-name { color: var(--text); }
+.ppick__btn-plus { color: var(--muted-3); white-space: nowrap; flex: 0 0 auto; }
+.ppick__caret { width: 10px; height: 10px; color: var(--muted-2); flex: 0 0 10px; transition: transform var(--t-fast); }
+.ppick.open .ppick__caret { transform: rotate(180deg); }
+
+/* The menu opens UPWARDS: the pill lives in a composer pinned to the bottom of the panel. */
+.ppick__menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 5;
+  width: 360px;
+  max-width: 78vw;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 6px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  box-shadow: var(--shadow-md);
+}
+.ppick__section + .ppick__section { border-top: 1px solid var(--border-2); margin-top: 5px; padding-top: 5px; }
+.ppick__head {
+  padding: 7px 10px 5px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-3);
+}
+.ppick__head span { text-transform: none; letter-spacing: 0.02em; color: var(--muted-4); }
+.ppick__row { display: flex; align-items: stretch; gap: 2px; border-radius: 10px; }
+.ppick__row:hover, .ppick__row:focus-within { background: var(--hover); }
+.ppick__row.checked { background: var(--accent-bg); }
+.ppick__item {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  padding: 9px 10px;
+  color: inherit;
+  border-radius: 10px;
+}
+.ppick__item:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; box-shadow: none; }
+.ppick__check { width: 14px; height: 14px; color: var(--accent); margin-top: 2px; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 14px; }
+.ppick__check svg { width: 12px; height: 12px; }
+.ppick__text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.ppick__name { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 500; color: var(--text-2); min-width: 0; }
+.ppick__item.checked .ppick__name { color: var(--text-bright); }
+.ppick__desc {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--muted-2);
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ppick__tag {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  padding: 2px 7px;
+  font-weight: 400;
+}
+.ppick__tag--warn { color: var(--warn); border-color: var(--sev-high); background: var(--sev-high-bg); }
+.ppick__edit {
+  appearance: none;
+  flex: 0 0 auto;
+  width: 30px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted-2);
+  cursor: pointer;
+  opacity: 0.6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity var(--t-fast), color var(--t-fast);
+}
+.ppick__edit svg { width: 12px; height: 12px; }
+.ppick__edit:hover, .ppick__edit:focus-visible { opacity: 1; color: var(--text); border-color: var(--border-strong); outline: none; }
+.ppick__empty { padding: 9px 10px 7px; font-size: 12px; color: var(--muted); line-height: 1.5; text-wrap: pretty; }
+.ppick__foot { border-top: 1px solid var(--border-2); margin-top: 5px; padding-top: 5px; }
+.ppick__manage {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  padding: 9px 10px;
+  border-radius: 10px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--muted);
+  text-decoration: none;
+}
+.ppick__manage:hover, .ppick__manage:focus-visible { background: var(--hover); color: var(--text); outline: none; }
+.ppick__manage-l { display: inline-flex; align-items: center; gap: 7px; }
+.ppick__manage-l svg { width: 11px; height: 11px; color: var(--muted-2); }
+.ppick__manage-r { margin-left: auto; color: var(--muted-3); }
+.ppick__manage-arrow { width: 11px; height: 11px; transform: rotate(180deg); color: var(--muted-2); flex: 0 0 auto; }
+
+/* ══════════════════ the prompt editor dialog ══════════════════ */
+.modal__box--wide { width: 620px; }
+.pedit__form { display: flex; flex-direction: column; gap: 12px; margin-top: 14px; }
+.pedit__text { min-height: 200px; resize: vertical; font-family: var(--font-mono); font-size: var(--fs-sm); line-height: 1.5; }
+.pedit__confirm {
+  font-size: var(--fs-base);
+  color: var(--muted);
+  line-height: 1.5;
+}
+.pedit__confirm b { color: var(--text-bright); font-weight: 500; }
+.pedit__foot { justify-content: flex-start; }
+.pedit__spacer { flex: 1; }
+.pedit__delete { color: var(--muted-2); }
+.pedit__delete:hover:not(:disabled) { color: var(--bad); }
+
+/* ══════════════════ narrow shells ══════════════════
+   Under ~560px of panel the 26px gutters and the 34px message rhythm are most of the width. */
+@media (max-width: 620px) {
+  .aic { --aic-pad: 16px; }
+  .aic__column { gap: 26px; padding-top: 22px; }
+  .aic .aic-prose { font-size: 17.5px; }
+  .aic .aic-prose li { font-size: 16.5px; }
+  .aic-hero__title { font-size: 30px; }
+  .aic__wordmark { font-size: 16px; }
+  .aic-user__bubble { max-width: 92%; }
+}

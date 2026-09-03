@@ -592,7 +592,8 @@ text the model receives, and the built-in prompt is readable there too. Saved pr
 `ai/system_prompts.json` in the data directory and are kept by *Clear all data*, like rules.
 
 ### 7. Settings
-**Appearance** (5 themes + density) · **Compute** (GPU list, live utilization / VRAM / temp / power / CPU / RSS /
+**Appearance** (9 themes + the interface and monospace face + density; the default is *Iris dark*, the
+observability console palette — teal on graphite, IBM Plex Sans over JetBrains Mono) · **Compute** (GPU list, live utilization / VRAM / temp / power / CPU / RSS /
 parse throughput sampled every 2 s with 2–30 min charts, mode auto / CUDA / CPU, *Re-check now*, and
 **Two-phase ingest** — the auto-enrich toggle, which schedules *when* the expensive parse runs, not whether
 it runs) · **AI assistant**

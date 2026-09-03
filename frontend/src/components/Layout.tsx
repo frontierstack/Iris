@@ -11,7 +11,9 @@ import { EnrichBanner } from './Enrichment';
 import { Icon } from './icons';
 import { Toasts } from './ui';
 
-interface NavDef { to: string; label: string; tag: string }
+/** `alert` gives the count the template's tinted badge rather than a quiet figure. There is no icon
+ *  field: this rail is TEXT (see the note in components.css). */
+interface NavDef { to: string; label: string; tag: string; alert?: boolean }
 interface NavGroup { id: string; label: string; items: NavDef[] }
 
 function useScreenMeta(): { crumb: string; title: string; sub: string } {
@@ -71,22 +73,39 @@ export function Sidebar() {
 
   const baseGroups: NavGroup[] = useMemo(() => {
     const d = c.data;
+    // The template's rail is grouped by WHAT YOU ARE DOING, not by which part of the app owns the
+    // screen — EXPLORE / DATA / MONITOR, each a short group with its own label. Iris's screens map
+    // onto that directly: two you ask questions with, two that are the evidence itself, one that
+    // watches it, and the machine.
     return [
       {
-        id: 'workbench',
-        label: 'Workbench',
+        id: 'explore',
+        label: 'Explore',
         items: [
-          { to: '/cases', label: 'Cases', tag: cases.data ? String(cases.data.length) : '' },
-          { to: '/ingest', label: 'Sources', tag: d ? String(d.sources.length + d.librarySources.length) : '' },
           { to: '/search', label: 'Search', tag: d ? fmtCompact(d.poolEventCount) : '' },
-          { to: '/anomalies', label: 'Anomalies', tag: anomalies.data === undefined ? '' : String(anomalies.data) },
-          // No Timeline entry: the timeline is a property of a CASE (the curated events, in order), not a
-          // global screen — it lives on the case detail page.
           // No graph request from the sidebar. `useGraph` here made EVERY page start a full entity
           // extraction after every store bump — during a 300 MB library load that was a six-worker
-          // build every few seconds, each thrown away on the next bump, and on a memory-tight WSL2 VM it
-          // helped push the process into a segfault. A nav badge is not worth a 100-second build.
+          // build every few seconds, each thrown away on the next bump, and on a memory-tight WSL2 VM
+          // it helped push the process into a segfault. A nav badge is not worth a 100-second build.
           { to: '/graph', label: 'Entity graph', tag: '' },
+        ],
+      },
+      {
+        id: 'data',
+        label: 'Data',
+        items: [
+          { to: '/ingest', label: 'Sources', tag: d ? String(d.sources.length + d.librarySources.length) : '' },
+          // No Timeline entry: the timeline is a property of a CASE (the curated events, in order),
+          // not a global screen — it lives on the case detail page.
+          { to: '/cases', label: 'Cases', tag: cases.data ? String(cases.data.length) : '' },
+        ],
+      },
+      {
+        id: 'monitor',
+        label: 'Monitor',
+        items: [
+          { to: '/anomalies', label: 'Anomalies', tag: anomalies.data === undefined ? '' : String(anomalies.data),
+            glyph: 'anomalies', alert: !!anomalies.data },
         ],
       },
       { id: 'system', label: 'System', items: [{ to: '/settings', label: 'Settings', tag: '' }] },
@@ -134,13 +153,21 @@ export function Sidebar() {
   return (
     <div className="sidebar-slot">
     <aside className="sidebar">
+      {/* THE BRAND IS THE WORDMARK ALONE. The template puts a rotated accent lozenge beside its
+          wordmark and that was transcribed; it went the same way the eye glyph did, on sight
+          ("Remove this Iris icon, sidebar__mark"). What is left is the row's height — exactly the
+          header's, so the sidebar rule and the header rule are one continuous line across the
+          window — the wordmark, and the health light as a DOT rather than the line of prose that
+          used to sit under it. */}
       <div className="sidebar__brand">
         <div className="sidebar__brand-row">
           <div className="sidebar__brand-text">
             <div className="sidebar__logo">IRIS</div>
             <div className="sidebar__tag">
-              <span className={online ? 'sidebar__dot' : 'sidebar__dot sidebar__dot--offline'} title={online ? `API online${health.data ? ` · v${health.data.version}` : ''}` : 'API unreachable'} />
-              log correlation workbench
+              <span
+                className={online ? 'sidebar__dot' : 'sidebar__dot sidebar__dot--offline'}
+                title={online ? `API online${health.data ? ` · v${health.data.version}` : ''}` : 'API unreachable'}
+              />
             </div>
           </div>
         </div>
@@ -179,7 +206,10 @@ export function Sidebar() {
                   >
                     {reorderable && <Icon.Grip className="nav-item__grip" aria-hidden />}
                     <span className="nav-item__label">{n.label}</span>
-                    <span className="nav-item__tag">{n.tag}</span>
+                    {/* A ZERO is not a count worth drawing. The template puts a badge on the one nav
+                        item that has something waiting and nothing on the rest; a column of "0"s is
+                        four numbers saying there is nothing to see. */}
+                    <span className={cx('nav-item__tag', n.alert && 'nav-item__tag--alert')}>{n.tag === '0' ? '' : n.tag}</span>
                   </NavLink>
                 ))}
             </div>
@@ -192,9 +222,15 @@ export function Sidebar() {
           <div className="sidebar__hint"><span>Focus search</span><span className="kbd">/</span></div>
           <div className="sidebar__hint"><span>Ask AI about case</span><span><span className="kbd">⇧</span> <span className="kbd">A</span></span></div>
         </div>
+        {/* The template's identity block. Iris has no user model and is not getting one — one
+            analyst, one machine, one evidence pool — so what it states is the WORKSPACE: the build
+            that is running and whether the API is answering. */}
         <div className="sidebar__ver">
-          <span>Iris {health.data ? `v${health.data.version}` : ''}</span>
-          <span>{online ? 'API online' : 'offline'}</span>
+          <div className="sidebar__ver-mark" aria-hidden>IR</div>
+          <div className="sidebar__ver-text">
+            <div className="sidebar__ver-name">Iris {health.data ? `v${health.data.version}` : ''}</div>
+            <div className={cx('sidebar__ver-role', !online && 'sidebar__ver-role--off')}>{online ? 'API online' : 'API unreachable'}</div>
+          </div>
         </div>
       </div>
     </aside>
@@ -240,10 +276,14 @@ function ComputeBadge() {
   const title = s
     ? `${active.toUpperCase()} · backend ${s.backend}${s.gpus[0] ? ` · ${s.gpus[0].name}` : ''}${s.error ? ` · ${s.error}` : ''}`
     : 'Compute status';
+  // The template's "live tail" control: it TINTS when the thing it reports is actually happening,
+  // and its dot is the one element in this design that animates a colour. Here that is the GPU
+  // carrying the work — the only state on this bar that is live rather than static.
+  const live = active === 'cuda';
   return (
-    <button className={cx('pill', active === 'cuda' ? 'pill--ok' : 'pill--muted')} title={title} onClick={() => nav('/settings#compute')} style={{ cursor: 'pointer' }}>
-      <Icon.Cpu width={11} height={11} />
-      {s ? active.toUpperCase() : '…'}
+    <button className={cx('btn btn--sm', live ? 'btn--live' : 'btn--field')} title={title} onClick={() => nav('/settings#compute')}>
+      {live ? <span className="btn__live-dot" aria-hidden /> : <Icon.Cpu width={11} height={11} />}
+      {s ? active : '…'}
     </button>
   );
 }
@@ -275,6 +315,16 @@ export function Header() {
         <span className="header__crumb">{meta.crumb}</span>
         <span className="header__crumb-sep">/</span>
         <div className="header__title">{meta.title}</div>
+        {/* The template parks the environment after the title, because every figure on the screen is
+            read against it. Here that context is the ACTIVE CASE — and when there is none, it says
+            so as a normal state (a case is optional; every analysis screen works without one). */}
+        <button
+          className="header__ctx"
+          onClick={() => nav(caseHref)}
+          title={c.data && !c.data.pending ? `Active case: ${c.data.name} (${c.data.id})` : 'No active case — analysis spans the whole workspace'}
+        >
+          {c.data && !c.data.pending ? c.data.name : 'no case'}
+        </button>
       </div>
       {/* A big library loads in the background so the API is up immediately — say so, or a half-filled
           pool reads as missing data on every analysis screen. */}
@@ -283,15 +333,15 @@ export function Header() {
       </div>
       <div className="header__right">
         <span className="header__utc" title="Coordinated Universal Time"><b>{clock}</b> UTC</span>
-        <button className="pill" title="Events curated into this case" onClick={() => nav(caseHref)} style={{ cursor: 'pointer' }}>
+        <button className="btn btn--sm btn--field" title="Events curated into this case" onClick={() => nav(caseHref)}>
           <Icon.Check width={11} height={11} />
           {inCase} in case
         </button>
         <ComputeBadge />
         <span className="header__sep" />
-        <button className="btn btn--sm" onClick={() => ai.open({ scope: 'case', label: c.data?.name ?? 'Active case' })} title="Ask the AI assistant about this case (Shift+A)">
+        <button className="btn btn--sm btn--field" onClick={() => ai.open({ scope: 'case', label: c.data?.name ?? 'Active case' })} title="Ask the AI assistant about this case (Shift+A)">
           <Icon.Sparkle />
-          AI
+          Assistant
         </button>
       </div>
     </header>

@@ -5,7 +5,7 @@ import { api } from '../api/client';
 import type { Case, EnrichState, MappingSuggestion, ParserInfo, RawLine, Source, SourceState, UploadJob } from '../api/types';
 import { Icon } from '../components/icons';
 import { ENRICH_META, ENRICH_ORDER, EnrichActions, EnrichChip, enrichOf, useEnrichAll } from '../components/Enrichment';
-import { Bar, ConfirmDialog, Drawer, EmptyState, ErrorState, SectionHead, SkeletonRows } from '../components/ui';
+import { Bar, ConfirmDialog, Drawer, EmptyState, ErrorState, Fig, SectionHead, SkeletonRows } from '../components/ui';
 import { AddSources } from '../components/AddSources';
 import { FloatingWindow } from '../components/FloatingWindow';
 import { AutoMapAll } from '../components/AutoMapAll';
@@ -136,7 +136,7 @@ function SuggestBox({ source, onApply }: { source: Source; onApply: (s: MappingS
       {mut.isError && <div className="compute-error">{mut.error instanceof Error ? mut.error.message : 'Suggestion failed'}</div>}
       {sug && (
         <div className="suggest__rationale">
-          <span className="eyebrow" style={{ marginRight: 8 }}>Rationale</span>
+          <span className="lbl" style={{ marginRight: 8 }}>Rationale</span>
           {sug.rationale || 'No rationale returned.'}
         </div>
       )}
@@ -445,8 +445,8 @@ function MappingDrawer({ source, onClose, onViewRaw }: { source: Source | null; 
             )}
           </div>
           <div>
-            <div className="eyebrow">Sample line</div>
-            <div className="sample" style={{ marginTop: 8 }}>{source.sample || '— no sample available —'}</div>
+            <div className="lbl">Sample line</div>
+            <div className="sample">{source.sample || '— no sample available —'}</div>
           </div>
           <div className="kv-list">
             <div className="kv"><span className="kv__k">Detected parser</span><span className="kv__v">{source.parser}</span></div>
@@ -611,9 +611,9 @@ function JobRow({ job, pct, localError }: { job: UploadJob; pct?: number; localE
         {(job.state === 'uploading' || job.state === 'parsing') && <span className="spinner" />}
         {label}
       </span>
-      {noDetail ? <span className="muted" style={{ fontSize: 12 }}>no progress reported yet</span>
+      {noDetail ? <span className="upload-item__detail">no progress reported yet</span>
         : <Bar pct={shown} color={failed ? 'var(--bad)' : job.state === 'ready' ? 'var(--ok)' : 'var(--accent)'} />}
-      {detail && !failed && <span className="muted" style={{ gridColumn: '1 / -1', fontSize: 12 }}>{detail}</span>}
+      {detail && !failed && <span className="upload-item__detail">{detail}</span>}
       {/* The failure names its file (the row's first cell) and says exactly what went wrong. */}
       {error && <span className="upload-item__err" role="alert">{error}</span>}
     </div>
@@ -1046,7 +1046,7 @@ export function IngestScreen() {
         {(jobRows.length > 0 || pendingDrops.length > 0) && (
           <div className="uploads">
             <div className="uploads__head">
-              <span className="eyebrow">Transfers</span>
+              <span className="lbl">Transfers</span>
               {(activeJobs > 0 || pendingDrops.length > 0) && (
                 <span className="pill pill--accent"><span className="spinner" />{activeJobs + pendingDrops.length} in progress</span>
               )}
@@ -1069,9 +1069,7 @@ export function IngestScreen() {
               ))}
               {shownRows.map((j) => <JobRow key={j.id} job={j} pct={localPct[j.id]} localError={localErr[j.id]} />)}
               {hiddenRows > 0 && (
-                <div className="muted" style={{ fontSize: 'var(--fs-sm)', padding: '4px 0' }}>
-                  and {fmtInt(hiddenRows)} more waiting their turn
-                </div>
+                <div className="upload-more">and {fmtInt(hiddenRows)} more waiting their turn</div>
               )}
             </div>
           </div>
@@ -1097,29 +1095,37 @@ export function IngestScreen() {
       <NotLoaded />
 
       {/* ── 2. Sources ── */}
+      {/* The three states that need saying in the head are FIGURES, not pills: the number in the mono
+          face with the word it counts beside it, which is how this design states a quantity. A state
+          at zero shows nothing at all — a column of zeros reads as a finding, and on a workspace that
+          is still loading it reads as the wrong one. */}
       <section>
         <SectionHead
           eyebrow="02 · Sources"
           title={<>Sources {data && <span className="sec__count">{allPool.length}</span>}</>}
           actions={<AddSources />}
           hint={<>
-            {nParsing > 0 && <span className="pill pill--accent" style={{ marginRight: 8 }}><span className="spinner" />{nParsing} parsing</span>}
-            {nAction > 0 && (
-              <span className="pill pill--warn tip" style={{ marginRight: 8 }}
-                data-tip={[nToMap ? `${nToMap} waiting for a field mapping` : '',
-                           nFailed ? `${nFailed} failed to parse` : ''].filter(Boolean).join(' · ')}>
-                {nAction} need{nAction === 1 ? 's' : ''} attention
+            {(nParsing > 0 || nAction > 0 || outstandingSources.length > 0) && (
+              <span className="sec__meta">
+                {nParsing > 0 && (
+                  <Fig value={fmtInt(nParsing)} label="parsing" tone="accent"
+                    title="Files the parser is still reading" />
+                )}
+                {nAction > 0 && (
+                  <Fig value={fmtInt(nAction)} label={nAction === 1 ? 'needs attention' : 'need attention'} tone="warn"
+                    title={[nToMap ? `${nToMap} waiting for a field mapping` : '',
+                            nFailed ? `${nFailed} failed to parse` : ''].filter(Boolean).join(' · ')} />
+                )}
+                {/* Raw means "in the pool and searchable, but not interpreted". It is the one state on
+                    this table that silently narrows every other screen, so it is stated here as well
+                    as per row. */}
+                {outstandingSources.length > 0 && (
+                  <Fig value={fmtInt(outstandingSources.length)} label="not interpreted" tone="warn"
+                    title="Their lines are searchable, but they carry no timestamp, severity, parsed field or entity — the timeline, the entity graph and the detections cannot see them yet." />
+                )}
               </span>
             )}
-            {/* Raw means "in the pool and searchable, but not interpreted". It is the one state on this
-                table that silently narrows every other screen, so it is stated here as well as per row. */}
-            {outstandingSources.length > 0 && (
-              <span className="pill pill--warn tip" style={{ marginRight: 8 }}
-                data-tip="Their lines are searchable, but they carry no timestamp, severity, parsed field or entity — the timeline, the entity graph and the detections cannot see them yet.">
-                {outstandingSources.length} not interpreted
-              </span>
-            )}
-            click a row to inspect or fix its mapping
+            <span className="sec__hint-note">click a row to inspect or fix its mapping</span>
           </>}
         />
         {allPool.length > 3 && (
@@ -1130,43 +1136,50 @@ export function IngestScreen() {
                 aria-label="Filter sources" spellCheck={false} />
               {srcFilter && <button className="sources__search-x" onClick={() => setSrcFilter('')} aria-label="Clear filter">×</button>}
             </div>
-            <div className="chip-row">
-              <span className="chip-row__label">Parse</span>
-              {(['READY', 'REVIEW', 'MAP', 'ERROR', 'PARSING'] as const).filter((st) => stateCounts[st]).map((st) => (
-                <button key={st} className={cx('chip', srcState === st && 'on')} aria-pressed={srcState === st}
-                  onClick={() => setSrcState((v) => (v === st ? '' : st))}
-                  title={st === 'MAP' ? 'Unrecognised layout — waiting for a field mapping'
-                    : st === 'ERROR' ? 'The parser failed on this file' : undefined}>
-                  {st.toLowerCase()}<span className="chip__count">{stateCounts[st]}</span>
-                </button>
-              ))}
-            </div>
-            {/* The second question about a file, and a different one: has it been INTERPRETED yet. A
-                chip with no rows behind it is disabled rather than hidden — "nothing at this level" is
-                an answer, and a filter that silently disappears is one the analyst has to guess at. */}
-            <div className="chip-row">
-              <span className="chip-row__label">Interpreted</span>
-              {ENRICH_ORDER.map((st) => {
-                const n = enrichCounts[st] ?? 0;
-                return (
-                  <button key={st} className={cx('chip', srcEnrich === st && 'on')} aria-pressed={srcEnrich === st}
-                    disabled={!n && srcEnrich !== st}
-                    onClick={() => setSrcEnrich((v) => (v === st ? '' : st))}
-                    title={ENRICH_META[st].help}>
-                    {ENRICH_META[st].label}<span className="chip__count">{n}</span>
+            {/* Two questions, each with ONE answer, so each is a SEGMENTED bar rather than a row of
+                free-standing chips: how the parse went, and whether the file has been interpreted at
+                all. The counts stay on the segments, and a segment with no rows behind it is disabled
+                rather than hidden — "nothing at this level" is an answer, and a filter that silently
+                disappears is one the analyst has to guess at. */}
+            <div className="srcfilter">
+              <span className="lbl srcfilter__lbl">Parse</span>
+              <div className="segbar" role="group" aria-label="Filter by parse state">
+                {(['READY', 'REVIEW', 'MAP', 'ERROR', 'PARSING'] as const).filter((st) => stateCounts[st]).map((st) => (
+                  <button key={st} type="button" className={cx('seg', srcState === st && 'seg--on')} aria-pressed={srcState === st}
+                    onClick={() => setSrcState((v) => (v === st ? '' : st))}
+                    title={st === 'MAP' ? 'Unrecognised layout — waiting for a field mapping'
+                      : st === 'ERROR' ? 'The parser failed on this file' : undefined}>
+                    <span className="seg__label">{st}</span>
+                    <span className="seg__n">{fmtInt(stateCounts[st])}</span>
                   </button>
-                );
-              })}
-              {(srcState || srcFilter || srcEnrich) && (
-                <button className="btn btn--sm btn--ghost" onClick={() => { setSrcState(''); setSrcFilter(''); setSrcEnrich(''); }}>clear</button>
-              )}
+                ))}
+              </div>
             </div>
+            <div className="srcfilter">
+              <span className="lbl srcfilter__lbl">Interpreted</span>
+              <div className="segbar" role="group" aria-label="Filter by interpretation state">
+                {ENRICH_ORDER.map((st) => {
+                  const n = enrichCounts[st] ?? 0;
+                  return (
+                    <button key={st} type="button" className={cx('seg', srcEnrich === st && 'seg--on')} aria-pressed={srcEnrich === st}
+                      disabled={!n && srcEnrich !== st}
+                      onClick={() => setSrcEnrich((v) => (v === st ? '' : st))}
+                      title={ENRICH_META[st].help}>
+                      <span className="seg__label">{ENRICH_META[st].label}</span>
+                      <span className="seg__n">{fmtInt(n)}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            {(srcState || srcFilter || srcEnrich) && (
+              <button className="btn btn--sm btn--ghost" onClick={() => { setSrcState(''); setSrcFilter(''); setSrcEnrich(''); }}>clear</button>
+            )}
           </div>
         )}
         {pool.length > 0 && (
           <div className="sources-sum">
             <span><b>{fmtInt(pool.length)}</b> source{pool.length === 1 ? '' : 's'}</span>
-            <span className="sources-sum__sep">·</span>
             <span title="Total bytes of every file listed below, case and library together">
               <b>{fmtBytes(poolBytes.bytes)}</b> on disk
             </span>
@@ -1177,7 +1190,7 @@ export function IngestScreen() {
             )}
             {poolBytes.unknown > 0 && (
               <span className="sources-sum__split" title="Their size is not known, so they are not counted in the total">
-                · {fmtInt(poolBytes.unknown)} of unknown size, not in the total
+                <b>{fmtInt(poolBytes.unknown)}</b> of unknown size, not in the total
               </span>
             )}
             {rawSources.length > 0 && (
@@ -1293,7 +1306,7 @@ export function IngestScreen() {
           actions={<AutoMapAll />} />
         <div className="ingest__bottom">
           <div className="panel">
-            <div className="eyebrow">Unknown format · needs your call</div>
+            <div className="lbl">Unknown format · needs your call</div>
             {firstMap ? (
               <>
                 <div className="sample">{firstMap.sample || firstMap.file}</div>
@@ -1316,7 +1329,7 @@ export function IngestScreen() {
           </div>
 
           <div className="panel">
-            <div className="eyebrow">Normalization queue</div>
+            <div className="lbl">Normalization queue</div>
             <div className="queue-list">
               {data && data.queue.length === 0 && <div className="muted" style={{ fontSize: 'var(--fs-base)' }}>Queue is empty.</div>}
               {data?.queue.map((q, i) => (

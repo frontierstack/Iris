@@ -1,0 +1,45 @@
+/* Narrow-window fallbacks, last so they win */
+
+/* ═══════ Responsive ═══════ */
+@media (max-width: 1280px) {
+  .ingest__top {
+    grid-template-columns: 1.3fr 1fr;
+  }
+  .graph {
+    grid-template-columns: 1fr 260px;
+  }
+  .detail {
+    grid-template-columns: 1fr 300px;
+  }
+  .results-grid {
+    grid-template-columns: 140px 96px 88px 100px 1fr 80px;
+  }
+  .themes {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  .sources-grid {
+    grid-template-columns: 1.6fr 1fr 0.8fr 0.7fr 1.2fr 0.9fr 0.7fr minmax(150px, 1.1fr) 56px;
+  }
+}
+@media (max-width: 1150px) {
+  :root {
+    --sidebar-w: 200px;
+    --page-pad: 18px;
+  }
+  .header__sub {
+    display: none;
+  }
+  .ingest__top,
+  .ingest__bottom {
+    grid-template-columns: 1fr;
+  }
+  .stats {
+    flex-wrap: wrap;
+  }
+  .stat {
+    flex: 1 1 40%;
+  }
+  .compute-modes {
+    grid-template-columns: 1fr;
+  }
+}

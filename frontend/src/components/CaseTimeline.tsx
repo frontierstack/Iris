@@ -281,7 +281,9 @@ function EntryDetail({ en, e, editing, onEdit, onDone }: {
                 {e.detections.map((d) => (
                   <div key={d.id} className="detection" style={{ borderColor: sevVar(d.level) }}>
                     <div className="detection__name">{d.name}</div>
-                    <div className="detection__meta">{d.id} · {d.level.toUpperCase()}</div>
+                    {/* the level in lowercase, like every other statement of severity in the app —
+                        uppercase mono is the treatment this UI dropped for pills, tags and heads */}
+                    <div className="detection__meta">{d.id} · {d.level}</div>
                   </div>
                 ))}
               </div>

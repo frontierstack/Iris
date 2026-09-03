@@ -105,8 +105,10 @@
   margin: 0 0 10px;
   max-width: 100%;
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--panel-inset);
+  border-radius: var(--radius-md);
+  /* the BODY sits on the panel ground and the head on the inset one, like every other table in the
+     app — the wrapper used to be the inset colour, which left the head with nothing to stand out on */
+  background: var(--panel);
 }
 .md-tablewrap:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 .md-table {
@@ -129,13 +131,13 @@
 .md-table th {
   color: var(--text-bright);
   font-weight: 600;
-  background: var(--panel-2);
-  border-bottom-color: var(--border-strong);
+  background: var(--panel-inset);
+  border-bottom-color: var(--border);
   /* NOT nowrap. "Source file" and "What the line shows" are ordinary headers, and holding them on one
      line set a floor under every column that carried one. See the measurement below. */
   white-space: normal;
 }
-.md-table tbody tr:nth-child(even) { background: color-mix(in srgb, var(--panel-2) 45%, transparent); }
+.md-table tbody tr:nth-child(even) { background: var(--panel-inset); }
 /* A cell holding an event id or a URL WRAPS rather than forcing the whole table wider than the column
    it sits in — reported as "text is not fitting properly in tables, sometimes it does and sometimes it
    doesn't". The "sometimes" was the column count: `td` already wrapped, but `white-space: nowrap` on
@@ -157,7 +159,8 @@
 
 /* ── editor ── */
 .md-editor { position: relative; display: flex; flex-direction: column; gap: 4px; }
-.md-editor--drop { outline: 1px dashed var(--accent-border); outline-offset: 3px; border-radius: var(--radius-sm); }
+.md-editor--drop { outline: 1px dashed var(--accent-deep); outline-offset: 3px; border-radius: var(--radius-md); }
+/* The toolbar is a strip of controls: 5px radius like every other control in the app. */
 .md-toolbar { display: flex; align-items: center; gap: 2px; }
 .md-toolbar__sep { width: 1px; height: 14px; background: var(--border); margin: 0 4px; }
 .md-toolbar__spacer { flex: 1; }
@@ -165,27 +168,30 @@
   display: inline-flex; align-items: center; justify-content: center;
   width: 24px; height: 22px;
   border: 1px solid transparent;
-  border-radius: var(--radius-xs);
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--muted-2);
   cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
 }
-.md-tool:hover { color: var(--text-bright); background: var(--hover); border-color: var(--border); }
+.md-tool:hover { color: var(--text-bright); background: var(--panel-2); border-color: var(--border-strong); }
 .md-tool__glyph { font-size: var(--fs-md); line-height: 1; }
 .md-tool__glyph--bold { font-weight: 700; }
 .md-tool__glyph--italic { font-style: italic; font-family: var(--font-mono); }
 .md-tool__glyph--code { font-family: var(--font-mono); }
-.md-modes { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius-xs); overflow: hidden; }
+/* Write | Preview is a segmented control, exactly like the scope switch. */
+.md-modes { display: inline-flex; border: 1px solid var(--border-strong); border-radius: var(--radius-md); overflow: clip; }
 .md-mode {
-  padding: 2px 8px;
+  padding: 2px 9px;
   background: transparent;
   border: 0;
   cursor: pointer;
   font-size: var(--fs-xs);
   color: var(--muted-2);
 }
+.md-mode + .md-mode { border-left: 1px solid var(--border-strong); }
 .md-mode:hover { color: var(--text-bright); }
-.md-mode.is-on { background: var(--selected); color: var(--text-bright); }
+.md-mode.is-on { background: var(--nav-active); color: var(--text-bright); }
 .md-input { width: 100%; }
 .md-preview {
   min-height: 48px;
@@ -202,7 +208,7 @@
   width: 96px; height: 64px;
   object-fit: cover;
   border: 1px solid var(--border);
-  border-radius: var(--radius-xs);
+  border-radius: var(--radius-sm);
   background: var(--panel-inset);
 }
 .md-shot figcaption { font-size: var(--fs-xs); color: var(--muted-2); max-width: 96px; }
@@ -217,20 +223,20 @@
   font-size: var(--fs-xs);
   color: var(--accent);
   background: var(--accent-bg);
-  border-radius: var(--radius-xs);
+  border-radius: var(--radius-sm);
   pointer-events: none;
 }
 .note__edit .md-editor {
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   background: var(--panel);
-  padding: 6px 8px;
+  padding: 8px 10px;
 }
 .note-dialog .md-editor {
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   background: var(--panel-inset);
-  padding: 6px 8px;
+  padding: 8px 10px;
 }
 .note-dialog .md-input, .note__edit .md-input {
   width: 100%; border: 0; background: transparent; box-shadow: none;

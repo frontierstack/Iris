@@ -1,6 +1,6 @@
 import type {
   AiAnalyzeRequest, AiStreamEvent, AiTestRequest, AiTestResult, Case, ClearAllResult, ComputeStatus, DeepPartial, Entity, EventDetail,
-  EventsPage, EventsQuery, ExportFormat, Health, MappingSuggestion, ParsersResponse, Report, Settings, Source, Timeline, MetricsResponse,
+  EventsHistogram, EventsPage, EventsQuery, ExportFormat, Health, MappingSuggestion, ParsersResponse, Report, Settings, Source, Timeline, MetricsResponse,
   Attachment, CaseSummary, CaseDetail, CaseNote, CaseSetEntry, CaseSetResponse, NoteRef, Scope, IocResponse, IocInput, Ioc, EventLocation, GraphV2, GraphQuery, GraphNodeDetail, GraphPath, GraphEdge, GraphReviewEvent, PendingMappings, AutoMapResponse, LibraryFile, TrashEntry, Rule, RuleInput, RuleTestRequest, RuleTestResult, RuleSuggestRequest, RuleSuggestResult, AnomaliesResponse, Severity,
 } from './types';
 import type { FieldFacetsQuery, FieldFacetsResponse, JobsResponse, RawLogPage, UploadJob } from './types';
@@ -410,6 +410,18 @@ export const api = {
     if (q.scope && q.scope !== 'all') p.set('scope', q.scope);
     if (q.sort) p.set('sort', q.sort);
     return request<EventsPage>(`/api/events?${p.toString()}`);
+  },
+  /** The chart above the result list. Same filters as `events`, so the two describe one result set. */
+  eventsHistogram: (q: EventsQuery & { buckets?: number }) => {
+    const p = new URLSearchParams();
+    if (q.q) p.set('q', q.q);
+    if (q.sources?.length) p.set('sources', q.sources.join(','));
+    if (q.sev?.length) p.set('sev', q.sev.join(','));
+    if (q.from) p.set('from', q.from);
+    if (q.to) p.set('to', q.to);
+    if (q.scope && q.scope !== 'all') p.set('scope', q.scope);
+    p.set('buckets', String(q.buckets ?? 56));
+    return request<EventsHistogram>(`/api/events/histogram?${p.toString()}`);
   },
   event: (id: string) => request<EventDetail>(`/api/events/${encodeURIComponent(id)}`),
   /** Which line of the original log file this event came from (resolved on demand). */

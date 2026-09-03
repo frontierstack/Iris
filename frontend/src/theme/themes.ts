@@ -9,7 +9,7 @@ export interface ThemeMeta {
 }
 
 export const THEMES: ThemeMeta[] = [
-  { id: 'iris-dark', name: 'Iris dark', desc: 'Default · green on near-black', swatch: { bg: '#0a0b0a', sidebar: '#0c0e0c', panel: '#0e110e', border: '#1c211c', text: '#d6dcd4', muted: '#5c665b', accent: '#6ee787' } },
+  { id: 'iris-dark', name: 'Iris dark', desc: 'Default · observability console — teal on graphite', swatch: { bg: '#0d0f11', sidebar: '#101315', panel: '#161a1d', border: '#23282c', text: '#e4e9ea', muted: '#8a949a', accent: '#35c2c8' } },
   { id: 'graphite', name: 'Graphite', desc: 'Neutral grey · cyan accent', swatch: { bg: '#0d0e10', sidebar: '#0f1013', panel: '#131418', border: '#22242a', text: '#d5d8de', muted: '#61666f', accent: '#5fd7e8' } },
   { id: 'midnight-blue', name: 'Midnight blue', desc: 'Deep navy · blue accent', swatch: { bg: '#070b14', sidebar: '#090e19', panel: '#0c1220', border: '#172035', text: '#d3dae8', muted: '#5a657f', accent: '#6aa8ff' } },
   { id: 'solar', name: 'Solar', desc: 'Warm dark · amber accent', swatch: { bg: '#100d0a', sidebar: '#130f0b', panel: '#17130e', border: '#2a2218', text: '#e2d9cb', muted: '#6d6252', accent: '#f5b342' } },
@@ -25,9 +25,9 @@ export const THEMES: ThemeMeta[] = [
  *  screen the analyst actually has. */
 export interface FontMeta { id: FontName; name: string; desc: string; stack: string }
 export const UI_FONTS: FontMeta[] = [
-  { id: 'inter', name: 'Inter', desc: 'Default · designed for screen UI at small sizes', stack: "'Inter', sans-serif" },
+  { id: 'inter', name: 'Inter', desc: 'Designed for screen UI at small sizes', stack: "'Inter', sans-serif" },
   { id: 'space-grotesk', name: 'Space Grotesk', desc: 'Geometric, slightly technical', stack: "'Space Grotesk', sans-serif" },
-  { id: 'ibm-plex-sans', name: 'IBM Plex Sans', desc: 'Corporate-neutral · pairs with Plex Mono', stack: "'IBM Plex Sans', sans-serif" },
+  { id: 'ibm-plex-sans', name: 'IBM Plex Sans', desc: 'Default · the console face, pairs with JetBrains Mono', stack: "'IBM Plex Sans', sans-serif" },
   { id: 'source-sans', name: 'Source Sans 3', desc: 'Humanist · easy over long reading', stack: "'Source Sans 3', sans-serif" },
   { id: 'system', name: 'System', desc: 'Whatever this OS uses · no webfont at all', stack: 'system-ui, sans-serif' },
 ];
@@ -40,7 +40,7 @@ export const MONO_FONTS: MonoMeta[] = [
   { id: 'system', name: 'System', desc: 'Whatever this OS uses · no webfont at all', stack: 'ui-monospace, monospace' },
 ];
 
-export const DEFAULT_FONT: FontName = 'inter';
+export const DEFAULT_FONT: FontName = 'ibm-plex-sans';
 export const DEFAULT_MONO: MonoName = 'jetbrains-mono';
 export const isFontName = (v: unknown): v is FontName => UI_FONTS.some((f) => f.id === v);
 export const isMonoName = (v: unknown): v is MonoName => MONO_FONTS.some((f) => f.id === v);

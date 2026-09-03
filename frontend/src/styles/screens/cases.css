@@ -1,0 +1,1045 @@
+/* Cases, case detail, the case timeline, notes and indicators */
+
+/* ═══════ CASES ═══════ */
+.cases__new {
+  display: flex;
+  gap: 14px;
+  align-items: flex-end;
+  margin-top: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: var(--radius-lg);
+}
+.cases__new-actions {
+  display: flex;
+  gap: 8px;
+  padding-bottom: 1px;
+}
+.cases-grid {
+  grid-template-columns:
+    minmax(200px, 2fr) minmax(110px, 1fr) minmax(120px, 0.9fr) minmax(90px, 0.7fr)
+    minmax(64px, 0.5fr) minmax(70px, 0.5fr) minmax(62px, 0.5fr) minmax(70px, 0.5fr) minmax(190px, auto);
+}
+.cases__row--active {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.cases__name {
+  min-width: 0;
+}
+.cases__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.cases__title .cell-bright {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cases__inline {
+  width: 100%;
+  padding: 3px 7px;
+  font-size: var(--fs-sm);
+}
+.cases__actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  align-items: center;
+}
+
+/* ═══════ CASE SET ═══════ */
+.scope-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+/* A segmented control: one question, one answer. 5px radius like every other control, the segments
+   divided by a 1px rule, the selected one on the active-nav ground. */
+.scope {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--panel-2);
+  overflow: clip;
+}
+.scope__btn {
+  padding: 0 12px;
+  height: 28px;
+  font-size: var(--fs-md);
+  color: var(--text-4);
+  background: transparent;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: background var(--t-fast), color var(--t-fast);
+  white-space: nowrap;
+}
+.scope__btn + .scope__btn {
+  border-left: 1px solid var(--border-strong);
+}
+.scope__btn:hover:not(:disabled) {
+  color: var(--text-bright);
+  background: var(--hover);
+}
+.scope__btn.on {
+  background: var(--nav-active);
+  color: var(--text-brightest);
+}
+.scope__btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.scope__count {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-xxs);
+  color: var(--muted-3);
+  background: var(--panel-inset);
+  border-radius: var(--radius-sm);
+  padding: 1px 5px;
+}
+.scope__btn.on .scope__count {
+  color: var(--accent);
+  background: var(--accent-bg);
+}
+
+/* compact in-row add/remove.
+   DIMMED, never hover-hidden — it was `opacity: 0`, which makes "add this line to the case" a control
+   a touch user cannot reach and nobody scanning the page can see. Same rule as the case-card actions
+   and the search row actions. */
+.incase-btn {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--muted-3);
+  background: transparent;
+  cursor: pointer;
+  opacity: 0.5;
+  transition: opacity var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+.table__row:hover .incase-btn,
+.table__row:focus-within .incase-btn,
+.incase-btn:focus-visible,
+.incase-btn.on {
+  opacity: 1;
+}
+.incase-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent-border);
+}
+.incase-btn.on {
+  color: var(--accent);
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+}
+.incase {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  position: relative;
+}
+.row-labels {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+.tag--label {
+  color: var(--accent);
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.tag--label button {
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0.6;
+  font-size: var(--fs-sm);
+  line-height: 1;
+}
+.tag--label button:hover {
+  opacity: 1;
+}
+.tag--ghost {
+  cursor: pointer;
+  color: var(--muted);
+}
+.tag--ghost:hover {
+  color: var(--text-bright);
+  border-color: var(--border-hover);
+}
+
+.label-editor {
+  flex: 1 0 100%;
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--panel-2);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.label-editor__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.label-editor__chips input {
+  flex: 1;
+  min-width: 140px;
+  border: 0;
+  background: transparent;
+  padding: 3px 4px;
+  font-size: var(--fs-sm);
+  box-shadow: none;
+}
+.label-editor__chips input:focus-visible {
+  box-shadow: none;
+}
+.label-editor__known {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+  font-size: var(--fs-xs);
+}
+.label-editor__note {
+  font-size: var(--fs-sm);
+  resize: vertical;
+}
+.label-editor__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+/* ═══════ CASE DETAIL ═══════
+   No stat-tile row here, deliberately: every number a tile would show is restated in context by the
+   section under it. What IS worth stating once is the severity MIX, and it is a region of its own —
+   a label, the bar, the legend — on the card ground with a 1px rule around it. */
+.case-detail__stats {
+  margin: 18px 0 14px;
+}
+.stat__sub {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xxs);
+  color: var(--muted-3);
+  margin-top: 3px;
+}
+.sevbar {
+  display: flex;
+  height: 6px;
+  border-radius: var(--radius-xs);
+  overflow: clip;
+  background: var(--track);
+}
+.sevbar__seg {
+  height: 100%;
+}
+.case-detail__sev {
+  margin-bottom: 22px;
+  padding: 12px 14px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+}
+.case-detail__sev-lbl {
+  display: block;
+  margin-bottom: 8px;
+}
+.case-detail__sev-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-top: 9px;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+/* a figure and the word that names it — the count in the mono face, the level beside it in prose */
+.case-detail__sev-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.case-detail__sev-item b {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  color: var(--text-brightest);
+}
+.case-detail__sev-item .sev-dot { align-self: center; }
+.case-detail__inactive {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  margin-bottom: 22px;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--warn);
+  border-radius: var(--radius-md);
+  background: var(--panel-2);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+  line-height: 1.55;
+}
+.case-detail__inactive svg {
+  flex: 0 0 auto;
+  color: var(--muted-3);
+}
+.case-detail__inactive button {
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+.case-notes {
+  margin-bottom: 26px;
+}
+/* The investigation log reads as a document, not a table: centred on a wide screen, with the
+   composer and the entries sharing one column so what you post lands under the box you typed in. */
+.case-notes .notes {
+  max-width: 1240px;
+  width: 100%;
+  margin-inline: auto;
+}
+.case-notes__area {
+  width: 100%;
+  font-size: var(--fs-base);
+  line-height: 1.6;
+  resize: vertical;
+}
+.case-src-grid {
+  grid-template-columns: minmax(200px, 2fr) minmax(120px, 1fr) minmax(70px, 0.5fr) minmax(70px, 0.5fr) minmax(80px, 0.5fr) minmax(0, 150px);
+}
+.case-src__actions { display: flex; justify-content: flex-end; }
+.case-detail__cluster {
+  grid-template-columns: 88px 130px 1fr 110px 60px;
+  display: grid;
+  gap: 12px;
+  align-items: center;
+}
+.caseset {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.caseset__group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.caseset__row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border-2);
+}
+.caseset__main {
+  display: grid;
+  grid-template-columns: 88px 130px 110px 1fr;
+  gap: 12px;
+  align-items: center;
+  min-width: 0;
+  border-radius: var(--radius-sm);
+  padding: 2px 4px;
+}
+.caseset__main:hover {
+  background: var(--row-hover);
+}
+.caseset__actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.caseset__note {
+  grid-column: 1 / -1;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  padding: 2px 4px 0 92px;
+  line-height: 1.5;
+}
+.caseset__editor {
+  grid-column: 1 / -1;
+}
+
+/* search-match highlighting */
+mark.hl {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+  color: var(--text-bright);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.row-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+/* ═══════ CASE NOTES (chat-style feed) ═══════ */
+.notes { display: flex; flex-direction: column; gap: 18px; }
+/* Entries are separated, not stacked: a 2px gap with no divider made a long feed read as one wall of
+   text, and the full UTC timestamps made each header wider. Each note is its own block with a rule
+   between, so the eye can find where one ends. */
+/* The feed is one bordered region and each entry a row inside it, divided by a 1px rule. Real padding
+   and a divider per entry are both deliberate: a 2px gap read as one wall of text. Square, because a
+   row in a divided list has no corners of its own. */
+.notes__feed {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  overflow: clip;
+}
+.notes__feed:empty { display: none; }
+.note {
+  display: grid;
+  grid-template-columns: 30px 1fr;
+  gap: 14px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--row-line);
+  transition: background var(--t-fast);
+}
+.note:last-child { border-bottom: none; }
+.note:hover { background: var(--row-hover); }
+.note__avatar {
+  width: 28px; height: 28px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: var(--radius-sm);
+  background: var(--panel-inset);
+  border: 1px solid var(--border-strong);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xxs);
+  color: var(--muted-2);
+}
+.note__body { min-width: 0; }
+.note__head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 2px; }
+.note__author { font-weight: 600; font-size: var(--fs-base); color: var(--text-bright); }
+.note__time, .note__edited {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xxs);
+  color: var(--muted-3);
+  /* a full UTC timestamp is the point — it must not wrap onto a second line next to the author */
+  white-space: nowrap;
+}
+/* DIMMED, never hover-hidden: a control that only exists on hover is unreachable by touch and
+   undiscoverable by everyone else. Same rule as the case cards and the search row actions. */
+.note__tools { margin-left: auto; display: flex; gap: 8px; opacity: .45; transition: opacity var(--t-fast); }
+.note:hover .note__tools, .note__tools:focus-within { opacity: 1; }
+.note__tools button {
+  background: transparent; cursor: pointer;
+  font-size: var(--fs-xs); color: var(--muted-3);
+}
+.note__tools button:hover { color: var(--text-bright); }
+.note__text {
+  font-size: var(--fs-base);
+  color: var(--text-2);
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin-top: 7px;
+  /* A note is prose and is read as prose. On a wide case screen an unbounded column runs to 150+
+     characters and the eye loses the line; a table or a code block inside it is exempt below.
+     86ch was reported as "confined into a narrow box" — the assistant's notes carry tables and
+     full sentences with timestamps and file names, so the measure is wider now, and the feed as a
+     whole is centred on the page (`.case-notes .notes`) rather than pinned to the left edge. */
+  max-width: 118ch;
+}
+/* the blocks that legitimately want the whole width back */
+.note__text > .md-tablewrap, .note__text > .md-pre, .note__text > .md-img { max-width: 100%; }
+.note__edit { margin-top: 4px; display: flex; flex-direction: column; gap: 6px; }
+.note__edit textarea { font-size: var(--fs-base); resize: vertical; }
+.note__edit-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.note__refs, .composer__refs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+/* Linked evidence: a control-shaped chip (5px, control ground, control rule), with the KIND stated in
+   the one label treatment — it was uppercase letter-spaced MONO, which is the treatment this UI
+   dropped everywhere else. The accent belongs to the hover, which is what says it navigates. */
+.note-ref {
+  display: inline-flex; align-items: center; gap: 7px;
+  max-width: 320px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel-2);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  transition: border-color var(--t-fast), color var(--t-fast);
+}
+.note-ref:hover { color: var(--text-bright); border-color: var(--accent-deep); }
+.note-ref--draft { cursor: default; }
+.note-ref--draft:hover { border-color: var(--border-strong); color: var(--text-3); }
+.note-ref__kind {
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: var(--ls-head);
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+.note-ref__label { min-width: 0; }
+.note-ref button { background: transparent; color: inherit; cursor: pointer; opacity: 0.6; }
+.note-ref button:hover { opacity: 1; }
+/* The composer is a card: the box you type in on the card ground, its action row a region of its own
+   on the inset ground behind a 1px rule. */
+.composer {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  overflow: clip;
+  transition: border-color var(--t-fast);
+}
+.composer:focus-within { border-color: var(--border-hover); }
+.composer > .md-editor { padding: 10px 12px 8px; }
+.composer__input {
+  border: 0; background: transparent; box-shadow: none;
+  resize: vertical; font-size: var(--fs-base); line-height: 1.55;
+}
+.composer__input:focus-visible { box-shadow: none; }
+.composer__refs { margin: 0; padding: 10px 12px 0; }
+.composer__actions {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  min-height: var(--toolbar-h);
+  padding: 6px 12px;
+  background: var(--panel-inset);
+  border-top: 1px solid var(--border);
+}
+.note-dialog { display: flex; flex-direction: column; gap: 8px; }
+.note-dialog textarea { width: 100%; font-size: var(--fs-base); resize: vertical; }
+
+/* ═══════ IOCs ═══════ */
+.ioc-grid {
+  grid-template-columns: minmax(110px, 0.8fr) minmax(200px, 2fr) minmax(56px, 0.4fr) minmax(160px, 1.4fr) minmax(130px, 1fr) 20px;
+}
+.ioc__files { display: flex; gap: 4px; min-width: 0; }
+.ioc__caret { display: flex; justify-content: flex-end; color: var(--muted-3); }
+.ioc__caret svg { transition: transform var(--t-fast); }
+/* The expanded row is an inset REGION inside the table, so it is bounded by a rule top and bottom on
+   the inset ground rather than looking like one more row. */
+.ioc__detail {
+  padding: 11px var(--row-pad-x) 13px;
+  background: var(--panel-inset);
+  box-shadow: inset 0 1px 0 var(--border), inset 0 -1px 0 var(--border);
+}
+.ioc__detail-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.ioc__detail-acts { display: flex; gap: 6px; }
+.ioc__hit {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr) 90px 60px;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  align-items: center;
+  padding: 6px 6px;
+  border-top: 1px solid var(--border-2);
+  background: transparent;
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  border-radius: var(--radius-sm);
+}
+.ioc__hit:hover { background: var(--row-hover); }
+.ioc__hit-file { color: var(--accent-soft); }
+.ioc__hit-go { color: var(--muted-3); font-size: var(--fs-xs); text-align: right; }
+/* the first-seen column: a timestamp is mono, and small enough not to compete with the value */
+.ioc__seen { font-size: var(--fs-xs); }
+.ioc__by { margin-left: 5px; }
+/* the extracted disclosure is a HEAD, so it sits on the inset ground like every other head */
+.case-detail .ioc-extracted__head,
+.ioc-extracted__head { background: var(--panel-inset); }
+.ioc-extracted__head:hover { background: var(--panel-2); }
+
+/* ───────── Which case a source is filed in (SourceCasePicker.tsx) ───────── */
+.srccase-wrap { position: relative; }
+.srccase { max-width: 160px; }
+.srccase__caret { margin-left: 2px; opacity: 0.7; }
+/* the scrim is what makes a click anywhere else close the menu */
+.srccase__scrim { position: fixed; inset: 0; z-index: 40; }
+.srccase__menu {
+  position: absolute;
+  z-index: 41;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 220px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  box-shadow: var(--shadow-md, 0 8px 24px rgb(0 0 0 / 35%));
+}
+.srccase__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text);
+  font-size: var(--fs-base);
+  text-align: left;
+  cursor: pointer;
+}
+.srccase__item:hover { background: var(--panel-inset); color: var(--text-bright); }
+.srccase__hint {
+  padding: 6px 8px 2px;
+  font-size: var(--fs-xs);
+  color: var(--muted-2);
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
+
+/* A stat tile's sub-line now carries a full date+time range, which does not fit on one line. Wrapping
+   is deliberate: truncating the range to the minute is what made two different windows look identical. */
+.stat__sub { line-height: 1.45; }
+
+/* ═══════ ANOMALIES: toolbar, counts, expanded rows ═══════
+   Two lists on one page (rules that FIRED, and the rule catalogue), both long. The toolbar is shared:
+   filter chips that carry their own counts on the left, a text filter on the right. A chip that cannot
+   say how many it would show is a guess the analyst has to click to resolve. */
+/* One BAR: the severity chips, what the filters left, and the text filter, on a single line inside a
+   surface of their own. They used to be a chip row with the search pinned to the far right and the
+   counts orphaned on a third line underneath, in a different alignment and a much heavier type — three
+   bands of controls for one question ("which of these rules am I looking at?"). Bounded by its own
+   border so the table below reads as the answer to it rather than as more of the same list. */
+.anom__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px 14px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+}
+.anom__toolbar .chip-row { flex: 1 1 auto; }
+/* the numbers the filters produced, stated where the filters are */
+.anom__count {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  flex: 0 0 auto;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.anom__count b {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-brightest);
+}
+.anom__count-sep { color: var(--muted-3); }
+.anom__search {
+  position: relative;
+  flex: 0 1 260px;
+  min-width: 180px;
+}
+.anom__search input {
+  width: 100%;
+  height: 30px;
+  padding-left: 30px;
+  padding-right: 26px;
+}
+.anom__search-icon {
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted-3);
+  pointer-events: none;
+}
+.anom__search-x {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 0 4px;
+  background: transparent;
+  color: var(--muted-2);
+  font-size: var(--fs-lg);
+  line-height: 1;
+  cursor: pointer;
+}
+.anom__search-x:hover { color: var(--text-bright); }
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  /* a right-aligned number sitting 12px from the next column's left-aligned text reads as one field:
+     "16 2026-08-26 14:54:20". The gap is the column's, not the table's. */
+  padding-right: 8px;
+}
+/* a disabled severity chip means "no rule has fired at this level" — readable, not invisible */
+.chip:disabled { opacity: 0.45; cursor: default; }
+
+/* the expanded row is a panel inside the table, so it needs to look inset rather than like another row */
+.anom__detail {
+  padding: 14px var(--row-pad-x) 16px;
+  box-shadow: inset 0 1px 0 var(--border), inset 0 -1px 0 var(--border);
+}
+.anom__sample { padding: 7px 6px; }
+.anom__caret { opacity: 0.6; transition: opacity var(--t-fast); }
+.table__row:hover .anom__caret { opacity: 1; }
+
+/* ═══════ SOURCES: find a file among thirty ═══════
+   Same toolbar shape as Search and Anomalies — text filter on the left, chips that carry their counts
+   next to it — because "where is the firewall log" was answered by scrolling a 30-row table. */
+.sources__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.sources__search {
+  position: relative;
+  flex: 0 1 300px;
+  min-width: 190px;
+}
+.sources__search input {
+  width: 100%;
+  height: 32px;
+  padding-left: 30px;
+  padding-right: 26px;
+}
+.sources__search-icon {
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted-3);
+  pointer-events: none;
+}
+.sources__search-x {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 0 4px;
+  background: transparent;
+  color: var(--muted-2);
+  font-size: var(--fs-lg);
+  line-height: 1;
+  cursor: pointer;
+}
+.sources__search-x:hover { color: var(--text-bright); }
+
+/* the summary line reads as a figure, not as a sentence */
+.sources-sum {
+  gap: 8px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--panel-inset);
+}
+.sources-sum b { font-variant-numeric: tabular-nums; }
+
+/* rows: a touch more air, a clearer hover, and the row's controls dimmed rather than hidden */
+.ingest .table__row.sources-grid {
+  padding-top: calc(var(--row-pad-y) + 2px);
+  padding-bottom: calc(var(--row-pad-y) + 2px);
+}
+.ingest .table__row.sources-grid:hover {
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+.ingest .row-x { opacity: 0.55; transition: opacity var(--t-fast); }
+.ingest .table__row:hover .row-x,
+.ingest .table__row:focus-within .row-x { opacity: 1; }
+/* the raw-log button on the file cell follows the same rule as every other row control */
+.ingest .table__row:hover .rawlog-open,
+.ingest .table__row:focus-within .rawlog-open { opacity: 0.8; }
+.ingest .rawlog-open:hover { opacity: 1; }
+
+/* transfers panel: it sits under the drop box and must read as part of it */
+
+/* ═══════ EVENT DETAIL: the header states facts, not a sentence ═══════
+   The identity line used to be "2026-08-11 03:14:47 · nginx · edge-lb-01_access.log · web-1 · svc_deploy",
+   one run-on string in which finding the host meant reading all of it. Each fact is now a labelled chip,
+   so the eye goes straight to the one it wants — and the event id is finally on the page, because it is
+   what every note and indicator has to cite. */
+.detail__facts {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.detail__fact {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  max-width: 100%;
+  padding: 3px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--panel-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  min-width: 0;
+}
+/* the chip's own label: the ONE label treatment, in the UI face — it was uppercase letter-spaced mono */
+.detail__fact i {
+  font-family: var(--font-ui);
+  font-style: normal;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: var(--ls-head);
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+.detail__fact--file {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 320px;
+}
+.detail__fact--ts { color: var(--text-bright); }
+.detail__fact--id { color: var(--accent); border-color: var(--accent-deep); background: var(--accent-bg); }
+/* The `:has(.sev)` rule that used to strip this chip's box lived here AND fought the converted
+   `.detail__fact .sev` rule in components.css, which is the one that decides: the chip keeps its box
+   and the severity unwinds inside it back to a dot and a word. One definition, not two. */
+
+.detail__head { padding: 18px 20px; align-items: flex-start; }
+.detail__sevbar { height: auto; align-self: stretch; border-radius: var(--radius-xs); }
+.detail__title { line-height: 1.45; }
+
+/* fields: a two-column definition list that stays readable when a value is a 200-char path */
+.fields-grid { padding: 18px 20px; gap: 12px 28px; }
+.field-kv { padding-bottom: 8px; }
+.field-kv:hover .field-kv__v { color: var(--text-brightest); }
+
+/* correlated events: the reason is the interesting column, so it reads as a tag not as grey filler */
+.corr__reason { display: flex; justify-content: flex-end; min-width: 0; }
+.corr__reason .tag { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.detail .table__row.corr-grid:hover { background: var(--row-hover); }
+
+/* side panels: same card rhythm the graph side panel uses */
+.detail__side .panel--tight { padding: 14px; }
+.detail__side .eyebrow { display: flex; align-items: center; gap: 6px; }
+.entity-chips { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
+.baseline { margin-top: 8px; line-height: 1.6; }
+
+/* The drop box lost its destination toggle: every upload goes to the workspace and is filed into a case
+   later, from the Sources row. This line replaces it. */
+.dropzone__sub {
+  margin-top: 5px;
+  font-size: var(--fs-base);
+  color: var(--muted-2);
+}
+
+/* Deleting a source removes evidence from the workspace AND the file from disk, so it gets a labelled
+   column and a real icon rather than a 10px "×" hiding at the end of the row. Dimmed, never hidden. */
+.row-del {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted-3);
+  cursor: pointer;
+  opacity: 0.6;
+  transition: opacity var(--t-fast), color var(--t-fast), border-color var(--t-fast), background var(--t-fast);
+}
+.table__row:hover .row-del, .table__row:focus-within .row-del { opacity: 1; }
+.row-del:hover {
+  color: var(--bad);
+  border-color: var(--danger-border);
+  background: color-mix(in srgb, var(--bad) 10%, transparent);
+}
+
+/* A row on its way out: it leaves the moment you click, and the request runs behind it. Waiting for the
+   server before removing it is what made deleting feel slow even after the server got fast. */
+.table__row.row--going {
+  opacity: 0.4;
+  pointer-events: none;
+  transition: opacity var(--t-fast);
+}
+.row-del:disabled { opacity: 1; cursor: default; }
+
+/* A file accepted by this tab but not yet registered with the server. Same row shape as a real job, so
+   nothing jumps when the server's row replaces it. */
+.upload-item--pending { opacity: 0.75; }
+.upload-item__err {
+  grid-column: 1 / -1;
+  color: var(--bad);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+/* ═══════ SEARCH: columns and the + / − filters ═══════
+   Any value you can see is a filter you can apply. `+` narrows to it, `−` excludes it — the two
+   questions asked of a value on screen, which previously meant typing `NOT field:"value"` by hand. */
+.res__cell { position: relative; padding-right: 2px; }
+/* DIMMED, never hover-hidden: a control that only exists on hover is unreachable by touch, and
+   this is the control that turns any value on screen into a filter. */
+.pins {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: 6px;
+  vertical-align: middle;
+  opacity: 0.4;
+  transition: opacity var(--t-fast);
+}
+.table__row:hover .pins,
+.table__row:focus-within .pins,
+.field-val:hover .pins,
+.field-val:focus-within .pins,
+.pins:focus-within { opacity: 1; }
+.pin {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--muted-2);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+.pin--in:hover { color: var(--accent); border-color: var(--accent-border); background: var(--accent-bg); }
+.pin--out:hover { color: var(--bad); border-color: var(--danger-border); background: color-mix(in srgb, var(--bad) 10%, transparent); }
+.field-val.off .field-val__text { text-decoration: line-through; opacity: 0.6; }
+.field-val.off .pin--out { color: var(--bad); border-color: var(--danger-border); }
+
+.search__cols { position: relative; }
+.search__colmenu {
+  position: absolute;
+  z-index: 41;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 260px;
+  max-height: 380px;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+.search__colmenu-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.search__collist { overflow-y: auto; padding: 4px; }
+.search__colrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-base);
+  cursor: pointer;
+  min-width: 0;
+}
+.search__colrow:hover { background: var(--panel-inset); }
+.search__colrow.on { color: var(--text-bright); }
+/* a group label inside a menu: the ONE label treatment, at group weight */
+.search__colsep {
+  padding: 8px 8px 4px;
+  font-family: var(--font-ui);
+  font-size: var(--fs-xxs);
+  font-weight: 600;
+  letter-spacing: var(--ls-eyebrow);
+  text-transform: uppercase;
+  color: var(--muted-3);
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
+
+/* ═══════ CASE TIMELINE ═══════
+   The base rules live in screens/ingest.css (`.tl*`, `.tlx*`); this file is imported after it, so the
+   composition pass lands here rather than in a screen file this change does not own.
+
+   Two things are being corrected. First, the label surfaces: the day heading, the entry's section
+   eyebrows and the identity chips' own labels each set their own uppercase + letter-spacing, and two
+   of them did it in the MONO face — the treatment this UI dropped for pills, badges and table heads.
+   There is one label treatment (`.lbl` in base.css) and these are it.
+   Second, the regions: a row is the CLAIM and the opened entry is the EVIDENCE, so the evidence sits
+   on its own ground behind a 1px rule instead of continuing the row's. */
+.tl__day-label,
+.tlx__eyebrow,
+.tlx__fact i,
+.tlx__norm i {
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: var(--ls-head);
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+/* the eyebrow's trailing hint is prose and stays prose */
+.tlx__eyebrow .tlx__hint {
+  font-family: var(--font-ui);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--muted-3);
+}
+
+/* An entry is a card, and the whole of it is the target — hover is the list-row tint, not the nav
+   tint, and the border moves with it because separation here is a rule, not a blur. */
+.tl__item { background: var(--panel); transition: background var(--t-fast), border-color var(--t-fast); }
+.tl__item:hover { background: var(--row-hover); border-color: var(--border-hover); }
+.tl__item--open { border-color: var(--border-strong); }
+
+/* The opened entry: its own ground, one rule between it and the claim above it. */
+.tlx {
+  border-top: 1px solid var(--border);
+  background: var(--panel-inset);
+  padding: 14px 14px 16px 8px;
+}
+.tlx__fact {
+  border-color: var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--panel-2);
+  gap: 7px;
+}
+.tlx__fact b { font-family: var(--font-mono); font-weight: 500; color: var(--text-brightest); }
+.tlx__raw { background: var(--panel); }
+/* the pace of the sequence is a figure, so it is tabular */
+.tl__gap { font-variant-numeric: tabular-nums; font-feature-settings: 'tnum' 1; }
+.tl__ts { font-feature-settings: 'tnum' 1; }
+/* the day heading rides the page ground it is sticky over */
+.tl__day { background: var(--bg); }
+
+/* the picker rows in "Add from source" are list rows, so they hover like list rows */
+.tl-picker__row:hover { background: var(--row-hover); }

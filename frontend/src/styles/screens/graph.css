@@ -1,0 +1,276 @@
+/* Entity graph — the canvas frame, its overlays, and the side panel (GraphScreen.tsx).
+   The v2 chrome (query bar, filter panel, source picker, path finder) is in graph-v2.css, which is
+   imported AFTER this file and therefore wins on equal specificity.
+
+   Two rules hold for everything here:
+     * no literal colour, ever — a hex in this file is a value that is wrong in eight of the nine
+       themes, and the canvas painter reads these same tokens so the two must agree;
+     * the template is a RECTANGULAR system — 5px on a control, 6px on a panel or card, 3px on a
+       tag. No capsules, no lift, no glow, no blur. Separation is a 1px rule.
+
+   The old SVG renderer's rules (.node*, .edge*, .graph__svg, #g-arrow) used to live here. The graph
+   has been painted to a <canvas> since the SVG was measured at 0.7 fps at the 2,000-node cap, so
+   they matched nothing; the visual vocabulary they described now lives in utils/graphPaint.ts. */
+
+/* ═══════ the screen ═══════
+   Fills the viewport and never scrolls. A page that scrolls under the canvas scrolls itself out
+   from under a node drag, which is why the height is pinned and the overflow clipped. */
+.page.graph {
+  height: calc(100vh - var(--header-h));
+  padding-bottom: var(--page-pad);
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+/* ═══════ the canvas ═══════ */
+.graph__canvas {
+  position: relative;
+  height: 100%;
+  min-height: 420px;
+  overflow: hidden;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  /* Flat. The ground under the graph is the page ground — a radial accent wash behind the nodes
+     tinted every disc it sat behind and made the middle of the canvas read as a highlight. */
+  background: var(--graph-bg);
+}
+.graph__canvas.dragging {
+  cursor: grabbing;
+}
+/* The dot grid is the one thing on the canvas that is decoration, and it is a rule-weight dot: it
+   gives a pan something to move against. graphPaint.ts never draws it — applyView() re-positions
+   this layer in CSS, so panning costs no raster. */
+.graph__grid {
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(var(--grid-dot) 1px, transparent 1px);
+  background-size: 26px 26px;
+  pointer-events: none;
+}
+.graph__overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+  z-index: 2;
+}
+
+/* ── legend ──
+   States what the canvas's own vocabulary means. Solid ground, not a translucent blur: an edge
+   running under a see-through chip is exactly the thing that makes the legend unreadable. */
+.graph__legend {
+  position: absolute;
+  left: 12px;
+  bottom: 10px;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  pointer-events: none;
+  max-width: calc(100% - 24px);
+}
+.graph__legend-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xxs);
+  color: var(--muted-2);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 3px 8px;
+}
+.graph__legend-chip--live {
+  color: var(--accent);
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+}
+.graph__legend-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.graph__legend-line {
+  width: 14px;
+  height: 2px;
+  background: var(--edge);
+  display: inline-block;
+}
+
+/* ── the tool cluster ──
+   One bordered panel of controls over the canvas, on the chrome ground, so it reads as chrome
+   rather than as buttons floating on the evidence. */
+.graph__tools {
+  position: absolute;
+  right: 10px;
+  top: 10px;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+.graph__tools .btn {
+  background: transparent;
+}
+.graph__tools .btn:not(.btn--accent) {
+  border-color: transparent;
+}
+.graph__tools .btn:hover:not(:disabled) {
+  background: var(--hover);
+  border-color: var(--border-strong);
+}
+.graph__tools-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--border);
+  margin: 0 2px;
+}
+
+/* ── hover tooltip ── */
+.graph__tip {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  background: var(--panel-inset);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: 9px 10px;
+  min-width: 168px;
+  max-width: 280px;
+  transition: opacity var(--t-fast);
+  z-index: 3;
+  will-change: transform;
+}
+.graph__tip-name {
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
+  color: var(--accent);
+  font-weight: 600;
+  word-break: break-all;
+  margin-bottom: 5px;
+}
+.graph__tip-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: var(--fs-xs);
+  color: var(--muted-2);
+  line-height: 1.7;
+}
+.graph__tip-row b {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  color: var(--text-2);
+  text-align: right;
+}
+
+/* ═══════ side panel ═══════
+   Each block is a CARD (.panel, from components.css): four stacked lists separated only by a gap
+   read as one column of text on a busy graph. */
+.graph__side {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* ── the selected entity ── */
+.graph__ent-head {
+  margin-top: 10px;
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+.graph__ent-glyph {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.graph__ent-name {
+  font-family: var(--font-mono);
+  font-size: var(--fs-3xl);
+  color: var(--text-brightest);
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  word-break: break-all;
+  line-height: 1.25;
+}
+.graph__ent-kind {
+  margin-top: 3px;
+  font-size: var(--fs-md);
+  color: var(--muted-2);
+}
+
+/* ── relation list ── */
+.link-list {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 360px;
+  overflow-y: auto;
+  margin-right: -6px;
+  padding-right: 6px;
+}
+.link-item {
+  cursor: pointer;
+  text-align: left;
+  width: calc(100% + 16px);
+  margin: 0 -8px;
+  padding: 7px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  transition: background var(--t-fast), border-color var(--t-fast);
+}
+.link-item:hover {
+  background: var(--row-hover);
+  border-color: var(--border);
+}
+.link-item__row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+.link-item__name {
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.link-item__n {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-xs);
+  color: var(--accent-soft);
+  white-space: nowrap;
+}
+.link-item__via {
+  margin-top: 3px;
+  font-size: var(--fs-sm);
+  color: var(--muted-2);
+}

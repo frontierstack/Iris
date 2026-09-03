@@ -62,9 +62,12 @@ function Section({ id, title, desc, children, footer, danger, collapsible, defau
   return (
     <section className={cx('settings__section', danger && 'settings__section--danger', collapsible && 'settings__section--collapsible', collapsible && !open && 'collapsed')}
       id={id} aria-labelledby={`${id}-title`}>
+      {/* ONE head shape whether or not the section collapses — the two used to differ in DOM as well
+          as in tag (title and desc as inline siblings on a baseline in one, stacked in the other),
+          so no two section heads on the page were built the same way. */}
       {collapsible ? (
         <button className="settings__head settings__head--btn" onClick={toggle} aria-expanded={open} aria-controls={`${id}-body`}>
-          <div>
+          <div className="settings__head-main">
             <div className="settings__title" id={`${id}-title`}>{title}</div>
             <div className="settings__desc">{desc}</div>
           </div>
@@ -72,8 +75,10 @@ function Section({ id, title, desc, children, footer, danger, collapsible, defau
         </button>
       ) : (
         <div className="settings__head">
-          <div className="settings__title" id={`${id}-title`}>{title}</div>
-          <div className="settings__desc">{desc}</div>
+          <div className="settings__head-main">
+            <div className="settings__title" id={`${id}-title`}>{title}</div>
+            <div className="settings__desc">{desc}</div>
+          </div>
         </div>
       )}
       {open && <div className="settings__body" id={`${id}-body`}>{children}</div>}
@@ -716,7 +721,9 @@ function CopyBlock({ label, text, hint }: { label: string; text: string; hint?: 
   return (
     <div className="mcp-block">
       <div className="mcp-block__head">
-        <span className="field__label">{label}</span>
+        {/* a FILE PATH, so it keeps the mono face and its own case — the screen's label treatment is
+            uppercase, and a path is case-sensitive */}
+        <span className="mcp-block__label">{label}</span>
         <button className="btn btn--sm btn--ghost" onClick={() => void copy()}>{done ? 'copied' : 'copy'}</button>
       </div>
       <pre className="mcp-code"><code>{text}</code></pre>
@@ -1187,6 +1194,7 @@ export function SettingsScreen() {
   return (
     <div className="page settings">
       <nav className="settings__nav" aria-label="Settings sections">
+        <div className="lbl lbl--group settings__nav-head" aria-hidden>Settings</div>
         {NAV.map((n) => (
           <a key={n.id} href={`#${n.id}`} className={cx('settings__nav-item', active === n.id && 'active')} onClick={() => setActive(n.id)}>
             {n.label}

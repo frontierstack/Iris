@@ -1,7 +1,14 @@
 /* Base: reset, typography, density scale, scrollbars, focus, motion */
 
+/* THE TYPE AND METRIC SCALE IS THE OBSERVABILITY TEMPLATE'S, to the pixel.
+   The template sets 13px IBM Plex Sans as the interface face and JetBrains Mono for every number,
+   timestamp, identifier and log line — that pairing is most of what makes it read as an
+   observability console rather than as a generic dark app, so it is the DEFAULT here rather than one
+   choice among several (the other faces stay selectable in Settings -> Appearance).
+   The metrics are the template's too: a 216px sidebar, a 52px header, 34px table heads, a 36px
+   query box, 5px control radius. */
 :root {
-  --font-ui: 'Inter', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --font-ui: 'IBM Plex Sans', 'Helvetica Neue', Helvetica, Arial, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
   /* spacing scale (8px base) */
@@ -22,7 +29,7 @@
   --s-9: 22px;
   --s-10: 26px;
 
-  /* type scale (comfortable) */
+  /* type scale (comfortable) — the template's own sizes */
   --fs-xxs: 10px;
   --fs-xs: 10.5px;
   --fs-sm: 11px;
@@ -36,12 +43,21 @@
   --fs-stat: 20px;
   --fs-title: 24px;
 
-  --row-pad-y: 10px;
-  --row-pad-x: 14px;
-  --page-pad: 26px;
-  --panel-pad: 18px;
-  --sidebar-w: 200px;
+  /* the template's letter-spacings, used by every label surface */
+  --ls-eyebrow: 0.13em;   /* nav group labels */
+  --ls-head: 0.09em;      /* table / rail column heads */
+  --ls-brand: 0.14em;     /* the wordmark */
+
+  --row-pad-y: 9px;
+  --row-pad-x: 18px;
+  --page-pad: 18px;
+  --panel-pad: 16px;
+  --sidebar-w: 216px;
   --header-h: 52px;
+  --toolbar-h: 34px;   /* table head, rail head, sub-header strips */
+  --field-h: 36px;     /* the query box and anything that must line up with it */
+  --status-h: 30px;    /* the footer status bar under a result list */
+  --rail-w: 264px;     /* the fields rail */
 
   --t-fast: 150ms cubic-bezier(0.2, 0.7, 0.3, 1);
   --t-med: 200ms cubic-bezier(0.2, 0.7, 0.3, 1);
@@ -61,11 +77,13 @@
   --fs-4xl: 14px;
   --fs-stat: 18px;
   --fs-title: 21px;
-  --row-pad-y: 7px;
-  --row-pad-x: 12px;
-  --page-pad: 18px;
-  --panel-pad: 14px;
+  --row-pad-y: 5px;
+  --row-pad-x: 14px;
+  --page-pad: 14px;
+  --panel-pad: 13px;
   --header-h: 46px;
+  --toolbar-h: 30px;
+  --field-h: 32px;
 }
 
 *,
@@ -92,7 +110,6 @@ body {
   font-family: var(--font-ui);
   font-size: var(--fs-xl);
   line-height: 1.45;
-  font-feature-settings: 'cv05', 'cv11', 'ss03';   /* Inter: open l, single-storey a in italics, slashed-free zero left to the mono face */
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
@@ -131,10 +148,10 @@ button {
 input,
 select,
 textarea {
-  background: var(--panel-deep);
-  border: 1px solid var(--border-strong);
+  background: var(--panel-2);
+  border: 1px solid var(--border-input);
   color: var(--text-bright);
-  padding: 5px 9px;
+  padding: 6px 10px;
   line-height: 1.35;
   border-radius: var(--radius-md);
   outline: none;
@@ -153,7 +170,7 @@ textarea:hover {
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible {
-  border-color: var(--accent-border);
+  border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-glow);
 }
 input[type='range'] {
@@ -361,6 +378,7 @@ button:focus-visible,
    runtime, so a font can never be a way for a page to phone home. Each stack keeps real fallbacks so
    a missing bundle degrades to the system UI face rather than to Times New Roman. */
 :root[data-font='inter']         { --font-ui: 'Inter', 'Helvetica Neue', Helvetica, Arial, sans-serif; }
+:root[data-font='space-grotesk']  { --font-ui: 'Space Grotesk', 'Helvetica Neue', Helvetica, Arial, sans-serif; }
 :root[data-font='ibm-plex-sans'] { --font-ui: 'IBM Plex Sans', 'Helvetica Neue', Helvetica, Arial, sans-serif; }
 :root[data-font='source-sans']   { --font-ui: 'Source Sans 3', 'Helvetica Neue', Helvetica, Arial, sans-serif; }
 :root[data-font='system']        { --font-ui: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
@@ -368,3 +386,39 @@ button:focus-visible,
 :root[data-mono='ibm-plex-mono']   { --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 :root[data-mono='source-code-pro'] { --font-mono: 'Source Code Pro', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 :root[data-mono='system']          { --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Courier New', monospace; }
+
+/* The template's live-tail indicator: the dot fades, it does not blink, and nothing else in the app
+   animates a colour. Kept to that one use. */
+@keyframes livePulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+/* ── Label surfaces ──
+   The template states a column head, a rail head and a nav group label the same way: the UI face,
+   10-10.5px, weight 600, letter-spaced, uppercase, in a dim grey on the surface's own ground. One
+   class so the six places that do it cannot drift apart. */
+.lbl {
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: var(--ls-head);
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+.lbl--group {
+  font-size: var(--fs-xxs);
+  letter-spacing: var(--ls-eyebrow);
+  color: var(--muted-3);
+}
+/* A tabular figure. Every number the analyst compares down a column goes through this. */
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+}

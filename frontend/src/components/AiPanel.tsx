@@ -2,6 +2,20 @@
  * The AI assistant panel: one free-text objective, a live conversation, and the history of every
  * conversation this workspace has had.
  *
+ * THE SURFACE IS THE "MODERN AI ASSISTANT CHAT INTERFACE" TEMPLATE, transcribed — composition,
+ * typography, shapes, sizes, spacing and interactions come from `.template-extract-ai/Assistant
+ * Chat.dc.html`. What that buys, in the order it is read: a 58px header carrying a brand lozenge and
+ * a serif wordmark; a CENTRED 792px thread column with 34px between messages; the objective as a
+ * right-aligned BUBBLE with the 20/20/7/20 corner; THE ANSWER SET IN A SERIF at 19px/1.66, which is
+ * the one thing that makes this read like a document rather than a console; an unnumbered,
+ * collapsible steps card behind a 1px left rule; an artifact card for what the run changed; and a
+ * 22px-radius composer pinned to the bottom of the scroller with a 34px round send button that
+ * becomes a stop square while a run is live. The one deliberate deviation is COLOUR: every value in
+ * `styles/ai-panel.css` is an Iris theme token, never the template's own hexes, so the panel belongs
+ * to the same app as every other screen. Two places the product rules outrank the design and win:
+ * the empty state offers NO canned suggestion pills (one free-text objective is a standing
+ * instruction), and a WARNING is rendered outside the steps card and is never folded.
+ *
  * There are deliberately NO suggested prompts. The analyst says what they want in their own words
  * ("trace everything to do with 45.83.140.22 and build me a case") and the agent carries it out with
  * the app's own tools.
@@ -60,7 +74,7 @@ const POLL_MS = 900;
  * screen actually has.
  *
  * A frame is only affordable because the transcript around the growing paragraph does not re-render:
- * `Markdown`, `ToolCall` and `ActivityTrail` are all memoised, so a commit re-parses the one block
+ * `Markdown`, `ToolCall` and `StepsCard` are all memoised, so a commit re-parses the one block
  * that changed. Take those memos away and this rate becomes a stutter of a different kind.
  */
 const STREAM_SMOOTH_MS = 130;
@@ -79,6 +93,17 @@ const STREAM_SMOOTH_MS = 130;
  */
 const AI_DETACHED_KEY = 'iris.ai.detached';
 const SP_KEY = 'iris.ai.systemPrompt';   // the composer's system-prompt choice; absent = the settings default
+
+/**
+ * THE TEMPLATE'S RIGHT-HAND CANVAS EXISTS ONLY WHERE THERE IS ROOM.
+ *
+ * The template puts a 470px panel on its own darker ground beside the thread; here that panel is the
+ * conversation HISTORY. 470px of canvas next to 90px of thread is neither of them, so below this
+ * width the history takes the panel instead — the same doctrine the tool rail was built on, and the
+ * reason the number is a measurement rather than a breakpoint: 470 of canvas + 330 of readable
+ * thread + the gutters.
+ */
+const CANVAS_MIN_CONTENT = 880;
 
 /**
  * Which tools change the case. The PERSISTED transcript carries `writes` on every tool entry, but the
@@ -190,15 +215,21 @@ const STATE_LABEL: Record<AiRun['state'], string> = {
   running: 'running', done: 'complete', stopped: 'stopped', error: 'failed',
 };
 
+/** Copy to the clipboard, quietly. There is no fallback worth the code: every target browser has it. */
+async function copyText(t: string): Promise<boolean> {
+  try { await navigator.clipboard.writeText(t); return true; } catch { return false; }
+}
+
 /* ─────────────────────────────────── structure ───────────────────────────────────
  * FOUR kinds of thing arrive on one stream and they do not weigh the same, so they are not drawn the
  * same: prose is the answer, a WRITE changed the analyst's case, a read did not, and a warning is an
- * evidence-integrity signal. Reads are quiet cards, writes carry the accent rail and are ALSO listed
- * in "Changes to this case", warnings are bordered alerts and are never folded.
+ * evidence-integrity signal. Reads are quiet rows on the steps card, writes carry the accent rail and
+ * are ALSO listed in the artifact card with a Revert, warnings are bordered and are never folded.
  *
- * There are no "step 1 / step 2 / … / step 19" labels: the analyst reads them as noise. The sequence
- * is carried structurally instead — the activity trail is one rail, one card per call in order, and a
- * model turn boundary (`kind:'step'`) becomes a BREAK in that rail rather than a numbered line.
+ * There are no "step 1 / step 2 / … / step 19" labels: the analyst reads them as noise, and the
+ * template's own steps card is unnumbered. The sequence is carried structurally instead — one row per
+ * call in order behind a 1px rule, and a model turn boundary (`kind:'step'`) becomes a BREAK in that
+ * rule rather than a numbered line.
  */
 type Block =
   | { kind: 'activity'; key: number; entries: AiTranscriptEntry[] }
@@ -222,8 +253,8 @@ function toBlocks(entries: AiTranscriptEntry[]): Block[] {
 }
 
 /**
- * One line of the activity trail. `turn` marks the first node after a model-turn boundary — that gap
- * is what replaced the step numbers, so a reader can still see where one round of thinking ended.
+ * One row of the steps card. `turn` marks the first node after a model-turn boundary — that gap is
+ * what replaced the step numbers, so a reader can still see where one round of thinking ended.
  */
 type TrailNode =
   | { k: 'tool'; key: number; e: AiTranscriptEntry; turn: boolean; lead: string }
@@ -234,7 +265,7 @@ function trailNodes(blocks: Block[]): TrailNode[] {
   const out: TrailNode[] = [];
   let turn = false;
   for (const b of blocks) {
-    if (b.kind === 'warning') continue;            // never folded into the trail — rendered on its own
+    if (b.kind === 'warning') continue;            // never folded into the card — rendered on its own
     if (b.kind === 'prose') {
       if (b.text.trim()) out.push({ k: 'prose', key: b.key, text: b.text, turn });
       turn = false;
@@ -276,7 +307,6 @@ const Markdown = memo(function Markdown({ text, className }: { text: string; cla
   return <div className={className}>{renderMarkdown(text)}</div>;
 });
 
-/** A restrained line icon per tool FAMILY — the same glyph the screen that owns that data uses. */
 /**
  * What a write DID, in the analyst's words — not the tool that did it.
  *
@@ -319,6 +349,7 @@ function writeLabel(tool: string): string {
   return WRITE_LABEL[tool] ?? tool.replace(/_/g, ' ');
 }
 
+/** A restrained line icon per tool FAMILY — the same glyph the screen that owns that data uses. */
 function toolIcon(name: string): typeof Icon.Doc {
   if (name.includes('note')) return Icon.Note;
   if (name.includes('graph')) return Icon.Graph;
@@ -334,6 +365,34 @@ function toolIcon(name: string): typeof Icon.Doc {
 
 /* ─────────────────────────────────── pieces ─────────────────────────────────── */
 
+/** A mono uppercase micro-button — the template's action treatment under a message. */
+function Micro({ label, onClick, title }: { label: string; onClick: () => void; title?: string }) {
+  return (
+    <button type="button" className="aic-micro" onClick={onClick} title={title}>{label}</button>
+  );
+}
+
+/** Copy, with the label saying it worked. Used under the objective and under the answer. */
+function CopyMicro({ text, what }: { text: string; what: string }) {
+  const [done, setDone] = useState(false);
+  const timer = useRef(0);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  return (
+    <Micro
+      label={done ? 'Copied' : 'Copy'}
+      title={`Copy ${what}`}
+      onClick={() => {
+        void copyText(text).then((ok) => {
+          if (!ok) return;
+          setDone(true);
+          window.clearTimeout(timer.current);
+          timer.current = window.setTimeout(() => setDone(false), 1600);
+        });
+      }}
+    />
+  );
+}
+
 /**
  * One tool call AND its result in ONE card. They used to be two lines with nothing binding them, so a
  * long run read as alternating noise; the arguments are a labelled list and the outcome is a row of
@@ -347,13 +406,13 @@ const ToolCall = memo(function ToolCall({ e, live, lead = '' }: { e: AiTranscrip
   const Glyph = toolIcon(e.name);
   const bad = e.ok === false;
   return (
-    <div className={cx('tcall', e.writes && 'tcall--write', bad && 'tcall--bad')}>
-      {!!lead.trim() && <Markdown className="md chat-md tcall__lead" text={lead} />}
+    <div className={cx('tcall', e.writes && 'tcall--write', bad && !e.writes && 'tcall--bad')}>
+      {!!lead.trim() && <Markdown className="md tcall__lead" text={lead} />}
       {/* There is ONE card and ONE head, so `e.writes` is read here and nowhere else — the rule that
           stops one layout drawing a write as a read. Keep it that way if a variant is ever added. */}
       <div className="tcall__head">
         <Glyph className="tcall__glyph" />
-        <span className="tcall__name mono">{e.name}</span>
+        <span className="tcall__name">{e.name}</span>
         {e.writes && <span className="tcall__kind" title="this tool changed the case">write</span>}
         {e.ok === null && live && <span className="spinner" style={{ width: 9, height: 9, borderWidth: 1.5 }} />}
         {e.ok === null && !live && <span className="tcall__unknown" title="the run ended before this call reported back">—</span>}
@@ -365,7 +424,7 @@ const ToolCall = memo(function ToolCall({ e, live, lead = '' }: { e: AiTranscrip
           {shown.map((r) => (
             <div className="tcall__arg" key={r.k}>
               <dt>{r.k}</dt>
-              <dd className="mono" title={r.v}>{r.v}</dd>
+              <dd title={r.v}>{r.v}</dd>
             </div>
           ))}
         </dl>
@@ -402,7 +461,7 @@ function sameNode(a: TrailNode, b: TrailNode): boolean {
   return a.text === (b as { text: string }).text;
 }
 
-/** The counts that head both the trail and the rail — one sentence, computed in one place. */
+/** The counts that head the steps card — one sentence, computed in one place. */
 function countsOf(nodes: TrailNode[]): { bits: string[]; pending: boolean; tools: number } {
   const tools = nodes.filter((n): n is Extract<TrailNode, { k: 'tool' }> => n.k === 'tool');
   const writes = tools.filter((t) => t.e.writes).length;
@@ -416,10 +475,12 @@ function countsOf(nodes: TrailNode[]): { bits: string[]; pending: boolean; tools
 }
 
 /**
- * The audit trail: every tool call in order, on one rail, collapsible. Deliberately secondary — the
- * answer and the case changes come first — but never hidden, because it is how the answer was reached.
+ * THE STEPS CARD — the template's collapsible activity block, and the audit trail of the run.
+ * Deliberately secondary once the answer exists, but never hidden, because it is how the answer was
+ * reached. Unnumbered: the rule down its left edge carries the order, and a break in that rule is
+ * where one model turn ended.
  */
-const ActivityTrail = memo(function ActivityTrail({ nodes, live, title, startOpen }: {
+const StepsCard = memo(function StepsCard({ nodes, live, title, startOpen }: {
   nodes: TrailNode[]; live: boolean; title: string; startOpen: boolean;
 }) {
   const [open, setOpen] = useState(startOpen);
@@ -427,18 +488,18 @@ const ActivityTrail = memo(function ActivityTrail({ nodes, live, title, startOpe
 
   const tools = nodes.filter((n): n is Extract<TrailNode, { k: 'tool' }> => n.k === 'tool');
   // Nothing was CALLED — this is just the agent saying something (the opening line, a compaction
-  // notice). Wrapping one sentence in a collapsible panel labelled "0 tool calls" is chrome, not
+  // notice). Wrapping one sentence in a collapsible card labelled "0 tool calls" is chrome, not
   // structure, so it is rendered plainly.
   if (!tools.length) {
     return (
-      <div className="trail__bare">
+      <div className="aic-bare">
         {nodes.map((n) => (n.k === 'prose'
-          ? <Markdown key={n.key} className="md chat-md trail__prose" text={n.text} />
+          ? <Markdown key={n.key} className="md aic-prose aic-prose--quiet" text={n.text} />
           // A note is a NOTE BODY: markdown, written by the agent, and often a table. Rendering it
           // raw made HTML collapse the newlines, so `| a | b |` rows ran together into one line of
           // pipes — the same class of bug CLAUDE.md records for NoteRow. Every surface that shows a
           // note body goes through renderMarkdown.
-          : <Markdown key={n.key} className="trail__note md" text={n.k === 'note' ? n.text : ''} />))}
+          : <Markdown key={n.key} className="md aic-bare__note" text={n.k === 'note' ? n.text : ''} />))}
       </div>
     );
   }
@@ -446,23 +507,19 @@ const ActivityTrail = memo(function ActivityTrail({ nodes, live, title, startOpe
   const { bits, pending } = countsOf(nodes);
 
   return (
-    <section className={cx('trail', open && 'trail--open')}>
-      <button type="button" className="trail__toggle" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
-        <Icon.Chevron className={cx('trail__chev', open && 'trail__chev--open')} />
-        <span className="trail__title">{title}</span>
-        {!!bits.length && <span className="trail__counts">{bits.join(' · ')}</span>}
-        {pending && live && <span className="spinner" style={{ width: 10, height: 10, borderWidth: 1.5 }} />}
-        {!open && !!tools.length && (
-          <span className="trail__peek mono ellipsis">{tools.map((t) => t.e.name).join(' → ')}</span>
-        )}
+    <section className="aic-steps">
+      <button type="button" className="aic-steps__head" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+        <span className={cx('aic-steps__dot', pending && live ? 'aic-steps__dot--live' : !live && 'aic-steps__dot--idle')} aria-hidden />
+        <span className="aic-steps__sum">{title}{bits.length ? ` · ${bits.join(' · ')}` : ''}</span>
+        <Icon.Chevron className={cx('aic-steps__chev', open && 'aic-steps__chev--open')} />
       </button>
       {open && (
-        <div className="trail__body">
+        <div className="aic-steps__body">
           {nodes.map((n) => (
-            <div key={n.key} className={cx('trail__node', n.turn && 'trail__node--turn')}>
+            <div key={n.key} className={cx('aic-step', n.turn && 'aic-step--turn')}>
               {n.k === 'tool' && <ToolCall e={n.e} live={live} lead={n.lead} />}
-              {n.k === 'note' && <Markdown className="trail__note md" text={n.text} />}
-              {n.k === 'prose' && <Markdown className="md chat-md trail__prose" text={n.text} />}
+              {n.k === 'note' && <Markdown className="md aic-bare__note" text={n.text} />}
+              {n.k === 'prose' && <Markdown className="md aic-prose aic-prose--quiet" text={n.text} />}
             </div>
           ))}
         </div>
@@ -474,23 +531,10 @@ const ActivityTrail = memo(function ActivityTrail({ nodes, live, title, startOpe
   a.nodes.length === b.nodes.length && a.nodes.every((n, i) => sameNode(n, b.nodes[i]!))
 ));
 
-/** The thing they asked for. First in the assistant turn once the run is over, and marked as such. */
-function Answer({ text, state }: { text: string; state: AiRun['state'] }) {
-  return (
-    <section className="chat-answer" aria-label="The assistant's answer">
-      <header className="chat-answer__head">
-        <Icon.Findings />
-        <span>{state === 'done' ? 'Answer' : 'Answer so far'}</span>
-      </header>
-      <Markdown className="md chat-md chat-answer__body" text={text} />
-    </section>
-  );
-}
-
 /** An evidence-integrity signal. Never folded, never subdued — see the panel's header comment. */
 function Warning({ text }: { text: string }) {
   return (
-    <div className="chat-warn" role="alert">
+    <div className="aic-warn" role="alert">
       <Icon.Warn />
       <span>{text}</span>
     </div>
@@ -498,36 +542,40 @@ function Warning({ text }: { text: string }) {
 }
 
 /**
- * What the run did to the case — second only to the answer, because it is the part that persists.
- * Every entry is reversible in one click; a reverted one stays listed rather than disappearing.
+ * The template's ARTIFACT CARD, carrying what the run did to the case — second only to the answer,
+ * because it is the part that persists. Every entry is reversible in one click; a reverted one stays
+ * listed rather than disappearing.
  */
 function Changes({ actions, busy, onUndo }: { actions: AiAction[]; busy: boolean; onUndo: () => void }) {
   const active = actions.filter((a) => !a.undone).length;
   if (!actions.length) return null;
   return (
-    <section className="chat-changes" aria-label="Changes this run made to the case">
-      <header className="chat-changes__head">
-        <span className="chat-changes__title">Changes to this case</span>
-        <span className="chat-changes__count">
-          {active} active{actions.length !== active ? ` · ${actions.length - active} reverted` : ''}
+    <section className="aic-art" aria-label="Changes this run made to the case">
+      <div className="aic-art__head">
+        <span className="aic-art__tile" aria-hidden><Icon.Cases /></span>
+        <span className="aic-art__ident">
+          <span className="aic-art__name">Changes to this case</span>
+          <span className="aic-art__meta">
+            {active} active{actions.length !== active ? ` · ${actions.length - active} reverted` : ''}
+          </span>
         </span>
         {active > 0 && (
-          <button className="btn btn--sm btn--ghost" onClick={onUndo} disabled={busy}>
+          <button type="button" className="aic-art__act" onClick={onUndo} disabled={busy}>
             {busy ? 'Reverting…' : 'Revert all'}
           </button>
         )}
-      </header>
-      <ul className="chat-changes__list">
+      </div>
+      <ul className="aic-art__list">
         {actions.map((a) => {
           const Glyph = toolIcon(a.tool);
           return (
-            <li key={a.id} className={cx('chat-change', a.undone && 'chat-change--undone')}>
-              <Glyph className="chat-change__glyph" />
-              <div className="chat-change__text">
-                <span className="chat-change__summary">{a.summary}</span>
-                <span className="chat-change__tool" title={a.tool}>{writeLabel(a.tool)}</span>
-              </div>
-              {a.undone && <span className="tag">reverted</span>}
+            <li key={a.id} className={cx('aic-change', a.undone && 'aic-change--undone')}>
+              <Glyph className="aic-change__glyph" />
+              <span className="aic-change__text">
+                <span className="aic-change__summary">{a.summary}</span>
+                <span className="aic-change__kind" title={a.tool}>{writeLabel(a.tool)}</span>
+              </span>
+              {a.undone && <span className="aic-change__tag">reverted</span>}
             </li>
           );
         })}
@@ -569,68 +617,115 @@ function threadsOf(runs: AiRun[]): Thread[] {
   return out;
 }
 
-function HistoryList({ runs, busy, onOpen, onDelete }: {
-  runs: AiRun[]; busy: boolean; onOpen: (id: string) => void; onDelete: (id: string) => void;
+/**
+ * THE CANVAS PANEL: the template's 470px side panel, on its own darker ground, holding the
+ * conversation history. Head (serif name, mono state, a pill-group of tabs, close), a body of
+ * numbered mono lines, and a foot carrying a mono summary.
+ */
+function HistoryCanvas({ runs, busy, full, filter, onFilter, onOpen, onDelete, onClose }: {
+  runs: AiRun[]; busy: boolean; full: boolean;
+  filter: 'all' | 'changed'; onFilter: (v: 'all' | 'changed') => void;
+  onOpen: (id: string) => void; onDelete: (id: string) => void; onClose: () => void;
 }) {
   const threads = useMemo(() => threadsOf(runs), [runs]);
-  if (busy && !runs.length) {
-    return <div className="state state--inline"><div className="spinner" /><div className="state__body">Loading conversations…</div></div>;
-  }
-  if (!runs.length) {
-    return (
-      <div className="chat-empty">
-        <div className="chat-empty__title">No conversations yet</div>
-        <div className="chat-empty__body">
-          Ask the assistant to investigate something. Everything it says, every tool it calls and every change it
-          makes to the case is kept here — a refresh, another tab or a server restart will not lose it.
-        </div>
-      </div>
-    );
-  }
+  const shown = useMemo(() => (filter === 'changed' ? threads.filter((t) => t.changes > 0) : threads), [threads, filter]);
+
   return (
-    <ul className="chat-history" aria-label="Past conversations">
-      {threads.map((t) => (
-        <li key={t.id} className="chat-history__row">
-          <button type="button" className="chat-history__open" onClick={() => onOpen(t.latest.id)}>
-            <span className="chat-history__prompt">{t.root.prompt || '(no objective)'}</span>
-            <span className="chat-history__meta">
-              <span className={cx('chat-state', `chat-state--${t.latest.state}`)}>{STATE_LABEL[t.latest.state]}</span>
-              <span title={RELATIVE(t.latest.startedAt)}>{UTC(t.latest.startedAt)}</span>
-              {t.turns > 1 && <span>{t.turns} turns</span>}
-              {t.root.caseName && <span className="ellipsis">{t.root.caseName}</span>}
-              {t.changes > 0 && (
-                <span className="chat-history__writes">
-                  {t.changes} change{t.changes === 1 ? '' : 's'}
+    <aside className={cx('aic-canvas', full && 'aic-canvas--full')} aria-label="Past conversations">
+      <div className="aic-canvas__head">
+        <span className="aic-canvas__name">Conversations</span>
+        <span className="aic-canvas__state">{busy && !runs.length ? 'loading' : `${threads.length} kept`}</span>
+        <div className="aic-canvas__tabs" role="group" aria-label="Filter conversations">
+          <button type="button" className={cx('aic-canvas__tab', filter === 'all' && 'is-on')}
+            aria-pressed={filter === 'all'} onClick={() => onFilter('all')}>All</button>
+          <button type="button" className={cx('aic-canvas__tab', filter === 'changed' && 'is-on')}
+            aria-pressed={filter === 'changed'} onClick={() => onFilter('changed')}>Changed</button>
+        </div>
+        <button type="button" className="aic-canvas__close" onClick={onClose} aria-label="Close the conversation list">✕</button>
+      </div>
+
+      <div className="aic-canvas__body">
+        {busy && !runs.length && (
+          <div className="aic-hist__empty">
+            <div className="aic-busy"><span className="spinner" style={{ width: 12, height: 12 }} />Loading conversations</div>
+          </div>
+        )}
+        {!busy && !threads.length && (
+          <div className="aic-hist__empty">
+            <div className="aic-hist__empty-title">No conversations yet</div>
+            <div className="aic-hist__empty-body">
+              Ask the assistant to investigate something. Everything it says, every tool it calls and every change it
+              makes to the case is kept here — a refresh, another tab or a server restart will not lose it.
+            </div>
+          </div>
+        )}
+        {!!threads.length && !shown.length && (
+          <div className="aic-hist__empty">
+            <div className="aic-hist__empty-body">
+              None of the {threads.length} kept conversation{threads.length === 1 ? '' : 's'} changed the case.
+            </div>
+          </div>
+        )}
+        <ul className="aic-hist">
+          {shown.map((t, i) => (
+            <li key={t.id} className="aic-hist__row">
+              <button type="button" className="aic-hist__open" onClick={() => onOpen(t.latest.id)}>
+                <span className="aic-hist__n" aria-hidden>{String(i + 1).padStart(2, '0')}</span>
+                <span className="aic-hist__text">
+                  <span className="aic-hist__prompt">{t.root.prompt || '(no objective)'}</span>
+                  <span className="aic-hist__meta">
+                    <span className={cx('aic-state', `aic-state--${t.latest.state}`)}>{STATE_LABEL[t.latest.state]}</span>
+                    <span title={RELATIVE(t.latest.startedAt)}>{UTC(t.latest.startedAt)}</span>
+                    {t.turns > 1 && <span>{t.turns} turns</span>}
+                    {t.root.caseName && <span>{t.root.caseName}</span>}
+                    {t.changes > 0 && (
+                      <span className="aic-hist__writes">
+                        {t.changes} change{t.changes === 1 ? '' : 's'}
+                      </span>
+                    )}
+                  </span>
                 </span>
-              )}
-            </span>
-          </button>
-          <button
-            type="button"
-            className="chat-history__del"
-            title={t.turns > 1 ? 'Delete the latest turn of this conversation' : 'Delete this conversation'}
-            aria-label={`Delete conversation: ${t.root.prompt.slice(0, 60)}`}
-            onClick={() => onDelete(t.latest.id)}
-          >
-            <Icon.Trash />
-          </button>
-        </li>
-      ))}
-    </ul>
+              </button>
+              <button
+                type="button"
+                className="aic-hist__del"
+                title={t.turns > 1 ? 'Delete the latest turn of this conversation' : 'Delete this conversation'}
+                aria-label={`Delete conversation: ${t.root.prompt.slice(0, 60)}`}
+                onClick={() => onDelete(t.latest.id)}
+              >
+                <Icon.Trash />
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      <div className="aic-canvas__foot">
+        <span>
+          {shown.length} of {threads.length} shown · kept on the server
+        </span>
+      </div>
+    </aside>
   );
 }
 
 /* ─────────────────────────────────── the panel ─────────────────────────────────── */
 
 /**
- * ONE TURN of a conversation: the analyst's question, then the assistant's work on it.
+ * ONE TURN of a conversation: the analyst's question as a bubble, then the assistant's work on it.
  *
  * The same component renders a past turn, the current finished turn and the live one, because they are
  * the same thing at different moments — and because two renderers would drift, which on this screen
  * means one of them eventually shows a write as a read.
+ *
+ * ORDER. Live, the order IS the point: the steps card sits above the prose (exactly where the template
+ * puts it) and fills while the answer streams underneath, so the work can be watched. Finished, the
+ * PRIORITY is the point and the documented rule stands — warnings, then the ANSWER, then what it
+ * changed in the case, then how it got there, collapsed.
  */
-function Turn({ run, entries, live, undoing, onUndo }: {
-  run: AiRun; entries: AiTranscriptEntry[]; live: boolean; undoing: boolean; onUndo: (id: string) => void;
+function Turn({ run, entries, live, undoing, onUndo, onRetry }: {
+  run: AiRun; entries: AiTranscriptEntry[]; live: boolean; undoing: boolean;
+  onUndo: (id: string) => void; onRetry: (run: AiRun) => void;
 }) {
   const blocks = useMemo(() => toBlocks(entries), [entries]);
   const warnings = useMemo(
@@ -639,7 +734,7 @@ function Turn({ run, entries, live, undoing, onUndo }: {
     () => blocks.filter((b) => b.kind === 'prose').map((b) => (b as { text: string }).text).join('\n').trim(), [blocks]);
   // The stream usually IS the report, so `answer` prefers the persisted one and falls back to the
   // prose a stopped run managed to write. Prose already contained in the answer is not repeated in
-  // the trail; prose that is NOT part of it stays there rather than being silently dropped.
+  // the steps card; prose that is NOT part of it stays there rather than being silently dropped.
   const answer = ((run.answer ?? '').trim()) || (live ? '' : prose);
   const trailBlocks = useMemo(() => blocks.filter((b) => {
     if (b.kind === 'warning') return false;
@@ -652,96 +747,92 @@ function Turn({ run, entries, live, undoing, onUndo }: {
   const nodes = useMemo(() => trailNodes(trailBlocks), [trailBlocks]);
   // The COMMENTARY: the one-line narration the assistant writes before each call ("Profiling X first
   // - one call gives me..."). Live, it is read in place. Finished, it used to survive only inside the
-  // collapsed trail, and the analyst who opened the panel after the run reported the commentary as
+  // collapsed card, and the analyst who opened the panel after the run reported the commentary as
   // gone. It is its own quiet block now - the prose that is NOT part of the report, in order.
   const commentary = useMemo(
     () => trailBlocks.filter((b): b is Extract<Block, { kind: 'prose' }> => b.kind === 'prose'), [trailBlocks]);
 
-  // LIVE: the calls are ONE trail, at the bottom, not a trail per model turn interleaved with the
-  // prose. Threading tool cards through the answer meant the thing being read moved down the page
-  // every time a call landed, and the reading column was broken into fragments by cards that are
-  // deliberately secondary. Collected here it is the same shape as a finished turn — what it said,
-  // then what it changed, then how it got there — so the layout no longer rearranges itself the
-  // moment a run ends. Turn breaks are kept, so the sequence is still legible inside the trail.
+  // LIVE: the calls are ONE card, above the prose, not a card per model turn interleaved with it.
+  // Threading tool cards through the answer meant the thing being read moved down the page every time
+  // a call landed, and the reading column was broken into fragments by cards that are deliberately
+  // secondary. Turn breaks are kept, so the sequence is still legible inside the card.
   const liveNodes = useMemo(() => trailNodes(blocks.filter((b) => b.kind !== 'prose')), [blocks]);
-
-  /* ONE COLUMN, at every width. Prose first, activity last, live and finished alike. */
-  const said = live ? (
-    <>
-      {blocks.map((b) => {
-        if (b.kind === 'warning') return <Warning key={b.key} text={b.text} />;
-        if (b.kind === 'prose') return <Markdown key={b.key} className="md chat-md" text={b.text} />;
-        return null;
-      })}
-      {!blocks.length && (
-        <div className="state state--inline"><div className="spinner" /><div className="state__body">Starting the investigation…</div></div>
-      )}
-      <Changes actions={run.actions} busy={undoing} onUndo={() => onUndo(run.id)} />
-      <ActivityTrail nodes={liveNodes} live title="Activity" startOpen />
-    </>
-  ) : (
-    <>
-      {warnings.map((w) => <Warning key={w.key} text={w.text} />)}
-      {run.interrupted && <Warning text={run.error || 'The server restarted while this run was going.'} />}
-      {!run.interrupted && run.state === 'error' && !!run.error && <Warning text={run.error} />}
-      {answer
-        ? <Answer text={answer} state={run.state} />
-        : (
-          <div className="chat-note">
-            {run.state === 'stopped'
-              ? 'Stopped before the assistant wrote a report. Anything it had already changed is listed below and can be reverted.'
-              : 'This run produced no report.'}
-          </div>
-        )}
-      {!!commentary.length && answer && (
-        <section className="chat-commentary" aria-label="Commentary">
-          <div className="chat-commentary__head eyebrow">Commentary</div>
-          {commentary.map((b) => <Markdown key={b.key} className="md chat-md chat-commentary__line" text={b.text} />)}
-        </section>
-      )}
-      <Changes actions={run.actions} busy={undoing} onUndo={() => onUndo(run.id)} />
-      <ActivityTrail nodes={nodes} live={false} title="How it got there" startOpen={!answer} />
-      {run.transcriptTruncated && (
-        <div className="chat-note">This transcript was long and its earliest lines were dropped; the report and the change list are complete.</div>
-      )}
-      {(run.toolCalls > 0 || ranFor) && (
-        <footer className="chat-turn__meta">
-          {run.toolCalls > 0 && <span>{run.toolCalls} tool call{run.toolCalls === 1 ? '' : 's'}</span>}
-          {ranFor && <span>ran for {ranFor}</span>}
-          {run.endedAt && <span title={RELATIVE(run.endedAt)}>finished {UTC(run.endedAt)}</span>}
-        </footer>
-      )}
-    </>
-  );
+  const liveProse = useMemo(
+    () => blocks.filter((b): b is Extract<Block, { kind: 'prose' }> => b.kind === 'prose'), [blocks]);
 
   return (
     <>
-      <section className="chat-objective">
-        <header className="chat-objective__head">
-          <span className="eyebrow">{run.parentId ? 'Follow-up' : 'Objective'}</span>
-          {run.startedAt && (
-            <span className="chat-objective__when" title={RELATIVE(run.startedAt)}>{UTC(run.startedAt)}</span>
-          )}
-        </header>
-        <div className="chat-objective__text">{run.prompt}</div>
-        {run.focus && <div className="chat-objective__focus mono">context: {run.focus}</div>}
-      </section>
-
-      <article className="chat-turn chat-turn--ai">
-        <header className="chat-turn__role">
-          <Icon.Sparkle className="chat-turn__glyph" />
-          <span>Assistant</span>
-          {run.model && <span className="mono chat-turn__model">{run.model}</span>}
-          <span className={cx('chat-state', `chat-state--${run.state}`)}>{STATE_LABEL[run.state]}</span>
-          {run.reason && run.reason !== 'complete' && (
-            <span className="chat-turn__reason" title="how the run ended">{run.reason.replace(/_/g, ' ')}</span>
-          )}
-        </header>
-
-        <div className="chat-turn__body" {...(live ? { 'aria-live': 'polite' as const, 'aria-busy': true } : {})}>
-          {said}
+      {/* THE OBJECTIVE — the template's right-aligned bubble. */}
+      <div className="aic-user">
+        <div className="aic-user__bubble">{run.prompt}</div>
+        {run.focus && <div className="aic-user__ctx">context: {run.focus}</div>}
+        <div className="aic-micros">
+          <CopyMicro text={run.prompt} what="the objective" />
+          <span className="aic-micro aic-micro--stamp" title={RELATIVE(run.startedAt)}>{UTC(run.startedAt)}</span>
         </div>
-      </article>
+      </div>
+
+      {/* THE ASSISTANT — no bubble: steps card, prose, artifact card, actions. */}
+      <div className="aic-asst" {...(live ? { 'aria-live': 'polite' as const, 'aria-busy': true } : {})}>
+        {live ? (
+          <>
+            {warnings.map((w) => <Warning key={w.key} text={w.text} />)}
+            <StepsCard nodes={liveNodes} live title="Working" startOpen />
+            {liveProse.map((b) => <Markdown key={b.key} className="md aic-prose" text={b.text} />)}
+            {!blocks.length && (
+              <div className="aic-busy"><span className="spinner" style={{ width: 12, height: 12 }} />Starting the investigation</div>
+            )}
+            {!!liveProse.length && <span className="aic-caret" aria-hidden />}
+            <Changes actions={run.actions} busy={undoing} onUndo={() => onUndo(run.id)} />
+          </>
+        ) : (
+          <>
+            {warnings.map((w) => <Warning key={w.key} text={w.text} />)}
+            {run.interrupted && <Warning text={run.error || 'The server restarted while this run was going.'} />}
+            {!run.interrupted && run.state === 'error' && !!run.error && <Warning text={run.error} />}
+
+            {answer
+              ? <Markdown className="md aic-prose" text={answer} />
+              : (
+                <div className="aic-note">
+                  {run.state === 'stopped'
+                    ? 'Stopped before the assistant wrote a report. Anything it had already changed is listed below and can be reverted.'
+                    : 'This run produced no report.'}
+                </div>
+              )}
+
+            {!!commentary.length && answer && commentary.map((b) => (
+              <Markdown key={b.key} className="md aic-prose aic-prose--quiet" text={b.text} />
+            ))}
+
+            <Changes actions={run.actions} busy={undoing} onUndo={() => onUndo(run.id)} />
+            <StepsCard nodes={nodes} live={false} title="How it got there" startOpen={!answer} />
+
+            {run.transcriptTruncated && (
+              <div className="aic-note">This transcript was long and its earliest lines were dropped; the report and the change list are complete.</div>
+            )}
+
+            <div className="aic-acts">
+              {!!answer && <CopyMicro text={answer} what="the answer" />}
+              <Micro label="⟳ Retry" title="Ask the same objective again" onClick={() => onRetry(run)} />
+              <span className="aic-acts__spacer" />
+              <span className={cx('aic-state', `aic-state--${run.state}`)}>{STATE_LABEL[run.state]}</span>
+              {run.endedAt && (
+                <span className="aic-acts__time" title={RELATIVE(run.endedAt)}>{UTC(run.endedAt)}</span>
+              )}
+            </div>
+
+            {(run.toolCalls > 0 || ranFor || !!run.model) && (
+              <div className="aic-meta">
+                {run.toolCalls > 0 && <span>{run.toolCalls} tool call{run.toolCalls === 1 ? '' : 's'}</span>}
+                {ranFor && <span>ran for {ranFor}</span>}
+                {run.model && <span>{run.model}</span>}
+                {run.reason && run.reason !== 'complete' && <span title="how the run ended">{run.reason.replace(/_/g, ' ')}</span>}
+              </div>
+            )}
+          </>
+        )}
+      </div>
     </>
   );
 }
@@ -754,6 +845,7 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
   const provider = settings.data?.ai.provider;
 
   const [view, setView] = useState<'chat' | 'history'>('history');
+  const [histFilter, setHistFilter] = useState<'all' | 'changed'>('all');
   const [prompt, setPrompt] = useState('');
   // Which SAVED SYSTEM PROMPT the next run uses (Settings → System prompts). `null` = whatever the
   // settings default is, '' = the built-in prompt alone, an id = that prompt. Remembered per browser,
@@ -802,6 +894,7 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
   const [streamingId, setStreamingId] = useState<string | null>(null);
   const sseSeqRef = useRef(0);
   const bodyRef = useRef<HTMLDivElement>(null);
+  const shellRef = useRef<HTMLDivElement>(null);
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const entriesRef = useRef<AiTranscriptEntry[]>([]);
   entriesRef.current = entries;
@@ -1164,6 +1257,21 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
     return () => window.removeEventListener('keydown', on);
   }, [onClose, detached]);
 
+  /* ── is there room for the template's side canvas? ───────────────────────────
+   * Measured, not guessed at with a media query: the panel is a slide-over in one shell and a window
+   * the analyst drags in the other, so its width has nothing to do with the viewport's. */
+  const [wide, setWide] = useState(false);
+  useEffect(() => {
+    const el = shellRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver((es) => {
+      const w = es[0]?.contentRect.width ?? 0;
+      setWide(w >= CANVAS_MIN_CONTENT);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [detached, provider]);
+
   /**
    * FOLLOWING THE STREAM, AND LETTING GO OF IT — reported as "the ai chat scroll doesn't allow me to
    * scroll, I have to undock and re-dock for the scroll to become responsive".
@@ -1211,19 +1319,15 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
     follow(true);
   }, [follow]);
 
-  /* ── auto-growing composer ─────────────────────────────────────────────────── */
+  /* ── auto-growing composer (the template's 24px floor / 150px ceiling) ─────── */
   useEffect(() => {
     const el = promptRef.current;
     if (!el) return;
     el.style.height = 'auto';
-    el.style.height = `${Math.min(200, Math.max(44, el.scrollHeight))}px`;
+    el.style.height = `${Math.min(150, Math.max(24, el.scrollHeight))}px`;
   }, [prompt]);
 
-  /* ── what the transcript becomes on screen ───────────────────────────────────
-   * While the run is LIVE the order is the point: prose, tool calls and warnings render in the order
-   * they arrived, so the analyst can watch the work. Once it is over the ORDER stops being the point
-   * and the priority does — the answer first, then what it changed in the case, then how it got there.
-   */
+  /* ── what the transcript becomes on screen ─────────────────────────────────── */
   const scopeNote = focusOf(target);
   const threadCount = useMemo(() => new Set(runs.map((r) => r.threadId || r.id)).size, [runs]);
   const canSend = !!prompt.trim() && !live;
@@ -1239,141 +1343,214 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
     if (!prompt.trim() || live) return;
     startRun(prompt, run && run.state !== 'running' ? run.id : undefined);
   }, [prompt, live, run, startRun]);
+  /** Ask the same objective again, in the same thread it belonged to. */
+  const retry = useCallback((r: AiRun) => {
+    if (live) return;
+    startRun(r.prompt, r.parentId || undefined);
+  }, [live, startRun]);
+
+  // The conversation's own identity in the header: named by the question that STARTED it, stamped
+  // with when the latest turn moved. Relative here (the template's "edited 2m ago"); the absolute UTC
+  // time is on every turn and is what a report cites.
+  const rootRun = thread[0] ?? run;
+  const convoTitle = run ? (rootRun?.prompt || run.prompt || 'Untitled conversation') : 'New conversation';
+  const convoStamp = run ? RELATIVE(run.updatedAt || run.endedAt || run.startedAt) : '';
+
+  const configured = !!provider && provider !== 'none';
+  // The canvas is only ever on when there IS an assistant: without this, a workspace with no
+  // provider at a narrow width rendered NEITHER branch (the history is gated on the provider, the
+  // column on the history being off) and the panel came up blank.
+  const showCanvas = view === 'history' && configured;
 
   /* ── one set of controls, one body, two shells ────────────────────────────────
    * Docked and detached must be the SAME panel — a second copy of the transcript, the composer or the
    * write list is a copy that eventually drifts, and on this screen drift means one of them draws a
    * write as a read. Only the frame around them changes.
    */
-  const controls = (
-    <>
+  const header = (
+    <div className="aic__head">
+      <div className="aic__brand">
+        <span className="aic__mark" aria-hidden><i /></span>
+        <span className="aic__wordmark">Assistant</span>
+      </div>
+      <span className="aic__rule" aria-hidden />
+      <div className="aic__ident">
+        <span className="aic__title" title={convoTitle}>{convoTitle}</span>
+        {!!convoStamp && (
+          <span className="aic__stamp" title={UTC(run?.updatedAt || run?.startedAt || '')}>{convoStamp}</span>
+        )}
+      </div>
+      <div className="aic__spacer" />
+      <button type="button" className="aic__pill" onClick={newConversation} title="Start a new conversation">New</button>
       <button
-        className="btn btn--sm btn--ghost"
+        type="button"
+        className={cx('aic__pill', showCanvas && 'is-on')}
+        aria-pressed={showCanvas}
         onClick={() => setView((v) => (v === 'history' ? 'chat' : 'history'))}
-        aria-pressed={view === 'history'}
         title="Past conversations"
       >
-        History{threadCount ? ` (${threadCount})` : ''}
+        History{threadCount ? ` ${threadCount}` : ''}
       </button>
-      <button className="btn btn--sm btn--ghost" onClick={newConversation} title="Start a new conversation">
-        <Icon.Plus />New
+      <button
+        type="button"
+        className="aic__iconbtn"
+        onClick={() => setMode(!detached)}
+        title={detached ? 'Dock this back into the side panel' : 'Detach into a window you can move and resize'}
+        aria-label={detached ? 'Dock the assistant' : 'Detach the assistant'}
+      >
+        <Icon.PanelLeft />
       </button>
-    </>
+      <button type="button" className="aic__iconbtn" onClick={onClose} aria-label="Close the assistant">✕</button>
+    </div>
   );
 
-  const body = (
-    <>
-      <div className="ai-panel__body" ref={bodyRef} onScroll={onScroll}>
-        {settings.isLoading && <div className="muted">Loading assistant settings…</div>}
-        {settings.isError && <div className="compute-error">{errMsg(settings.error)}</div>}
+  const thread$ = (
+    <div className="aic__thread" ref={bodyRef} onScroll={onScroll}>
+      {/* HISTORY, where the panel is too narrow for the canvas beside the thread: it takes the
+          reading column, and the composer below it stays pinned — Stop has to remain reachable for
+          the whole run whatever else is on screen. */}
+      {showCanvas && !wide && (
+        <HistoryCanvas
+          runs={runs} busy={loadingRuns} full filter={histFilter} onFilter={setHistFilter}
+          onOpen={openRun} onDelete={remove} onClose={() => setView('chat')}
+        />
+      )}
 
-        {provider === 'none' && (
-          <div className="ai-cta">
-            <div className="ai-cta__title">AI assistant is off</div>
-            <div className="ai-cta__body">
-              Add an OpenAI API key (or point the base URL at any OpenAI-compatible endpoint such as Ollama, LM Studio or vLLM)
-              to let the assistant investigate the logs with the app&rsquo;s own search, timeline, graph and case tools. The model
-              must support tool calling.
-            </div>
-            <Link to="/settings#ai" className="btn btn--accent" onClick={onClose}>Open settings → AI assistant</Link>
-          </div>
-        )}
+      {(!showCanvas || wide) && (
+        <div className={cx('aic__column', configured && !run && 'aic__column--hero')}>
+          {settings.isLoading && <div className="aic-busy"><span className="spinner" style={{ width: 12, height: 12 }} />Loading assistant settings</div>}
+          {settings.isError && <div className="aic-warn" role="alert"><Icon.Warn /><span>{errMsg(settings.error)}</span></div>}
 
-        {provider && provider !== 'none' && view === 'history' && (
-          <HistoryList runs={runs} busy={loadingRuns} onOpen={openRun} onDelete={remove} />
-        )}
-
-        {provider && provider !== 'none' && view === 'chat' && !run && (
-          <div className="chat-empty">
-            <div className="chat-empty__title">Describe the investigation</div>
-            <div className="chat-empty__body">
-              The assistant searches the pool, opens events, walks the entity graph and writes what it finds into the
-              case &mdash; citing the event ids behind every claim. Every change it makes is listed here and can be
-              reverted in one click.
-            </div>
-            {scopeNote && (
-              <div className="chat-empty__ctx">
-                <span className="eyebrow">Context</span>
-                <span className="mono">{scopeNote}</span>
+          {provider === 'none' && (
+            <div className="ai-cta">
+              <div className="ai-cta__title">The assistant is off</div>
+              <div className="ai-cta__body">
+                Add an OpenAI API key (or point the base URL at any OpenAI-compatible endpoint such as Ollama, LM Studio or vLLM)
+                to let the assistant investigate the logs with the app&rsquo;s own search, timeline, graph and case tools. The model
+                must support tool calling.
               </div>
-            )}
-          </div>
-        )}
-
-        {provider && provider !== 'none' && view === 'chat' && run && (
-          <div className="chat">
-            {thread.map((t) => (
-              <Turn key={t.id} run={t} entries={t.transcript} live={false}
-                    undoing={undoingId === t.id} onUndo={undoRun} />
-            ))}
-            <Turn run={run} entries={entries} live={live} undoing={undoingId === run.id} onUndo={undoRun} />
-          </div>
-        )}
-
-        {error && <div className="compute-error">{error}</div>}
-      </div>
-
-      {provider && provider !== 'none' && (
-        <div className="ai-panel__foot">
-          {!atBottom && live && (
-            <button type="button" className="chat-jump" onClick={jumpToLatest}>Jump to latest</button>
+              <Link to="/settings#ai" className="aic__pill" onClick={onClose}>Open settings</Link>
+            </div>
           )}
-          {/* The composer is one bordered box: the textarea, then a toolbar row with the prompt picker on
-              the left (which prompt the next run uses — always visible, a control that only appears once
-              something is saved is a control nobody discovers) and Send / Stop on the right. */}
-          <form
-            className={cx('chat-composer', live && 'live')}
-            onSubmit={(e) => { e.preventDefault(); send(); }}
-          >
-            <textarea
-              ref={promptRef}
-              className="chat-composer__input"
-              rows={1}
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
-              }}
-              placeholder={live
-                ? 'The assistant is working — stop it to ask something else'
-                : continueFrom
-                  ? 'Ask a follow-up. It keeps everything this conversation established.'
-                  : 'Describe the investigation — an entity to trace, a question, a case to build.'}
-              aria-label="What should the assistant investigate?"
-              disabled={live}
-            />
-            <div className="chat-composer__bar">
-              <PromptPicker
-                prompts={savedPrompts}
-                defaultId={settings.data?.ai.systemPromptId ?? ''}
-                value={spChoice}
-                onChange={pickSystemPrompt}
-                disabled={live}
-                builtinEdited={!!systemPrompts.data?.builtinEdited}
-                onNavigate={onClose}
-              />
-              <span className="chat-composer__kbd" aria-hidden>Enter to send · Shift+Enter for a new line</span>
-              {live ? (
-                <button type="button" className="btn btn--danger btn--sm chat-composer__go" onClick={stop} disabled={stopping}>
-                  {stopping ? 'Stopping…' : 'Stop'}
-                </button>
-              ) : (
-                <button type="submit" className="btn btn--primary btn--sm chat-composer__go" disabled={!canSend}>
-                  {continueFrom ? 'Send' : 'Investigate'}
-                </button>
+
+          {provider && provider !== 'none' && !run && (
+            <div className="aic-hero">
+              <h1 className="aic-hero__title">What are we investigating?</h1>
+              <div className="aic-hero__body">
+                The assistant searches the pool, opens events, walks the entity graph and writes what it finds into the
+                case &mdash; citing the event ids behind every claim. Every change it makes is listed with the answer and can be
+                reverted in one click.
+              </div>
+              {scopeNote && (
+                <div className="aic-hero__ctx"><b>Context</b>{scopeNote}</div>
               )}
             </div>
-          </form>
-          <div className="chat-composer__hint">
-            {live
-              ? 'Stop halts the run on the server at its next checkpoint — anything already written stays and can be reverted.'
-              : continueFrom
-                ? 'This continues the conversation above — the assistant keeps what it already found and does not start over. New begins a fresh one.'
-                : 'Everything is kept in History and survives a refresh. You can keep asking follow-ups in the same chat.'}
+          )}
+
+          {provider && provider !== 'none' && run && (
+            <>
+              {thread.map((t) => (
+                <Turn key={t.id} run={t} entries={t.transcript} live={false}
+                      undoing={undoingId === t.id} onUndo={undoRun} onRetry={retry} />
+              ))}
+              <Turn run={run} entries={entries} live={live} undoing={undoingId === run.id}
+                    onUndo={undoRun} onRetry={retry} />
+            </>
+          )}
+
+          {error && <div className="aic-warn" role="alert"><Icon.Warn /><span>{error}</span></div>}
+        </div>
+      )}
+
+      {/* THE COMPOSER, sticky at the bottom of the scroller — the template's own arrangement, and
+          what keeps Stop reachable for the whole duration of a run. */}
+      {provider && provider !== 'none' && (
+        <div className="aic__dock">
+          <div className="aic__dockin">
+            {!atBottom && live && (
+              <button type="button" className="aic__jump" onClick={jumpToLatest}>Jump to latest</button>
+            )}
+            <form
+              className={cx('aic-comp', live && 'aic-comp--live')}
+              onSubmit={(e) => { e.preventDefault(); send(); }}
+            >
+              <textarea
+                ref={promptRef}
+                className="aic-comp__input"
+                rows={1}
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+                }}
+                placeholder={live
+                  ? 'The assistant is working — stop it to ask something else'
+                  : continueFrom
+                    ? 'Ask a follow-up. It keeps everything this conversation established.'
+                    : 'Describe the investigation — an entity to trace, a question, a case to build.'}
+                aria-label="What should the assistant investigate?"
+                disabled={live}
+              />
+              <div className="aic-comp__bar">
+                <PromptPicker
+                  prompts={savedPrompts}
+                  defaultId={settings.data?.ai.systemPromptId ?? ''}
+                  value={spChoice}
+                  onChange={pickSystemPrompt}
+                  disabled={live}
+                  builtinEdited={!!systemPrompts.data?.builtinEdited}
+                  onNavigate={onClose}
+                />
+                <span className="aic-comp__hint" aria-hidden>
+                  {live ? 'running' : continueFrom ? 'Enter to continue' : 'Enter to send · Shift+Enter for a line'}
+                </span>
+                {live ? (
+                  <button
+                    type="button"
+                    className="aic-comp__send"
+                    onClick={stop}
+                    disabled={stopping}
+                    title={stopping ? 'Stopping the run…' : 'Stop the run on the server'}
+                    aria-label="Stop the run"
+                  >
+                    <span className="aic-comp__stop" aria-hidden />
+                  </button>
+                ) : (
+                  <button
+                    type="submit"
+                    className="aic-comp__send"
+                    disabled={!canSend}
+                    title={continueFrom ? 'Send the follow-up' : 'Start the investigation'}
+                    aria-label={continueFrom ? 'Send the follow-up' : 'Start the investigation'}
+                  >
+                    <span className="aic-comp__arrow" aria-hidden>↑</span>
+                  </button>
+                )}
+              </div>
+            </form>
+            <div className="aic-comp__note">
+              {live
+                ? 'Stop halts the run on the server at its next checkpoint — anything already written stays and can be reverted.'
+                : continueFrom
+                  ? 'This continues the conversation above — the assistant keeps what it already found and does not start over.'
+                  : 'Everything is kept in History and survives a refresh. You can keep asking follow-ups in the same chat.'}
+            </div>
           </div>
         </div>
       )}
-    </>
+    </div>
+  );
+
+  const body = (
+    <div className="aic__shell" ref={shellRef}>
+      {thread$}
+      {showCanvas && wide && (
+        <HistoryCanvas
+          runs={runs} busy={loadingRuns} full={false} filter={histFilter} onFilter={setHistFilter}
+          onOpen={openRun} onDelete={remove} onClose={() => setView('chat')}
+        />
+      )}
+    </div>
   );
 
   if (detached) {
@@ -1383,25 +1560,20 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
         flush
         closeOnEscape={false}
         ariaLabel="AI assistant"
-        title={<span className="ai-win__title">AI assistant{live && <span className="spinner" style={{ width: 12, height: 12 }} />}</span>}
-        sub={target.label}
+        className="floatwin--aic aic"
+        /* The window's title bar IS the template header, so there is never a header above a header
+           and the whole 58px bar stays the drag handle. */
+        head={header}
+        title={<span className="aic-win__title">AI assistant</span>}
         onClose={onClose}
-        /* Sized for READING, which is the only thing left deciding it now the rail is gone. The
-           measure is 70ch at --fs-2xl, so the answer wants ~500px; 620 of window is ~580 of content,
-           which puts a report 40px from each edge — that is the "squeezed" complaint, not a fix for
-           it. ~720px of content gives it real margins and lets a call's argument rows and a small
-           table sit without scrolling. Never below the old 620, and FloatingWindow clamps it to the
-           viewport, so a small screen still gets a window that fits. */
-        defaultBox={{ w: Math.min(760, Math.max(620, window.innerWidth - 160)),
-                      h: Math.min(760, window.innerHeight - 120) }}
-        minH={380}
-        actions={
-          <>
-            {controls}
-            <button className="btn btn--sm btn--ghost" onClick={() => setMode(false)}
-              title="Dock this back into the side panel">Dock</button>
-          </>
-        }
+        /* Sized for READING first: the template's column is 792px plus its 26px gutters, so ~880 of
+           content shows the answer at its intended measure AND leaves room for the 470px canvas
+           beside it. FloatingWindow clamps to the viewport, so a laptop still gets a window that
+           fits — it simply falls back to the single-column layout. */
+        defaultBox={{ w: Math.min(1180, Math.max(700, window.innerWidth - 160)),
+                      h: Math.min(820, window.innerHeight - 100) }}
+        minW={420}
+        minH={420}
       >
         {body}
       </FloatingWindow>
@@ -1411,16 +1583,8 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
   return (
     <>
       <div className="overlay" onClick={onClose} />
-      <aside className="ai-panel" role="dialog" aria-modal="true" aria-label="AI assistant">
-        <div className="ai-panel__head">
-          <div className="ai-panel__title">AI assistant</div>
-          {live && <span className="spinner" style={{ width: 12, height: 12 }} />}
-          <span className="ai-panel__ctx ellipsis" title={target.label}>{target.label}</span>
-          {controls}
-          <button className="btn btn--sm btn--ghost" onClick={() => setMode(true)}
-            title="Detach into a window you can move and resize">Detach</button>
-          <button className="close-x" onClick={onClose} aria-label="Close">×</button>
-        </div>
+      <aside className="ai-panel aic" role="dialog" aria-modal="true" aria-label="AI assistant">
+        {header}
         {body}
       </aside>
     </>

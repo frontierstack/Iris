@@ -61,7 +61,7 @@ function ExportReport({ active }: { active: CaseSummary | undefined }) {
       {open && (
         <div className="export-menu__list" role="menu" aria-label={`Export ${active.name}`}>
           <div className="export-menu__head">
-            <span className="eyebrow">Active case</span>
+            <span className="lbl">Active case</span>
             <span className="ellipsis" title={active.name}>{active.name}</span>
           </div>
           {EXPORTS.map((x) => (
@@ -281,8 +281,8 @@ export function CasesScreen() {
       {showTrash && (trash.data?.length ?? 0) > 0 && (
         <div className="cases__trash">
           <div className="cases__trash-head">
-            <span className="eyebrow">Recently deleted</span>
-            <span className="muted" style={{ fontSize: 'var(--fs-xs)' }}>
+            <span className="lbl">Recently deleted</span>
+            <span className="cases__trash-hint">
               the {trash.data!.length} most recent deletes are kept with their uploads — restoring re-parses them
             </span>
           </div>

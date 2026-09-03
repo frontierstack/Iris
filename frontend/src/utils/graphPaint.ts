@@ -53,20 +53,30 @@ const EMPTY_STATE: PaintState = {
   pathEdges: new Set(), proposed: new Set(), labelled: new Set(),
 };
 
-/** Read the theme's colours out of CSS custom properties once, so the canvas matches every theme. */
+/** Read the theme's colours out of CSS custom properties once, so the canvas matches every theme.
+ *
+ *  EVERY colour the painter draws with arrives through this function — there is no literal in the
+ *  drawing code, because a hex baked into a canvas call is a value that is wrong in eight of the
+ *  nine themes and, unlike a stylesheet, nothing in the build can see it.
+ *
+ *  The second argument is a LAST RESORT, reached only if a theme fails to define the token at all.
+ *  They used to be the previous palette's greens (#7ee2a8 accent, #242c25 edge, #1c2a1e node fill),
+ *  which is the worst possible fallback: a missing token would not have degraded, it would have
+ *  drawn the canvas in a colour scheme the app no longer has. They are the observability template's
+ *  own values now — the same hexes themes.css states for `iris-dark`. */
 export function readPalette(el: HTMLElement): PaintPalette {
   const cs = getComputedStyle(el);
   const v = (name: string, fallback: string) => cs.getPropertyValue(name).trim() || fallback;
   return {
-    edge: v('--edge', '#242c25'), accent: v('--accent', '#7ee2a8'), accentHover: v('--accent-hover', '#9df0be'),
-    accentBorder: v('--accent-border', '#2f6f4a'), nodeRing: v('--node-ring', '#38513d'),
-    nodeFill: v('--node-fill', '#1c2a1e'), nodeFill2: v('--panel-2', '#22302a'),
-    nodeRingSel: v('--node-ring-sel', '#bdf7cb'),
-    graphBg: v('--graph-bg', '#0d0f0d'), panel: v('--panel', '#141714'),
-    accentBg: v('--accent-bg', '#16281c'), border: v('--border', '#232823'),
-    text2: v('--text-2', '#c6d2c8'), textBright: v('--text-bright', '#eef6ef'), muted2: v('--muted-2', '#8b978d'),
-    onAccent: v('--on-accent', '#07120b'), sevMedium: v('--sev-medium', '#e8c46a'),
-    sevHigh: v('--sev-high', '#e8895f'), sevCritical: v('--sev-critical', '#e8697a'),
+    edge: v('--edge', '#2b3237'), accent: v('--accent', '#35c2c8'), accentHover: v('--accent-hover', '#4ad3d8'),
+    accentBorder: v('--accent-border', '#2f7f86'), nodeRing: v('--node-ring', '#2f7f86'),
+    nodeFill: v('--node-fill', '#17282b'), nodeFill2: v('--panel-2', '#161a1d'),
+    nodeRingSel: v('--node-ring-sel', '#9fd9db'),
+    graphBg: v('--graph-bg', '#0d0f11'), panel: v('--panel', '#101315'),
+    accentBg: v('--accent-bg', '#122528'), border: v('--border', '#23282c'),
+    text2: v('--text-2', '#d3dadd'), textBright: v('--text-bright', '#f1f5f6'), muted2: v('--muted-2', '#6d777c'),
+    onAccent: v('--on-accent', '#08181a'), sevMedium: v('--sev-medium', '#c9b45f'),
+    sevHigh: v('--sev-high', '#e0a33c'), sevCritical: v('--sev-critical', '#e2695f'),
     mono: v('--font-mono', 'ui-monospace, monospace'),
   };
 }
@@ -508,7 +518,10 @@ export class GraphPainter {
       if (!gn) continue;
       const labelW = Math.min(240, gn.name.length * 6.9 + 18);
       const y = nd.y + nd.r + 7;
-      roundRect(ctx, nd.x - labelW / 2, y, labelW, 17, 8.5);
+      // 3px, the template's tag radius. At 8.5 on a 17px-high chip this was a full capsule, and the
+      // one capsule in this design is the numeric badge in the nav — a pill here is the loudest
+      // thing on the canvas saying "different app". Geometry otherwise unchanged.
+      roundRect(ctx, nd.x - labelW / 2, y, labelW, 17, 3);
       // The chip is what makes a label readable over edges running underneath it, so it is nearly opaque
       // and the selected one is tinted rather than merely outlined.
       ctx.fillStyle = on ? p.accentBg : p.panel;
@@ -518,7 +531,7 @@ export class GraphPainter {
       ctx.strokeStyle = on ? p.accentBorder : p.border;
       ctx.lineWidth = on ? 1 : 0.6;
       ctx.stroke();
-      ctx.font = `${on ? '700 ' : ''}11px ${p.mono}`;
+      ctx.font = `${on ? '600 ' : ''}11px ${p.mono}`;   // 600 is the heaviest weight this design uses
       ctx.fillStyle = on ? p.accent : gn.inCase ? p.textBright : p.text2;
       ctx.fillText(gn.name, nd.x, y + 12);
       if (on || isHover) {

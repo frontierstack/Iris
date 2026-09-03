@@ -14,6 +14,7 @@ export const qk = {
   entity: (name: string) => ['entity', name] as const,
   event: (id: string) => ['event', id] as const,
   events: (params: unknown) => ['events', params] as const,
+  eventsHistogram: (params: unknown) => ['events-histogram', params] as const,
   caseSet: ['case-set'] as const,
   caseDetail: (id: string) => ['case-detail', id] as const,
   notes: (id: string) => ['notes', id] as const,
