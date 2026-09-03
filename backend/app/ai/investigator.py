@@ -76,7 +76,7 @@ from typing import Any, AsyncIterator, Callable, Optional
 import orjson
 
 from ..config import get_settings
-from . import compaction, continuation, runs
+from . import compaction, continuation, eventids, runs
 from .argrepair import repair_arguments
 from .client import (AIError, BadToolArguments, ContextTooLong, LLMClient, ProviderUnavailable,
                      absorb_text_calls, has_tool_call_syntax, parse_text_tool_calls)
@@ -195,6 +195,8 @@ MAX_RECORD_NUDGES = 3
 # kind='summary', or update_case setting the case summary. A FINDING note does not count — those are
 # written as findings are found, and the summary is the one that ties them together.
 SUMMARY_TOOLS = ("add_note", "update_case")
+# A final answer shorter than this is a reply, not a report: it is never filed as the summary note.
+AUTO_SUMMARY_MIN_CHARS = 400
 
 
 def _env_int(name: str, default: int, cap: int) -> int:
@@ -1488,6 +1490,42 @@ async def investigate(store: Any, objective: str, run_id: str,
             yield {"type": "warning", "message": warn, "ids": unverified}
         if answer:
             yield {"type": "answer", "text": answer}
+        # THE FINAL SUMMARY IS POSTED TO THE CASE, BY IRIS IF NEED BE. SUMMARY_CHECK asks the model
+        # for it once, and the model may decline, run out of window, or answer with the report and no
+        # call — reported as "the final summary of the assistant doesn't get posted as a note". A run
+        # that did real work and reached a report therefore has its report filed as the summary note
+        # when no summary is on the case yet: cited with the verified ids in the report itself, else
+        # with ids the run actually saw in its tool results. Never for a stopped run (the analyst
+        # cut it off), never for a plain question (few calls, no writes, a short answer), and never
+        # when the model already wrote one.
+        if (state == "done" and answer and _case_open(store) and not _has_summary(ctx.actions)
+                and tool_calls >= DOCUMENT_MIN_CALLS and len(answer) >= AUTO_SUMMARY_MIN_CHARS
+                and not runs.stop_requested(run_id)):
+            cited = [i for i in eventids.find(answer) if i not in unverified][:20]
+            if not cited:
+                seen: list[str] = []
+                for m in messages:
+                    if m.get("role") == "tool":
+                        for i in eventids.find(str(m.get("content") or ""), cap=40):
+                            if i not in seen and store.event(i) is not None:
+                                seen.append(i)
+                            if len(seen) >= 20:
+                                break
+                    if len(seen) >= 20:
+                        break
+                cited = seen
+            ok, result = await _run_tool("add_note", {"text": answer, "kind": "summary",
+                                                      "title": "Summary", "citedEventIds": cited}, ctx)
+            if ok and isinstance(result, dict) and result.get("action"):
+                HISTORY.note_action(run_id, result["action"])
+                yield {"type": "write", "action": result["action"]}
+                note = "the assistant did not file its summary in the case — Iris posted the final report as the case summary note"
+                HISTORY.append(run_id, {"kind": "status", "text": note})
+                yield {"type": "status", "text": note, "autoSummary": True}
+            else:
+                note = f"could not post the final report as the case summary note: {str(result)[:200]}"
+                HISTORY.append(run_id, {"kind": "warning", "text": note})
+                yield {"type": "warning", "message": note, "ids": []}
         runs.finish(run_id, state, reason, step, tool_calls, answer, ctx.actions, unverified)
         yield {"type": "done", "runId": run_id, "threadId": thread_id or run_id,
                "parentId": parent_id, "reason": reason, "state": state, "steps": step,

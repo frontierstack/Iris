@@ -33,6 +33,11 @@
   accent-color: var(--accent); cursor: default;
 }
 .md-del { text-decoration: line-through; color: var(--muted-2, var(--muted)); }
+/* A bold run that covers (nearly) the whole paragraph or list item is not emphasis — nothing is
+   set off from anything. The renderer marks it `.md-strong--long` and it keeps the bright colour at
+   the body weight; a short run (a term, a verdict, an outcome) is a plain <strong> and keeps weight. */
+.md strong, .aic-prose strong { color: var(--text-bright); }
+.md strong.md-strong--long, .aic-prose strong.md-strong--long { font-weight: inherit; }
 .md a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-border); }
 .md a:hover { color: var(--accent-hover); }
 .md-code {

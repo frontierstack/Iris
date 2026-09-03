@@ -615,8 +615,10 @@ a.aic__pill { display: inline-block; text-decoration: none; }
    everything around it is mono or sans. */
 .aic .aic-prose {
   font-family: var(--aic-serif);
-  font-size: 16px;
-  line-height: 1.62;
+  /* 15px/1.6 — one step under the template's 16px/1.62, on request ("seems large"). A serif
+     column reads a size smaller than the same sans; the measure (792px) is unchanged. */
+  font-size: 15px;
+  line-height: 1.6;
   letter-spacing: 0.003em;
   color: var(--text);
   text-wrap: pretty;
@@ -633,11 +635,13 @@ a.aic__pill { display: inline-block; text-decoration: none; }
   font-weight: 500;
   letter-spacing: -0.01em;
   color: var(--text-bright);
-  margin: 20px 0 8px;
+  margin: 18px 0 6px;
   line-height: 1.3;
 }
-.aic .aic-prose .md-h1 { font-size: 21px; }
-.aic .aic-prose .md-h2 { font-size: 18px; }
+/* Modest, not display-size: a heading inside an ANSWER is a section label, one to three points over
+   the body, never the size of a page title. */
+.aic .aic-prose .md-h1 { font-size: 18px; }
+.aic .aic-prose .md-h2 { font-size: 16px; }
 .aic .aic-prose .md-h3 {
   font-family: var(--font-ui);
   font-size: 11px;
@@ -651,14 +655,19 @@ a.aic__pill { display: inline-block; text-decoration: none; }
 .aic .aic-prose > .md-h2:first-child,
 .aic .aic-prose > .md-h3:first-child { margin-top: 0; }
 .aic .aic-prose ul, .aic .aic-prose ol { margin: 0 0 12px; padding-left: 22px; }
-.aic .aic-prose li { margin: 4px 0; font-size: 16px; line-height: 1.55; }
+.aic .aic-prose li { margin: 3px 0; font-size: 15px; line-height: 1.55; }
 .aic .aic-prose li > ul, .aic .aic-prose li > ol { margin: 4px 0 2px; }
 .aic .aic-prose .md-quote {
   margin: 0 0 12px;
   font-family: var(--aic-serif);
-  font-size: 15.5px;
+  font-size: 14.5px;
   color: var(--text-3);
 }
+/* EMPHASIS. Newsreader's 700 is heavy in a reading column, and a model bolds whole sentences: the
+   renderer marks a run that covers most of its paragraph `.md-strong--long` and it drops back to the
+   body weight in the bright colour (rule in notes.css), so only a short run — a term, a verdict, an
+   outcome — carries weight. 600 rather than 700 for the ones that keep it. */
+.aic .aic-prose strong { font-weight: 600; color: var(--text-bright); }
 .aic .aic-prose .md-hr { margin: 18px 0; }
 /* Data stays in the mono face at a data size — an event id is not prose. */
 .aic .aic-prose .md-code, .aic .aic-prose .md-data, .aic .aic-prose .md-time {
@@ -678,8 +687,8 @@ a.aic__pill { display: inline-block; text-decoration: none; }
 .aic .aic-prose .md-tablewrap { max-width: 100%; overflow-x: auto; margin: 0 0 12px; border-radius: 8px; }
 .aic .aic-prose .md-table { min-width: 0; font-family: var(--font-ui); font-size: 12px; }
 /* the same measure, one size down, where prose is commentary rather than the answer */
-.aic .aic-prose--quiet { font-size: 14.5px; color: var(--text-3); }
-.aic .aic-prose--quiet li { font-size: 14.5px; }
+.aic .aic-prose--quiet { font-size: 13.5px; color: var(--text-3); }
+.aic .aic-prose--quiet li { font-size: 13.5px; }
 
 /* The streaming caret. Included on the analyst's explicit instruction that this template's UX
    supersedes the earlier note that the panel carries no caret. */

@@ -26,6 +26,26 @@ function safeUrl(raw: string): string | null {
 /* code | image | link | bold | italic | strike */
 const INLINE = /(`+)([^`]+?)\1|!\[([^\]]*)\]\(([^)\s]+)\)|\[([^\]]*)\]\(([^)\s]+)\)|\*\*([\s\S]+?)\*\*|\*([^*\n]+)\*|~~([\s\S]+?)~~/g;
 
+/* ── smarter bolding ──
+ * A model bolds whole sentences and whole paragraphs, and bold that covers everything sets nothing
+ * off — it just makes the paragraph heavy. A bold run is "long" when it is most of the text it sits
+ * in (≥ 80 % of the paragraph, list item or cell, once it is long enough to be a sentence rather
+ * than a verdict) or simply long in its own right (> 120 characters). A long run renders as
+ * <strong class="md-strong--long">, which the stylesheet sets at the body weight in the bright
+ * colour; a short run — a term, a verdict, an outcome — stays a plain <strong> and keeps its weight.
+ * Display only: the stored text is untouched and the element is still <strong>, so nothing about
+ * what the author WROTE changes — only how much ink it gets. A whole-paragraph `**Compromised.**`
+ * is under the length floor and stays bold, because that is the verdict case this exists to keep. */
+const LONG_BOLD_CHARS = 120;
+const LONG_BOLD_SHARE = 0.8;
+const LONG_BOLD_FLOOR = 48;
+
+function isLongBold(run: string, whole: string): boolean {
+  const len = run.trim().length;
+  if (len > LONG_BOLD_CHARS) return true;
+  return len >= LONG_BOLD_FLOOR && len >= LONG_BOLD_SHARE * whole.trim().length;
+}
+
 /** Inline spans of one line/paragraph. (matchAll clones the regex, so the recursive calls below are safe.) */
 export function inlineMd(src: string, key = 'i'): ReactNode[] {
   const out: ReactNode[] = [];
@@ -45,7 +65,9 @@ export function inlineMd(src: string, key = 'i'): ReactNode[] {
       out.push(u
         ? <a key={k} href={u} target="_blank" rel="noreferrer noopener">{inlineMd(m[5], k)}</a>
         : <span key={k}>{m[0]}</span>);
-    } else if (m[7] !== undefined) out.push(<strong key={k}>{inlineMd(m[7], k)}</strong>);
+    } else if (m[7] !== undefined) {
+      out.push(<strong key={k} className={isLongBold(m[7], src) ? 'md-strong--long' : undefined}>{inlineMd(m[7], k)}</strong>);
+    }
     else if (m[8] !== undefined) out.push(<em key={k}>{inlineMd(m[8], k)}</em>);
     else if (m[9] !== undefined) out.push(<del key={k} className="md-del">{inlineMd(m[9], k)}</del>);
     last = at + m[0].length;

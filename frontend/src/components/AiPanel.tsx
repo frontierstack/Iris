@@ -41,7 +41,7 @@
  * rejoins by POLLING `GET /api/ai/runs/{id}?since=<seq>`. Both write into the same
  * `AiTranscriptEntry[]`, so there is one renderer, not two.
  */
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { api } from '../api/client';
@@ -66,18 +66,37 @@ const POLL_MS = 900;
  * fixed 90 ms timer effectively did — reproduces that shape exactly, so the report appeared as lumps
  * of a paragraph separated by stalls. That is what "very jumpy" is: the cadence of the wire, painted.
  *
- * So arrival is decoupled from painting. Deltas go into a buffer, and one requestAnimationFrame loop
- * drains a SLICE of it per frame, sized by how far behind the screen is (`elapsed / SMOOTH_MS` of what
- * is waiting). A burst therefore plays out over a few frames instead of landing at once, a trickle
- * still moves every frame, and the buffer can never fall further behind than that time constant —
- * it is a smoothing filter, not a queue. Painting is on the frame clock, which is the only clock the
- * screen actually has.
+ * So arrival is decoupled from painting. Deltas go into a buffer and one requestAnimationFrame loop
+ * plays it out — and HOW MUCH it plays per frame is the part that was still wrong. The first cut
+ * drained a fixed SHARE of the backlog per frame (`length * dt / 130`), which is an exponential decay:
+ * a packet of five tokens went 3-2-2-1-1-1-1… characters a frame and then STOPPED until the next packet,
+ * so the screen still pulsed with the wire, only rounded off. Reported as "skippy and not smooth".
+ *
+ * The loop is a JITTER BUFFER now, the way audio playback handles the same problem. It measures the
+ * ARRIVAL rate over the recent window (`STREAM_RATE_WINDOW_MS`), runs a deliberate lag behind the
+ * wire, and paints at that rate: a little under it while the backlog is still filling to the lag
+ * (never below half, so a stall drains the last words rather than leaving them hanging), and over it
+ * by whatever exceeds the lag, worked off across `STREAM_CATCHUP_MS` — so a burst plays out over a few
+ * frames instead of landing at once, and the backlog is bounded whatever the wire does. Fractions of a
+ * character carry between frames, so a slow model types at ITS rate rather than one whole character
+ * per frame in spurts. Painting is on the frame clock, which is the only clock the screen has.
+ *
+ * The lag ADAPTS to the wire (`STREAM_LAG_MIN_MS` … `STREAM_LAG_MAX_MS`): a buffer can only absorb a
+ * gap it is longer than, so it is sized from the largest gap between arrivals in the window. A
+ * provider that streams per token pays the minimum; a gateway that coalesces 400 ms of tokens into one
+ * packet pays ~500 ms once and then reads as a steady flow instead of a lump every 400 ms. Simulated
+ * on that wire before shipping: 29 empty frames per 2.4 s down to 3.
  *
  * A frame is only affordable because the transcript around the growing paragraph does not re-render:
- * `Markdown`, `ToolCall` and `StepsCard` are all memoised, so a commit re-parses the one block
- * that changed. Take those memos away and this rate becomes a stutter of a different kind.
+ * `Markdown`, `ToolCall` and `StepsCard` are all memoised, and the growing block itself is split by
+ * `LiveMarkdown` so that only its unfinished tail is re-parsed. Take those away and this rate becomes a
+ * stutter of a different kind.
  */
-const STREAM_SMOOTH_MS = 130;
+const STREAM_LAG_MIN_MS = 160;      // how far behind the wire the screen runs on a per-token stream
+const STREAM_LAG_MAX_MS = 600;      // and at most, however coarse the packets are
+const STREAM_RATE_WINDOW_MS = 1200; // the window the arrival rate and the gaps are measured over
+const STREAM_CATCHUP_MS = 400;      // a backlog beyond the lag is worked off across this long
+const STREAM_DEFAULT_CPS = 180;     // characters per second assumed until there is a rate to measure
 
 /**
  * DOCKED OR DETACHED, and the choice is remembered.
@@ -315,6 +334,54 @@ function trailNodes(blocks: Block[]): TrailNode[] {
  */
 const Markdown = memo(function Markdown({ text, className }: { text: string; className: string }) {
   return <div className={className}>{renderMarkdown(text)}</div>;
+});
+
+/**
+ * The block that is still being WRITTEN.
+ *
+ * It goes through the same renderer as a finished one — headings, lists, tables and code render as they
+ * stream, not once the turn ends — but the text is split at its last blank line that is not inside an
+ * open fence. Everything before it is settled markdown and is parsed only when that boundary moves
+ * (`LiveHead` is memoised on its own text); only the unfinished tail is re-parsed per frame, and it is
+ * a paragraph, not the report. Blank-line splitting is exact for this renderer: a blank line already
+ * ends a list, a quote and a table in `renderMarkdown`, so the two halves parse as the whole would —
+ * a fence is the one construct that may span one, hence the parity check.
+ *
+ * The tail is also rendered with its dangling inline marks CLOSED: `**Finding 1` is drawn bold while
+ * the closing mark is still on the wire, a half-typed `code` span as code. Without this the tail
+ * reads as raw markdown for as long as a slow model takes to reach the closing mark — the last line
+ * of the answer, the one being read, looking like source. Display only; the stored text is untouched.
+ */
+const FENCE_LINES = /^[ \t]*```/gm;
+function splitLive(text: string): [string, string] {
+  let at = text.lastIndexOf('\n\n');
+  while (at > 0) {
+    const head = text.slice(0, at);
+    if ((head.match(FENCE_LINES) ?? []).length % 2 === 0) return [head, text.slice(at)];
+    at = text.lastIndexOf('\n\n', at - 1);
+  }
+  return ['', text];
+}
+function closeDangling(tail: string): string {
+  if ((tail.match(FENCE_LINES) ?? []).length % 2) return tail;      // inside a fence: it is code, not marks
+  let out = tail;
+  for (const mark of ['`', '**', '~~']) {
+    if (out.endsWith(mark)) continue;                                // just opened: nothing to enclose yet
+    if ((out.split(mark).length - 1) % 2) out += mark;
+  }
+  return out;
+}
+const LiveHead = memo(function LiveHead({ text }: { text: string }) {
+  return <>{renderMarkdown(text)}</>;
+});
+const LiveMarkdown = memo(function LiveMarkdown({ text, className }: { text: string; className: string }) {
+  const [head, tail] = splitLive(text.replace(/\r\n?/g, '\n'));
+  return (
+    <div className={className}>
+      {head ? <LiveHead text={head} /> : null}
+      {renderMarkdown(closeDangling(tail))}
+    </div>
+  );
 });
 
 /**
@@ -859,7 +926,7 @@ function Turn({ run, entries, live, undoing, onUndo, onRetry, onContinue }: {
           <>
             {warnings.map((w) => <Warning key={w.key} text={w.text} />)}
             <StepsCard nodes={liveNodes} live title="Working" startOpen />
-            {liveProse.map((b) => <Markdown key={b.key} className="md aic-prose" text={b.text} />)}
+            {liveProse.map((b) => <LiveMarkdown key={b.key} className="md aic-prose" text={b.text} />)}
             {!blocks.length && (
               <div className="aic-busy"><span className="spinner" style={{ width: 12, height: 12 }} />Starting the investigation</div>
             )}
@@ -1123,13 +1190,34 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
     const spKnown = spChoice === null || spChoice === '' || !!systemPrompts.data?.prompts.some((p) => p.id === spChoice);
     if (spChoice !== null && spKnown) body.systemPromptId = spChoice;
 
-    // Prose arrives one TOKEN at a time, in bursts. See STREAM_SMOOTH_MS: deltas go into `buffered`
-    // and a frame loop pours a slice of it onto the screen, so what is painted is a steady rate rather
-    // than the shape of the wire. Every other event flushes the buffer FIRST, so the order on screen is
-    // exactly the stream's — a tool card can never appear ahead of the sentence that introduced it.
+    // Prose arrives one TOKEN at a time, in bursts. See STREAM_LAG_MIN_MS: deltas go into `buffered` and
+    // a frame loop plays it out at the measured ARRIVAL rate, a short lag behind the wire, so what is
+    // painted is a steady flow rather than the shape of the packets. Every other event flushes the
+    // buffer FIRST, so the order on screen is exactly the stream's — a tool card can never appear ahead
+    // of the sentence that introduced it.
     let buffered = '';
     let raf = 0;
     let prevTs = 0;
+    let carry = 0;                                   // the fraction of a character owed to the next frame
+    const arrivals: Array<[number, number]> = [];    // [when, chars] inside the rate window
+    let arrived = 0;                                 // chars inside the window
+
+    const noteArrival = (chars: number) => {
+      arrivals.push([performance.now(), chars]);
+      arrived += chars;
+    };
+    /** The wire as measured over the recent window: characters per ms, and the lag (ms) that absorbs
+     *  its largest gap. Defaults until there are two arrivals to measure between. */
+    const wire = (now: number): { rate: number; lagMs: number } => {
+      while (arrivals.length && now - arrivals[0]![0] > STREAM_RATE_WINDOW_MS) arrived -= arrivals.shift()![1];
+      if (arrivals.length < 2) return { rate: STREAM_DEFAULT_CPS / 1000, lagMs: STREAM_LAG_MIN_MS };
+      let gap = 0;
+      for (let i = 1; i < arrivals.length; i++) gap = Math.max(gap, arrivals[i]![0] - arrivals[i - 1]![0]);
+      return {
+        rate: arrived / Math.max(STREAM_LAG_MIN_MS, now - arrivals[0]![0]),
+        lagMs: Math.min(STREAM_LAG_MAX_MS, Math.max(STREAM_LAG_MIN_MS, 1.2 * gap)),
+      };
+    };
 
     const commit = (t: string) => {
       setEntries((prev) => {
@@ -1142,6 +1230,7 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
     const stopRaf = () => {
       if (raf) { cancelAnimationFrame(raf); raf = 0; }
       prevTs = 0;
+      carry = 0;
     };
 
     /** Everything still buffered, at once. Used by every non-delta event and at end of stream. */
@@ -1157,18 +1246,26 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
 
     const tick = (ts: number) => {
       raf = 0;
-      if (ac.signal.aborted) { buffered = ''; prevTs = 0; return; }
+      if (ac.signal.aborted) { buffered = ''; prevTs = 0; carry = 0; return; }
       const dt = prevTs ? Math.min(160, ts - prevTs) : 16;
       prevTs = ts;
-      let n = Math.max(1, Math.ceil((buffered.length * dt) / STREAM_SMOOTH_MS));
-      if (n >= buffered.length) n = buffered.length;
+      const { rate: r, lagMs } = wire(ts);
+      const lag = Math.max(1, r * lagMs);
+      const fill = Math.min(1, buffered.length / lag);
+      const excess = Math.max(0, buffered.length - lag);
+      const want = r * dt * (0.5 + 0.5 * fill) + (excess / STREAM_CATCHUP_MS) * dt + carry;
+      let n = Math.floor(want);
+      carry = want - n;
+      if (n >= buffered.length) { n = buffered.length; carry = 0; }
       // Never cut between the halves of a surrogate pair: half of one is not a character, and React
       // would paint the replacement glyph for a frame before the other half arrived.
-      else if ((buffered.charCodeAt(n - 1) & 0xfc00) === 0xd800) n += 1;
-      commit(buffered.slice(0, n));
-      buffered = buffered.slice(n);
+      else if (n > 0 && (buffered.charCodeAt(n - 1) & 0xfc00) === 0xd800) n += 1;
+      if (n > 0) {
+        commit(buffered.slice(0, n));
+        buffered = buffered.slice(n);
+      }
       if (buffered) raf = requestAnimationFrame(tick);
-      else prevTs = 0;
+      else { prevTs = 0; carry = 0; }
     };
     const push = (e: Partial<AiTranscriptEntry> & { kind: AiTranscriptEntry['kind'] }) => {
       flushText();
@@ -1194,6 +1291,7 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
             break;
           case 'delta':
             buffered += ev.text;
+            noteArrival(ev.text.length);
             if (!raf) raf = requestAnimationFrame(tick);
             break;
           case 'tool_call':
@@ -1377,7 +1475,10 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
    * pulled straight back. ANY deliberate upward scroll now stops the follow, however small; scrolling
    * back down to the end resumes it. Reading is an explicit act and it wins.
    */
-  useEffect(() => {
+  // A LAYOUT effect, not a passive one: a passive effect runs after the frame has painted, so every
+  // commit painted the paragraph one line taller with the container still scrolled to its OLD bottom
+  // and pinned it a frame later — a per-frame stutter at exactly the line being read.
+  useLayoutEffect(() => {
     if (!atBottomRef.current) return;
     const el = bodyRef.current;
     if (!el) return;

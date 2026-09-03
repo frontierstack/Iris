@@ -1235,6 +1235,8 @@ type AiRunEvent =
       actions:AiAction[]; unverifiedCitations:string[]; answer:string; elapsedSec:number;
       compactions:number; contextCeiling:number; recordNudges:number;
       resets:number;            // in-run restarts from the run's own record when folding could not fit (≤ 3)
+      // a `status` with autoSummary:true precedes `done` when the model reached a report but never filed a
+      // summary note: Iris posts the report as the case summary note itself (cited with verified ids)
       outputContinues:number }  // replies cut off at the model's output limit that were continued and joined (≤ 3)
   | { type:'error'; message:string; actions?:AiAction[] };
 ```
