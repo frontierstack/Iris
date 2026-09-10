@@ -81,9 +81,10 @@ from .argrepair import repair_arguments
 from .client import (AIError, BadToolArguments, ContextTooLong, LLMClient, ProviderUnavailable,
                      absorb_text_calls, has_tool_call_syntax, parse_text_tool_calls)
 from .history import HISTORY
+from .loopguard import LoopGuard, call_key as _cache_key, returned_something as _returned_something
 from .system_prompts import PROMPTS
 from .prompts import (CONTINUE_OUTPUT, RESET_NOTE, ARG_TOO_BIG, BUDGET_NOTICE, CHECK_IN, COMPACTED_CONTINUE, CONTINUE_WORK,
-                      DOCUMENT_CHECK, NO_CASE_LINE, run_budget, RECORD_NUDGE, REPORT_NOW,
+                      DOCUMENT_CHECK, LOOP_STOP, NO_CASE_LINE, run_budget, RECORD_NUDGE, REPORT_NOW,
                       SUMMARY_CHECK, WRAP_UP, investigator_user_prompt)
 from .tools import (REGISTRY, RunContext, ToolError, tool_budget_seconds, tool_schemas,
                     unverified_citations)
@@ -137,6 +138,17 @@ BUDGET_NOTICE_AT = 0.75       # fraction of the step OR wall-clock budget spent
 # reported: "didn't interact with the case at all when it should, that include everything in the
 # case from the timeline to iocs".
 DOCUMENT_MIN_CALLS = 3
+# DOCUMENT_CHECK and SUMMARY_CHECK are each asked ONCE — and re-armed when a fold or a reset swallowed
+# the message before the model saw it (`re_arm`). Re-arming has to be bounded too, or a run whose
+# every fold re-asks for a write-up the model keeps declining is a loop made of nudges: with the
+# limits off nothing else would end it. Past these, the request simply stays unanswered.
+MAX_DOCUMENT_CHECKS = 3
+MAX_SUMMARY_CHECKS = 3
+# ---- THE LOOP GUARD (ai/loopguard.py) is what ends a run that has stopped moving, and it is NOT a
+# budget: it applies with the limits off. An identical call is refused on its third attempt, an
+# identical successful write on its second, paging past 8 pages, and more than 24 calls in one turn;
+# 6 consecutive repeats or 24 consecutive calls returning nothing new end the run with reason `loop`,
+# which takes the wrap-up turn so the analyst still gets the report and can press Continue.
 # How many turns a run may lose to the PROVIDER refusing the model's own tool-call arguments before
 # the run fails. The client already re-sends such a turn once (client.stream_chat); this is the next
 # layer — the model is TOLD its call did not run and asked for a smaller one, which is the only thing
@@ -493,11 +505,8 @@ def build_context(store: Any) -> str:
     return "\n".join(lines)
 
 
-def _cache_key(name: str, args: dict[str, Any]) -> str:
-    try:
-        return name + "|" + orjson.dumps(args, option=orjson.OPT_SORT_KEYS).decode()
-    except TypeError:
-        return name + "|" + repr(sorted(args.items()))
+# `_cache_key` is loopguard.call_key: the dedupe cache and the identical-call refusal MUST key on the
+# same canonical form, or a call the cache misses could still be refused as a repeat (or the reverse).
 
 
 async def _run_tool(name: str, args: dict[str, Any], ctx: RunContext) -> tuple[bool, Any]:
@@ -519,7 +528,7 @@ async def _run_tool(name: str, args: dict[str, Any], ctx: RunContext) -> tuple[b
         if isinstance(cached, dict):
             return True, {**cached, "cached": True,
                           "note": "identical call already made in this run — the previous result is repeated "
-                                  "verbatim, nothing was re-run. Do not issue it a third time."}
+                                  "verbatim, nothing was re-run. A third identical call will be REFUSED."}
         return True, cached
     budget = float(tool_budget_seconds())
     ctx.begin_call(name, budget)
@@ -699,35 +708,8 @@ _SUMMARY: dict[str, Callable[[dict[str, Any]], str]] = {
 }
 
 
-def _returned_something(ok: bool, result: Any) -> bool:
-    """Did this call move the investigation, or is the run spinning?
-
-    The check-in used to fire on the CALL COUNT, which cannot tell a run working through thirty log
-    files from one asking the same question in a loop — so it interrupted the first. This is the
-    distinction that matters, and it is deliberately narrow: only a REPEAT (served from the run's own
-    dedupe cache), a REFUSAL, or an explicitly empty result counts as nothing new.
-
-    A zero-hit search is real evidence once — ruling something out is work — which is why one of these
-    changes nothing on its own; it takes CHECK_IN_STREAK of them in a row to earn a nudge.
-    """
-    if not ok:
-        return False
-    if not isinstance(result, dict):
-        return True
-    if result.get("cached"):
-        return False       # the model asked something it had already asked
-    for key in ("hits", "count", "total", "matched", "events"):
-        v = result.get(key)
-        if isinstance(v, bool):
-            continue
-        if isinstance(v, int):
-            return v > 0
-    for key in ("results", "rows", "values", "samples", "nodes", "entities", "findings",
-                "detections", "anomalies", "sources", "fields", "entries", "paths", "clusters"):
-        v = result.get(key)
-        if isinstance(v, list):
-            return len(v) > 0
-    return True
+# `_returned_something` — whether a call moved the investigation — lives in ai/loopguard.py now,
+# because the guard and the check-in have to agree on it. Imported above under its old name.
 
 
 def _summarize(name: str, ok: bool, data: Any) -> str:
@@ -870,6 +852,9 @@ async def investigate(store: Any, objective: str, run_id: str,
     budget_noticed = False   # the "leave room for the report" nudge has been sent once
     documented = False       # the "you wrote nothing to the case" prompt has been sent once
     summarised = False       # the "write the summary note" prompt has been sent once
+    document_checks = 0      # ...and how many times in all (re-armed after a fold, bounded)
+    summary_checks = 0
+    guard = LoopGuard()      # the loop guard — see ai/loopguard.py; not subject to the limits switch
     record_nudges = 0        # "record as you go" nudges sent
     productive_since_write = 0   # reads that returned evidence since the last write (or the start)
     ceiling = lim["maxContextTokens"]   # lowered when the provider refuses the transcript (ContextTooLong)
@@ -907,9 +892,9 @@ async def investigate(store: Any, objective: str, run_id: str,
         # that is how a run ended having been asked for its summary note and never seeing the
         # request. Re-armed only while the work is still outstanding, so neither is asked twice.
         nonlocal documented, summarised
-        if documented and ctx.writes == 0:
+        if documented and ctx.writes == 0 and document_checks < MAX_DOCUMENT_CHECKS:
             documented = False
-        if summarised and not _has_summary(ctx.actions):
+        if summarised and not _has_summary(ctx.actions) and summary_checks < MAX_SUMMARY_CHECKS:
             summarised = False
 
     try:
@@ -919,8 +904,8 @@ async def investigate(store: Any, objective: str, run_id: str,
         opening = (f"investigating with {client.model} — it stops as soon as it can answer "
                    + (f"(ceiling: {lim['maxSteps']} steps / {lim['maxSeconds']}s, {len(tools)} tools "
                       f"available)" if lim.get("enforced", 1) else
-                      f"(no step or time limit — Stop is the only thing that ends it early; "
-                      f"{len(tools)} tools available)"))
+                      f"(no step or time limit — only Stop, or the loop guard catching it repeating "
+                      f"itself, ends it early; {len(tools)} tools available)"))
         if continue_from:
             opening = (f"continuing the conversation with {client.model} — it already has what the "
                        f"earlier turns established")
@@ -1267,6 +1252,7 @@ async def investigate(store: Any, objective: str, run_id: str,
                         # worse trade than finishing with an unwritten case.
                         and est() < ceiling):
                     documented = True
+                    document_checks += 1
                     messages.append({"role": "user", "content": DOCUMENT_CHECK.format(case=_case_line(store))})
                     note = ("nothing recorded in the case yet — asking the assistant to write up what it found"
                             + ("" if _case_open(store) else " (and to create the case first)"))
@@ -1283,6 +1269,7 @@ async def investigate(store: Any, objective: str, run_id: str,
                         and elapsed() < lim["maxSeconds"] and step < lim["maxSteps"]
                         and est() < ceiling):
                     summarised = True
+                    summary_checks += 1
                     messages.append({"role": "user", "content": SUMMARY_CHECK})
                     note = "findings were recorded as the run went — asking the assistant for the case summary"
                     HISTORY.append(run_id, {"kind": "status", "text": note})
@@ -1308,6 +1295,10 @@ async def investigate(store: Any, objective: str, run_id: str,
                 reason = "complete"
                 break
 
+            # THE LOOP GUARD sees every call of this turn: the per-turn cap counts from here, and once
+            # it trips mid-turn the remaining calls are refused (never skipped — every tool_call must
+            # be answered or the provider rejects the transcript) and the run goes to the wrap-up.
+            guard.begin_turn()
             for call in calls:
                 if runs.stop_requested(run_id):
                     break
@@ -1379,9 +1370,17 @@ async def investigate(store: Any, objective: str, run_id: str,
                     yield {"type": "warning", "message": note, "ids": []}
                 t0 = time.perf_counter()
                 if parse_err:
+                    guard.skip()
                     ok, result = False, parse_err
                 else:
-                    ok, result = await _run_tool(name, args, ctx)
+                    # An identical call on its third attempt, an identical successful write, a ninth
+                    # page of one query or a 25th call in one turn is refused HERE, before the handler
+                    # exists to be called, with a message that says what to do instead.
+                    refusal = guard.admit(name, args, writes)
+                    if refusal:
+                        ok, result = False, refusal
+                    else:
+                        ok, result = await _run_tool(name, args, ctx)
                 took = int((time.perf_counter() - t0) * 1000)
                 payload = result if ok else {"error": result}
                 if repairs and isinstance(payload, dict):
@@ -1392,7 +1391,9 @@ async def investigate(store: Any, objective: str, run_id: str,
                 # use the stamped id, and a provider that omits or repeats ids otherwise desynchronises
                 # the message sent BACK to it from the two the analyst is looking at.
                 messages.append({"role": "tool", "tool_call_id": call_id, "name": name, "content": body})
-                productive = _returned_something(ok, result)
+                # ONE judgement of "did this move the investigation", shared by the guard's streaks and
+                # the check-in's — two implementations would eventually disagree about a result.
+                productive = guard.observe(ok, result)
                 barren = 0 if productive else barren + 1
                 if writes and ok:
                     productive_since_write = 0
@@ -1407,6 +1408,16 @@ async def investigate(store: Any, objective: str, run_id: str,
                 if action:
                     HISTORY.note_action(run_id, action)
                     yield {"type": "write", "action": action}
+            if guard.tripped:
+                # A WARNING, never folded in the panel: the analyst should see that the run was ended
+                # by Iris and why. The report still follows — `loop` takes the wrap-up turn below.
+                note = (f"loop guard: {guard.tripped} — the run is being stopped and the assistant "
+                        f"asked for its report. Press Continue to carry on from here with a different "
+                        f"angle.")
+                HISTORY.append(run_id, {"kind": "warning", "text": note})
+                yield {"type": "warning", "message": note, "ids": [], "loop": guard.stats()}
+                reason = "loop"
+                break
 
         # ---- wrap-up: a budget stop still owes the analyst the report the work earned.
         # This is also where raw tool-call syntax used to reach the analyst: the final turn is asked for
@@ -1416,16 +1427,20 @@ async def investigate(store: Any, objective: str, run_id: str,
         # channel because that channel is unusable, or because the model kept describing calls without
         # making them. Both still owe the analyst the report the work earned — which is the whole reason
         # this turn exists — so they route here too, with a prompt that does not claim a spent budget.
-        if reason in ("max_steps", "timeout", "budget", "tool_arguments", "unfinished") and not runs.stop_requested(run_id):
+        if reason in ("max_steps", "timeout", "budget", "tool_arguments", "unfinished", "loop") and not runs.stop_requested(run_id):
             budget_stop = reason in ("max_steps", "timeout", "budget")
             note = (f"budget reached ({reason}) — writing the final report" if budget_stop else
                     ("the provider could not parse the assistant's tool calls — writing the final report "
                      "from what it established" if reason == "tool_arguments" else
+                     "the assistant was repeating itself — asking it for the final report" if reason == "loop" else
                      "the assistant kept describing calls without making them — asking it for the final "
                      "report"))
             HISTORY.append(run_id, {"kind": "status", "text": note})
             yield {"type": "status", "text": note}
-            messages.append({"role": "user", "content": WRAP_UP if budget_stop else REPORT_NOW})
+            # `loop` gets its own prompt: the model has to be told WHY its calls stopped running, or the
+            # report it writes apologises for a budget that was never reached.
+            messages.append({"role": "user", "content": WRAP_UP if budget_stop else
+                             (LOOP_STOP.format(why=guard.tripped) if reason == "loop" else REPORT_NOW)})
             pieces: list[str] = []
             for _n in range(MAX_OUTPUT_CONTINUES + 1):
                 buf = []
@@ -1533,7 +1548,7 @@ async def investigate(store: Any, objective: str, run_id: str,
                "unverifiedCitations": unverified, "answer": answer, "elapsedSec": round(elapsed(), 1),
                "compactions": compactions, "cachedToolCalls": ctx.cache_hits, "textToolCalls": text_mode,
                "contextCeiling": ceiling, "recordNudges": record_nudges, "resets": resets,
-               "outputContinues": output_continues}
+               "outputContinues": output_continues, "loopGuard": guard.stats()}
     except AIError as exc:
         error = _kept_note(str(exc), tool_calls, ctx.writes)
         runs.finish(run_id, "error", "error", step, tool_calls, answer, ctx.actions, [], error)

@@ -539,14 +539,17 @@ export type AiRunEvent =
   | { type: 'write'; action: AiAction }
   /** contextCeiling: the provider refused the transcript for its size and Iris folded it — this run now
       compacts at that many (estimated) tokens. retry: a transient provider failure being retried. */
-  | { type: 'warning'; message: string; ids: string[]; contextCeiling?: number; compactions?: number; retry?: number }
+  | { type: 'warning'; message: string; ids: string[]; contextCeiling?: number; compactions?: number; retry?: number; loop?: AiLoopGuard }
   | { type: 'answer'; text: string }
   | { type: 'done'; runId: string; reason: string; state: string; steps: number; toolCalls: number; writes: number; actions: AiAction[]; unverifiedCitations: string[]; answer: string; elapsedSec: number;
       /* compactions = how many times the transcript was summarised; cachedToolCalls = repeated reads served
          from the run cache; textToolCalls = the provider never did NATIVE tool calling and Iris parsed the
          model's text-form calls instead. */
-      compactions?: number; cachedToolCalls?: number; textToolCalls?: boolean }
+      compactions?: number; cachedToolCalls?: number; textToolCalls?: boolean; loopGuard?: AiLoopGuard }
   | { type: 'error'; message: string; actions?: AiAction[] };
+/** What the loop guard refused during a run (each is also a tool_result with ok:false) and, if it ended the run
+    (reason 'loop'), the sentence saying why. Not a budget: it applies with the run limits off. */
+export interface AiLoopGuard { refusedRepeats: number; refusedWrites: number; refusedPages: number; refusedTurnCap: number; tripped: string }
 export interface AiToolInfo { name: string; description: string; writes: boolean; parameters: string[] }
 export interface AiToolsResponse { tools: AiToolInfo[]; limits: { maxSteps: number; maxSeconds: number; maxContextTokens: number; maxWrites: number; maxCompactions: number; maxToolSeconds?: number } }
 /** Every turn of one conversation, oldest first — what the panel renders as a single chat. */

@@ -1197,8 +1197,8 @@ interface AiRun { id:string; prompt:string; focus:string; model:string;
   caseId:string; caseName:string;                  // the case active when the run STARTED ('' = case-less)
   startedAt:string; endedAt:string; updatedAt:string;
   state:'running'|'done'|'stopped'|'error';
-  reason:string /*complete|max_steps|timeout|stopped|budget|tool_arguments|unfinished|interrupted|error*/;
-  /* tool_arguments: the provider could not parse the model's own tool-call arguments MAX_ARG_FAILURES turns running, so the tool channel was abandoned; unfinished: the model kept describing calls it never made. Both take the wrap-up turn, so `state` is 'done' and there IS a report — the nuance is in `reason`. */
+  reason:string /*complete|max_steps|timeout|stopped|budget|tool_arguments|unfinished|loop|interrupted|error*/;
+  /* tool_arguments: the provider could not parse the model's own tool-call arguments MAX_ARG_FAILURES turns running, so the tool channel was abandoned; unfinished: the model kept describing calls it never made; loop: the LOOP GUARD (ai/loopguard.py) ended the run — 6 consecutive repeated calls, or 24 consecutive calls that returned nothing new. All three take the wrap-up turn, so `state` is 'done' and there IS a report — the nuance is in `reason`. `loop` is NOT a budget and applies with the run limits off. */
   steps:number; toolCalls:number; answer:string; error:string;
   interrupted:boolean;                             // the server restarted while this run was going
   actions:AiAction[]; unverifiedCitations:string[];
@@ -1221,7 +1221,8 @@ type AiRunEvent =
   | { type:'tool_result'; id:string; name:string; ok:boolean; tookMs:number; summary:string; data:unknown }
   | { type:'write'; action:AiAction }                                // something in the case actually changed
   | { type:'warning'; message:string; ids:string[];                  // cited ids that do not exist, or:
-      contextCeiling?:number; compactions?:number; retry?:number }
+      contextCeiling?:number; compactions?:number; retry?:number;
+      loop?:AiLoopGuard }       // the loop guard ended the run (reason `loop` follows); never folded in the panel
   /** contextCeiling: the PROVIDER refused the transcript for its size (HTTP 400/413 naming the context window —
       llama.cpp's "exceeds the available context size", OpenAI's context_length_exceeded). Iris folded the
       transcript, lowered this run's ceiling to that many estimated tokens, and re-sent the SAME turn; nothing of
@@ -1237,7 +1238,16 @@ type AiRunEvent =
       resets:number;            // in-run restarts from the run's own record when folding could not fit (≤ 3)
       // a `status` with autoSummary:true precedes `done` when the model reached a report but never filed a
       // summary note: Iris posts the report as the case summary note itself (cited with verified ids)
-      outputContinues:number }  // replies cut off at the model's output limit that were continued and joined (≤ 3)
+      outputContinues:number;   // replies cut off at the model's output limit that were continued and joined (≤ 3)
+      loopGuard:AiLoopGuard }
+/** What the loop guard refused during the run, and why it ended the run if it did. Every refusal is ALSO a
+    tool_result with ok:false whose summary says what to do instead, so the model and the analyst both see it.
+    refusedRepeats: an identical call on its 3rd attempt (the 2nd is served from the run cache); refusedWrites:
+    a write identical to one that already SUCCEEDED (nothing changed); refusedPages: a 9th consecutive page of one
+    query (offset/limit/page/cursor alone changed); refusedTurnCap: calls past the 24th in one assistant message
+    (every refused call still gets a tool result — a provider rejects an unanswered tool_call). tripped: '' or
+    the sentence naming the streak that ended the run. */
+interface AiLoopGuard { refusedRepeats:number; refusedWrites:number; refusedPages:number; refusedTurnCap:number; tripped:string }
   | { type:'error'; message:string; actions?:AiAction[] };
 ```
 - `POST /api/ai/investigate` body `AiInvestigateRequest` → SSE (`text/event-stream`) of `AiRunEvent`. The response

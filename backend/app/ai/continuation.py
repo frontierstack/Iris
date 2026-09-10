@@ -51,7 +51,9 @@ _ID_RE = eventids.BARE     # hex, not decimal — see ai/eventids.py
 # instruction, with "what I did not get to" in it. `state` is 'done' for all of them, so without this
 # list a follow-up saying "continue" was told the turn had finished and the model re-answered the
 # question instead of picking up the investigation the limit interrupted.
-CUT_SHORT_REASONS = ("max_steps", "timeout", "budget", "tool_arguments", "unfinished", "context")
+# `loop` is in the list on purpose: the loop guard ended the turn with the work unfinished, and the
+# next turn has to know that — and that repeating the same calls is exactly what ended it.
+CUT_SHORT_REASONS = ("max_steps", "timeout", "budget", "tool_arguments", "unfinished", "context", "loop")
 
 HEADER = (
     "EARLIER IN THIS CONVERSATION — you have already done the work below for this analyst. It is "

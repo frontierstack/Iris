@@ -345,10 +345,13 @@ def run_budget(lim: dict) -> str:
         return (
             "\n\nRUN BUDGET — NONE\n"
             "The analyst has removed the step, time and write limits for this run because the case "
-            "needs to be worked to the end. Nothing will stop you except your own judgement and the "
-            "analyst pressing Stop. That makes everything above matter MORE, not less:\n"
+            "needs to be worked to the end. Nothing will stop you except your own judgement, the "
+            "analyst pressing Stop, and the LOOP GUARD — which refuses an identical call on its third "
+            "attempt, an identical write on its second, and a ninth page of one query, and ENDS the run "
+            "after 6 consecutive repeats or 24 consecutive calls that returned nothing new. That makes "
+            "everything above matter MORE, not less:\n"
             "- Never repeat a tool call you have already made, and never re-derive a conclusion you "
-            "already hold. Without a ceiling, a loop does not end — it just costs the analyst an hour.\n"
+            "already hold. A loop is not open-ended here: it ends the run with the work unfinished.\n"
             "- Take the depth the case deserves. You do not need to ration calls, and you should not "
             "stop at a shallow answer because a short run feels safer.\n"
             "- RECORD AS YOU GO, to the case, continuously. A long run that ends with nothing written "
@@ -440,6 +443,19 @@ WRAP_UP = ("Your budget for this investigation is spent. Stop calling tools and 
 REPORT_NOW = ("Stop calling tools and write your final report now from what you have already "
               "established, citing the event ids you actually saw. State plainly what you did not get "
               "to and why.")
+
+# The wrap-up prompt for a run the LOOP GUARD ended (ai/loopguard.py, reason `loop`). It says WHY the
+# calls stopped running: told only "stop calling tools", the model writes a report that apologises for
+# a budget it never reached, and the analyst reads a limit where there was a loop. It also names the
+# way on — a follow-up in this conversation, with a different angle — because the run's record is
+# kept and Continue seeds the next turn from it.
+LOOP_STOP = (
+    "STOP — this run is being ended by the loop guard: {why}. Your recent tool calls were not "
+    "advancing the investigation, so no further calls will run this turn. Do NOT call any tool. Write "
+    "your final report now from what you have already established, citing the event ids you actually "
+    "saw; state plainly which questions are still open, and which DIFFERENT line of enquiry (another "
+    "source, field, entity or time window — not the calls you were repeating) would answer them. The "
+    "analyst can continue this conversation from here.")
 
 # Injected when a turn DESCRIBED the call it was about to make and then sent no tool call at all
 # ("No summary note exists yet. Let me write one and update the case:"). An empty turn is how the loop

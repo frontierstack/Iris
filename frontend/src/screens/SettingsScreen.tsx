@@ -436,7 +436,7 @@ function AiAssistant({ settings }: { settings: Settings }) {
               <span className="field__hint">
                 {enforceLimits
                   ? 'A run stops at whichever ceiling it reaches first and writes its report from what it has.'
-                  : 'No step, time, write or compaction ceiling: the run folds its transcript as often as the model\'s window requires and restarts from its own record when folding is not enough. Use for a case that has to be worked to the end.'}
+                  : 'No step, time, write or compaction ceiling: the run folds its transcript as often as the model\'s window requires and restarts from its own record when folding is not enough. Use for a case that has to be worked to the end. The loop guard still applies: a run that repeats the same calls, or keeps getting nothing back, is stopped and asked for its report.'}
               </span>
             </div>
             {enforceLimits ? (

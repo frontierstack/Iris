@@ -581,6 +581,17 @@ read the evidence it is citing while it works, instead of opening and closing a 
 page underneath stays clickable and <kbd>Esc</kbd> no longer closes it (that would throw away a half-written
 objective); use the × on the title bar.
 
+**The loop guard.** A run that has stopped moving is stopped, whether or not the run limits are on — the limits
+are a budget, the guard is a detector, and it fires on what the calls were and what they returned, never on how
+many there have been. An identical call (same tool, same arguments) runs once, is answered from the run's cache
+the second time, and is refused the third; a write identical to one that already landed is refused and changes
+nothing; a ninth consecutive page of one query is refused and the aggregate tools are named instead; more than 24
+calls in one turn are refused past the 24th. Each refusal is a tool result the model sees, with what to do
+instead. When it does not change course — 6 repeats in a row, or 24 calls in a row that returned nothing new
+(after the check-in has twice asked for a different angle) — the run ends with reason `loop`, writes its report
+from what it established, and **Continue** picks the conversation up from there. A run still finding things is
+never interrupted, however long it is.
+
 **System prompts.** Settings → **System prompts** holds *additional* instructions for investigations — a report
 format, what counts as critical in your environment, sources to distrust, the questions a phishing case always has to
 answer. A saved prompt is always **added to** the built-in prompt. The built-in prompt itself is editable there too
@@ -598,7 +609,8 @@ parse throughput sampled every 2 s with 2–30 min charts, mode auto / CUDA / CP
 **Two-phase ingest** — the auto-enrich toggle, which schedules *when* the expensive parse runs, not whether
 it runs) · **AI assistant**
 (enable, model, key, *Test connection*; **run limits** — how many tool-calling steps, seconds and case
-writes one investigation may spend, or **off** for a case that has to be worked to the end; Advanced → base
+writes one investigation may spend, or **off** for a case that has to be worked to the end — the loop guard
+applies either way; Advanced → base
 URL, TLS verification, custom CA bundle) · **System prompts**
 (save / edit standing instructions for the assistant, pick the default — see §6) · **MCP server**
 (below) · **Data** (**Clear all data**, behind a type-the-phrase confirm — it wipes cases, trash, library, the pool,
