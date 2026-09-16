@@ -369,6 +369,17 @@ class HistoryStore:
             self._stop.discard(run_id)
             self._save_locked()
 
+    def set_case(self, run_id: str, case_id: str, case_name: str) -> None:
+        """The case a run is ASSOCIATED with moves when the run creates or activates one — a run that
+        opened its own case must not stay filed under whatever happened to be active when it began."""
+        with self.lock:
+            rec = self._runs.get(run_id)
+            if rec is None:
+                return
+            rec["caseId"], rec["caseName"] = case_id or "", case_name or ""
+            self._touch_locked(rec)
+            self._save_locked()
+
     def set_actions(self, run_id: str, actions: list[dict[str, Any]]) -> None:
         """Used by undo: the actions carry `undone`, and that has to survive a refresh too."""
         with self.lock:

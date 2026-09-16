@@ -1848,12 +1848,63 @@ def _auth_ip(e: Event) -> str:
                       "ClientIP", "ClientIPAddress", "client_ip") or ""
 
 
+# The rules whose answer on an event ALREADY IN THE POOL can change when other events arrive or leave.
+# Every windowed rule (a burst's count reads the density of its neighbours), the rules that read
+# `attackers` (a map the bursts feed: AWS-0031's level, NET-0019, the reputation fields), AUTH-0111
+# (a success AFTER a burst), and NET-0022 (a per-host p99 over the whole pool). Everything else is a
+# function of the one event and is stamped once, before the event enters the pool
+# (`Store._stamp_detections`). A correction pass (`run_rules(correction=True)`) re-evaluates ONLY
+# these — the per-event regexes are ~70 % of a full pass and their answer cannot have moved.
+# `tests/test_detect_correction.py` proves the two routes stamp the same catalogue.
+CORRECTION_RULE_IDS: frozenset[str] = frozenset({
+    "SIGMA-WEB-0042", "SIGMA-WEB-0063", "SIGMA-AUTH-0111", "SIGMA-AWS-0031", "SIGMA-WIN-0140",
+    "SIGMA-LNX-0045", "SIGMA-K8S-0025", "SIGMA-APP-0061", "SIGMA-NET-0019", "SIGMA-NET-0022",
+    "SIGMA-NET-0027", "SIGMA-WEB-0071", "SIGMA-WIN-0170", "SIGMA-WIN-0190", "SIGMA-AWS-0085",
+    "SIGMA-PCAP-0014", "SIGMA-PCAP-0026", "SIGMA-AZURE-0026", "SIGMA-AZURE-0042", "SIGMA-M365-0030",
+    "SIGMA-AUTH-0240",
+})
+
+
+def _has(e: Event, rule_id: str) -> bool:
+    """Is this rule already stamped on the event? Used by a correction pass to REPLAY what a per-event
+    rule contributed to `attackers` without re-running its regex."""
+    ds = e.detections
+    if not ds:
+        return False
+    for d in ds:
+        if d.id == rule_id:
+            return True
+    return False
+
+
+def strip_rules(events: list[Event], rule_ids: "frozenset[str] | set[str]") -> None:
+    """Drop these rules' detections from every event (and the severity they raised), in one pass."""
+    for e in events:
+        ds = e.detections
+        if not ds:
+            continue
+        for d in ds:
+            if d.id in rule_ids:
+                kept = [x for x in ds if x.id not in rule_ids]
+                e.detections = kept or EMPTY_LIST
+                e.recompute_sev()
+                break
+
+
 def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] = None,
               overrides: Optional[dict[str, dict]] = None,
               params: Optional[dict[str, dict[str, str]]] = None,
               exclude: Optional[object] = None,
-              progress: Optional[Callable[[float], None]] = None) -> dict[str, object]:
+              progress: Optional[Callable[[float], None]] = None,
+              correction: bool = False) -> dict[str, object]:
     """Evaluate all built-in rules over the events (in-place). Returns summary info (attacker IPs, fired count).
+
+    `correction=True` re-evaluates ONLY `CORRECTION_RULE_IDS` — the rules whose answer depends on the
+    rest of the pool — and keeps every other detection exactly as stamped. That is the pass that runs
+    after a source lands or leaves: the per-event rules were applied to the newcomers before they
+    entered the pool and cannot change for anyone else. It is NOT a substitute for a full pass after a
+    RULE changes (`reapply_rule` / restore / startup with a changed catalogue): those still run
+    everything.
 
     `progress(pct)` is called at the catalogue's section boundaries with a rough 0-100. Rough on
     purpose — the sections are not equal work — but a pass that takes nine minutes on a large pool and
@@ -1876,12 +1927,16 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
             except Exception:  # noqa: BLE001 — a progress listener must never fail a pass
                 pass
     _tick(0.0)
-    for ev in events:
-        if ev.detections:  # only pay the assignment where there IS a value; empty means the shared list
-            ev.detections = EMPTY_LIST
-            # ...and give back the severity those detections raised, or a rule that no longer fires
-            # leaves its events reading `critical` for ever.
-            ev.recompute_sev()
+    full = not correction
+    if full:
+        for ev in events:
+            if ev.detections:  # only pay the assignment where there IS a value; empty means the shared list
+                ev.detections = EMPTY_LIST
+                # ...and give back the severity those detections raised, or a rule that no longer fires
+                # leaves its events reading `critical` for ever.
+                ev.recompute_sev()
+    else:
+        strip_rules(events, CORRECTION_RULE_IDS)
     n = len(events)
     if n == 0:
         return {"fired": 0, "attackers": set(), "rules_evaluated": len(RULES)}
@@ -1918,9 +1973,12 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
         attackers[ip] = "401 burst"
     # --- WEB-0050 / WEB-0058 / AUTH-0203 / AUTH-0111
     burst_anchor_ts: dict[str, list[float]] = defaultdict(list)
+    w42_id = R["WEB-0042"].id
     for i in web:
         e = events[i]
-        if e.detections and e.detections[0].id == R["WEB-0042"].id:
+        # `any`, not `detections[0]`: after a per-batch stamp plus a correction the burst tag is no
+        # longer guaranteed to be the FIRST detection on its anchor.
+        if e.detections and _has(e, w42_id):
             burst_anchor_ts[e.fields.get("src_ip", "")].append(float(ts[i]))
     a111_methods = _pl("SIGMA-AUTH-0111", "methods")
     a111_prefix = _pt("SIGMA-AUTH-0111", "successPrefix")
@@ -1932,25 +1990,32 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     rx_attack_path = _prx("SIGMA-WEB-0058", "pattern", _ATTACK_PATH)
     rx_login_111 = _prx("SIGMA-AUTH-0111", "loginPath", _LOGIN_PATH)
     rx_login_203 = _prx("SIGMA-AUTH-0203", "loginPath", _LOGIN_PATH)
+    w50_id = R["WEB-0050"].id
     for i in web:
         e = events[i]
-        ua = e.fields.get("user_agent", "")
-        if ua and rx_scanner.search(ua):
-            _tag(e, R["WEB-0050"])
-            attackers.setdefault(e.fields.get("src_ip", ""), "scanner")
         path = e.fields.get("http.path", "")
-        if path and rx_attack_path.search(path):
-            _tag(e, R["WEB-0058"])
+        if full:
+            ua = e.fields.get("user_agent", "")
+            if ua and rx_scanner.search(ua):
+                _tag(e, R["WEB-0050"])
+                attackers.setdefault(e.fields.get("src_ip", ""), "scanner")
+            if path and rx_attack_path.search(path):
+                _tag(e, R["WEB-0058"])
+        elif e.detections and _has(e, w50_id):
+            attackers.setdefault(e.fields.get("src_ip", ""), "scanner")   # replayed, not re-matched
         st = e.fields.get("http.status", "")
-        if st.startswith(a111_prefix) and rx_login_111.search(path) \
-                and e.fields.get("http.method", "").lower() in a111_methods:
+        if st.startswith(a111_prefix):
+            # The cheap tests first (an address with a prior burst; an account prefix) and the login
+            # regex only for the events that pass them — it used to run for every 2xx line.
             ip = e.fields.get("src_ip", "")
             prior = burst_anchor_ts.get(ip)
-            if prior and any(0 <= ts[i] - t0 <= a111_within for t0 in prior):
+            if prior and any(0 <= ts[i] - t0 <= a111_within for t0 in prior) \
+                    and rx_login_111.search(path) and e.fields.get("http.method", "").lower() in a111_methods:
                 _tag(e, R["AUTH-0111"])
                 e.msg = f"{e.fields.get('http.method', 'POST')} {path} {st} — first success from {ip}"
                 e.set_field_default("mfa", "not_presented")
-            if a203_prefixes and e.user.lower().startswith(a203_prefixes) \
+            if full and a203_prefixes and e.user.lower().startswith(a203_prefixes) \
+                    and rx_login_111.search(path) and e.fields.get("http.method", "").lower() in a111_methods \
                     and rx_login_203.search(path):
                 _tag(e, R["AUTH-0203"])
     w63_prefix = _pt("SIGMA-WEB-0063", "statusPrefix")
@@ -1971,22 +2036,23 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
         e = events[i]
         name = e.fields.get("eventName", "")
         ip = e.fields.get("sourceIPAddress", "")
-        if name == a7_name and e.fields.get("MFAUsed", "").lower() == a7_mfa and e.fields.get("result", "").lower() == a7_result:
+        if full and name == a7_name and e.fields.get("MFAUsed", "").lower() == a7_mfa and e.fields.get("result", "").lower() == a7_result:
             _tag(e, R["AWS-0007"])
             if a203_prefixes and e.user.lower().startswith(a203_prefixes):
                 _tag(e, R["AUTH-0203"])
         if name == a31_name and e.fields.get("result") == "Success":
             _tag(e, R["AWS-0031"], "critical" if (is_public_ip(ip) or ip in attackers) else "high")
             e.set_field("persistence", "yes")
-        if name.lower() in a44_names:
-            _tag(e, R["AWS-0044"])
-            e.set_field("tactic", "defense evasion")
-        if name.lower() in a52_names or (name.lower() == a52_policy_ev and a52_marker in e.raw):
-            _tag(e, R["AWS-0052"])
-        if e.fields.get("userIdentity.type") == a60_type:
-            _tag(e, R["AWS-0060"])
-        if name == a71_name and any(c in e.raw for c in a71_cidrs):
-            _tag(e, R["AWS-0071"])
+        if full:
+            if name.lower() in a44_names:
+                _tag(e, R["AWS-0044"])
+                e.set_field("tactic", "defense evasion")
+            if name.lower() in a52_names or (name.lower() == a52_policy_ev and a52_marker in e.raw):
+                _tag(e, R["AWS-0052"])
+            if e.fields.get("userIdentity.type") == a60_type:
+                _tag(e, R["AWS-0060"])
+            if name == a71_name and any(c in e.raw for c in a71_cidrs):
+                _tag(e, R["AWS-0071"])
         if ip in attackers:
             e.set_field_default("src.reputation", attackers[ip])
 
@@ -2002,7 +2068,7 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     # Independent `if`s, not an elif chain: the event ids are analyst-editable now, so two rules may
     # legitimately be pointed at the same id and both have to get a chance to fire. As a chain, whichever
     # rule happened to be written first silently swallowed the event.
-    for i in win:
+    for i in (win if full else ()):
         e = events[i]
         eid = e.fields.get("EventID", "")
         if eid == w88_id:
@@ -2048,7 +2114,7 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     rx_hist_removal = _prx("SIGMA-LNX-0030", "removalPattern", _HISTORY_REMOVAL)
     rx_shell = _prx("SIGMA-LNX-0041", "pattern", _SHELL)
     rx_useradd = _prx("SIGMA-LNX-0050", "pattern", _USERADD)
-    for i in lnx:
+    for i in (lnx if full else ()):
         e = events[i]
         prog = e.fields.get("program", "").lower()
         if prog == l12_prog and e.fields.get("result") == l12_result and e.fields.get("user", "").lower() in l12_users:
@@ -2080,7 +2146,7 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     k4_res, k4_verb, k4_prod = _pt("SIGMA-K8S-0004", "resource"), _pt("SIGMA-K8S-0004", "verb"), _pl("SIGMA-K8S-0004", "prodKeywords")
     k11_res, k11_verbs, k11_ignore = _pt("SIGMA-K8S-0011", "resource"), _pl("SIGMA-K8S-0011", "verbs"), _pt("SIGMA-K8S-0011", "ignoreUserPrefix")
     k17_res, k17_verb, k17_markers = _pt("SIGMA-K8S-0017", "resource"), _pt("SIGMA-K8S-0017", "verb"), _pl("SIGMA-K8S-0017", "markers", lower=False)
-    for i in k8s:
+    for i in (k8s if full else ()):
         e = events[i]
         res = e.fields.get("resource", "")
         verb = e.fields.get("verb", "")
@@ -2102,7 +2168,7 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     # --- Application JSON lines
     app = fam_of["app.jsonl"]
     a55_keywords, a55_rows = _pl("SIGMA-APP-0055", "keywords"), _pn("SIGMA-APP-0055", "minRows")
-    for i in app:
+    for i in (app if full else ()):
         e = events[i]
         evname = (e.fields.get("event") or e.fields.get("action") or "").lower()
         rows = e.fields.get("rows") or e.fields.get("row_count") or e.fields.get("records") or ""
@@ -2180,8 +2246,16 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     rx_webshell = _prx("SIGMA-WEB-0075", "pattern", _WEBSHELL)
     rx_jndi = _prx("SIGMA-WEB-0079", "pattern", _JNDI)
     w84_min = _pn("SIGMA-WEB-0084", "minLength")
+    w75_id, w79_id = R["WEB-0075"].id, R["WEB-0079"].id
     for i in web:
         e = events[i]
+        if not full:
+            if e.detections:
+                if _has(e, w75_id):
+                    attackers.setdefault(e.fields.get("src_ip", ""), "webshell request")
+                if _has(e, w79_id):
+                    attackers.setdefault(e.fields.get("src_ip", ""), "jndi injection")
+            continue
         path = e.fields.get("http.path", "")
         if path and rx_webshell.search(path):
             _tag(e, R["WEB-0075"])
@@ -2223,7 +2297,7 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     w185_id = _pt("SIGMA-WIN-0185", "eventId")
     rx_recovery = _prx("SIGMA-WIN-0185", "pattern", _RECOVERY_DESTROY)
     a230_win_id = "4624"
-    for i in win:
+    for i in (win if full else ()):
         e = events[i]
         eid = e.fields.get("EventID", "")
         if eid in w160_ids:
@@ -2268,7 +2342,7 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     l65_progs = _pl("SIGMA-LNX-0065", "programs")
     rx_suid = _prx("SIGMA-LNX-0070", "pattern", _SUID)
     rx_kmod = _prx("SIGMA-LNX-0075", "pattern", _KERNEL_MODULE)
-    for i in lnx:
+    for i in (lnx if full else ()):
         e = events[i]
         raw = e.raw
         if rx_revshell.search(raw):
@@ -2288,7 +2362,7 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     a90_names, a90_markers = _pl("SIGMA-AWS-0090", "eventNames"), _pl("SIGMA-AWS-0090", "shareMarkers", lower=False)
     a95_names = _pl("SIGMA-AWS-0095", "eventNames")
     a230_ct_name = "ConsoleLogin"
-    for i in ct:
+    for i in (ct if full else ()):
         e = events[i]
         name = e.fields.get("eventName", "")
         lname = name.lower()
@@ -2314,7 +2388,7 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     # --- Kubernetes (continued)
     k30_res, k30_verbs, k30_roles = _pl("SIGMA-K8S-0030", "resources"), _pl("SIGMA-K8S-0030", "verbs"), _pl("SIGMA-K8S-0030", "roles")
     k35_users, k35_groups = _pl("SIGMA-K8S-0035", "users"), _pl("SIGMA-K8S-0035", "groups")
-    for i in k8s:
+    for i in (k8s if full else ()):
         e = events[i]
         if e.fields.get("resource", "").lower() in k30_res and e.fields.get("verb", "").lower() in k30_verbs \
                 and any(r in e.raw.lower() for r in k30_roles):
@@ -2327,7 +2401,7 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     mail = fam_of["mail.message"]
     m10_fields, m10_fails = _pl("SIGMA-MAIL-0010", "verdictFields", lower=False), _pl("SIGMA-MAIL-0010", "failValues")
     rx_attach = _prx("SIGMA-MAIL-0014", "pattern", _ATTACHMENT_BAD)
-    for i in mail:
+    for i in (mail if full else ()):
         e = events[i]
         for f in m10_fields:
             v = e.fields.get(f, "").lower()
@@ -2347,7 +2421,7 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     p18_ports = set(_pl("SIGMA-PCAP-0018", "ports"))
     rx_sni = _prx("SIGMA-PCAP-0022", "pattern", _SUSPICIOUS_SNI)
     p30_ports = set(_pl("SIGMA-PCAP-0030", "standardPorts"))
-    for i in pcap:
+    for i in (pcap if full else ()):
         e = events[i]
         f = e.fields
         q = f.get("dns_query", "")
@@ -2398,7 +2472,7 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
                  (rx_encoded, R["APP-0075"], "defense evasion"),
                  (rx_ransom, R["APP-0080"], "impact")]
     universal = [u for u in universal if u[1].id not in _DISABLED]
-    if universal:
+    if universal and full:
         screen = _screen([u[0] for u in universal])
         gate = _literal_gate([u[0] for u in universal])
         if screen is not None:
@@ -2442,9 +2516,14 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     rx_share = _prx("SIGMA-WIN-0250", "pattern", _ADMIN_SHARE)
     w255_ids = _pl("SIGMA-WIN-0255", "eventIds", lower=False)
     rx_lsass = _prx("SIGMA-WIN-0255", "pattern", _LSASS)
+    w225_rule = R["WIN-0225"].id
     for i in win:
         e = events[i]
         f = e.fields
+        if not full:
+            if e.detections and _has(e, w225_rule):
+                attackers.setdefault(f.get("IpAddress", ""), "remote desktop logon")
+            continue
         eid = f.get("EventID", "")
         if eid == w200_id and f.get("SubjectUserName", "").lower() not in w200_ignore \
                 and not f.get("SubjectUserName", "").endswith("$"):
@@ -2496,7 +2575,7 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     m34_fields = _pl("SIGMA-M365-0034", "fields", lower=False)
     rx_verdict = _prx("SIGMA-M365-0034", "pattern", _THREAT_VERDICT)
     m38_ops = _pl("SIGMA-M365-0038", "operations")
-    for i in cloud:
+    for i in (cloud if full else ()):
         e = events[i]
         f = e.fields
         # ONE lookup decides whether this is a record of the kind these rules read at all. Without it

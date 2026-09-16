@@ -455,9 +455,15 @@ def _has_summary(actions: list[dict[str, Any]]) -> bool:
     return False
 
 
-def build_context(store: Any) -> str:
+def build_context(store: Any, fresh: bool = False) -> str:
     """A short orientation block. Deliberately small: the agent's job is to go and look, and a huge
-    prompt preamble both costs budget and invites the model to answer from the preamble instead."""
+    prompt preamble both costs budget and invites the model to answer from the preamble instead.
+
+    `fresh` = this run starts a NEW conversation. The active case is then whatever was open when the
+    analyst typed — a previous investigation, as often as not — and saying "Active case X" without
+    that caveat read as "write here": a new chat asked to create a case renamed and re-summarised an
+    unrelated one. The follow-up brief (continuation.py) already says which case earlier turns used.
+    """
     lines: list[str] = []
     try:
         c = store.case()
@@ -469,6 +475,12 @@ def build_context(store: Any) -> str:
                          f"{len(c.notes)} note(s).")
             if getattr(store, "summary", ""):
                 lines.append(f"Case summary: {store.summary[:500]}")
+            if fresh:
+                lines.append("THIS IS A NEW CONVERSATION: that case was simply open when the analyst typed, "
+                             "and nothing here has been said about it. Write into it only if this objective "
+                             "is about it; if the analyst asked for a new case or this is a different "
+                             "investigation, create_case (named for this one) before the first write, and "
+                             "never rename or re-summarise the open case to fit this objective.")
         lines.append(f"Pool: {c.poolEventCount:,} events across {len(c.sources) + len(c.librarySources)} source(s)."
                      + (" A background load is still in progress — results may be incomplete." if c.poolLoading else ""))
         raw_n = 0
@@ -837,7 +849,8 @@ async def investigate(store: Any, objective: str, run_id: str,
         # analyst-edited, or with saved instructions appended): a run has to know what it is actually
         # working under, and with the limits off that block is the only thing that says so.
         {"role": "system", "content": system_text + run_budget(lim)},
-        {"role": "user", "content": investigator_user_prompt(asked, build_context(store), prior_brief)},
+        {"role": "user", "content": investigator_user_prompt(asked, build_context(store, fresh=not continue_from),
+                                                              prior_brief)},
     ]
     started = time.monotonic()
     step = 0

@@ -1569,17 +1569,45 @@ def _get_case_state(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
                        "without one, but every write (events, timeline, indicators, notes, links) needs a "
                        "case. If this objective is an investigation, call create_case NOW (name it for the "
                        "objective) before your first finding, then record as you go.")
+    else:
+        # The active case is whatever was open when this run started — NOT, by itself, the case for
+        # this objective. Say so in the answer the model reads first, with enough of the case (name,
+        # summary, what is in it) to judge whether the objective is about it.
+        made_here = any(a.get("tool") == "create_case" and not a.get("undone") for a in ctx.actions)
+        out["createdAt"] = c.createdAt
+        out["createdByThisRun"] = made_here
+        if not made_here:
+            out["note"] = (f"case {c.id} '{c.name}' is active because it was open when this run started, "
+                           "not because it is about this objective. Write into it ONLY if the objective is "
+                           "about this case (its name / summary / notes match, or the analyst said 'this "
+                           "case'). If the analyst asked for a NEW case, or this is a different "
+                           "investigation, call create_case; if they named another existing case, "
+                           "list_cases + activate_case. Never rename or re-summarise this case to fit a "
+                           "different investigation.")
     return out
 
 
 # ================================================================= WRITE tools
+def _retag_run(ctx: RunContext, case_id: str, case_name: str) -> None:
+    """A run that creates or switches to a case is filed under THAT case from then on."""
+    try:
+        from .history import HISTORY
+        if getattr(ctx, "run_id", ""):
+            HISTORY.set_case(ctx.run_id, case_id, case_name)
+    except Exception:  # noqa: BLE001 — a history tag must never fail a write
+        pass
+
+
 def _ai_author(ctx: RunContext) -> str:
     return f"AI assistant ({ctx.model})" if ctx.model else "AI assistant"
 
 
 @tool("create_case",
-      "Create a NEW case and make it active. Only call this when the analyst asked for a case to be built "
-      "and none exists (get_case_state.hasCase is false) — it is never a side effect of anything else.",
+      "Create a NEW, EMPTY case and make it active. Call it when the analyst asks for a new case, or when "
+      "this objective is its own investigation and the active case (get_case_state) was opened for a "
+      "different one — a new conversation does not inherit whatever case happened to be open. It never "
+      "touches an existing case: NEVER repurpose one with update_case (rename / re-summarise) to fit a "
+      "new objective. One per run.",
       {"name": {"type": "string", "description": "short descriptive case name"},
        "summary": {"type": "string", "description": "one-paragraph summary of what is being investigated"}},
       ["name"], writes=True)
@@ -1590,21 +1618,34 @@ def _create_case(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
     name = _s(args.get("name"), 200).strip()
     if not name:
         raise ToolError("a case needs a name")
-    if not store.pending:
-        raise ToolError(f"case {store.case_id} ('{store.name}') is already active — use update_case to rename it, "
-                        "or add evidence to it with add_events_to_case.")
+    # It used to REFUSE whenever any case was active and point the model at update_case "to rename
+    # it" — so a fresh chat opened over an unrelated case, asked to "create a new case", renamed and
+    # re-summarised the analyst's existing case with a different investigation. One case per RUN is
+    # the only refusal left: a run that already made one has nowhere else to file its findings.
+    for a in ctx.actions:
+        if a.get("tool") == "create_case" and not a.get("undone"):
+            made = (a.get("undo") or {}).get("caseId") or ""
+            raise ToolError(f"this run already created case {made} and it is active — record into it. "
+                            "A second case belongs to a second investigation, which is a new conversation.")
+    previous = "" if store.pending else store.case_id
     summary = cases.create_case(name, None)
     if args.get("summary"):
         store.summary = _prose(args.get("summary"), 4000)
         store.save_meta()
     action = ctx.record("create_case", f"created case {summary.id} '{name}'",
-                        {"kind": "case", "caseId": summary.id})
-    return {"ok": True, "caseId": summary.id, "name": summary.name, "action": action}
+                        {"kind": "case", "caseId": summary.id, "before": previous})
+    _retag_run(ctx, summary.id, summary.name)
+    out = {"ok": True, "caseId": summary.id, "name": summary.name, "action": action}
+    if previous:
+        out["note"] = (f"{summary.id} is now the active case and every write lands in it; the previous "
+                       f"active case {previous} was left untouched.")
+    return out
 
 
 @tool("update_case",
       "Set the active case's name and/or summary. The summary is the case's own description, shown with "
-      "the case and included in the report.",
+      "the case and included in the report. This EDITS the case the analyst already has — never use it "
+      "to turn an existing case into a different investigation; that is create_case.",
       {"name": {"type": "string"}, "summary": {"type": "string"}},
       [], writes=True)
 def _update_case(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
@@ -2568,6 +2609,7 @@ def _activate_case(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
     store = _store()
     action = ctx.record("activate_case", f"made {cid} the active case",
                         {"kind": "case_active", "before": previous})
+    _retag_run(ctx, store.case_id, store.name)
     return {"ok": True, "caseId": store.case_id, "name": store.name,
             "caseSetSize": len(store.case_set), "notes": len(store.notes), "action": action}
 
@@ -2902,6 +2944,24 @@ def undo_action(action: dict[str, Any]) -> bool:
     store = _store()
     undo = action.get("undo") or {}
     kind = str(undo.get("kind") or "")
+    if kind == "case":
+        # Reverting a create_case: the case goes to the TRASH only while it is still empty — the
+        # analyst may have kept working in it — and the case that was active before comes back.
+        made, before = str(undo.get("caseId") or ""), str(undo.get("before") or "")
+        changed = False
+        try:
+            if made and made in [c.id for c in cases.list_cases()]:
+                own_files = any(o == "case" for o in getattr(store, "source_origin", {}).values())
+                if made == store.case_id and not (store.case_set or store.notes or store.manual_iocs
+                                                  or store.graph_links or own_files):
+                    cases.delete_case(made)
+                    changed = True
+                if before and before in [c.id for c in cases.list_cases()] and store.case_id != before:
+                    cases.activate(before)
+                    changed = True
+        except Exception:  # noqa: BLE001 — an undo that cannot complete reports False, never raises
+            return changed
+        return changed
     if kind == "case_set":
         return store.remove_many_from_case(list(undo.get("eventIds") or [])) > 0
     if kind == "case_set_removed":

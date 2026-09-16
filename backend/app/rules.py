@@ -1091,12 +1091,22 @@ class RulesStore:
             events[anchor].set_field("burst.window", f"{th.window}s")
         return sorted(set(hits))
 
-    def apply_all(self, events: list[Event], exclude: Optional[Any] = None) -> int:
+    def apply_all(self, events: list[Event], exclude: Optional[Any] = None, correction: bool = False) -> int:
         """Every enabled custom rule. `exclude` is the pass's ONE compiled exclusion set — shared with
         the built-in pass so the suppression counts land in a single place and each rule does not
-        recompile the same conditions."""
+        recompile the same conditions.
+
+        `correction=True` mirrors `detect.run_rules(correction=True)`: only the WINDOWED custom rules
+        are re-evaluated (their previous anchors stripped first), because a plain regex / condition
+        rule's answer on an event does not change when its neighbours do."""
         total = 0
-        for r in self.enabled_custom():
+        rules = self.enabled_custom()
+        if correction:
+            rules = [r for r in rules if r.conditions and r.threshold]
+            if rules:
+                from .detect import strip_rules
+                strip_rules(events, {r.id for r in rules})
+        for r in rules:
             total += self.apply_rule(r, events, exclude)
         return total
 

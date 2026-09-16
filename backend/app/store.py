@@ -1551,7 +1551,10 @@ class Store:
                 # `resave_cache=True` ONLY here: this is the pass that corrects a stamp the cache
                 # wrote under older rules, and writing the correction back is what stops every
                 # restart from rebuilding the whole derived layer twice. See _resave_pool_cache.
-                self._refresh_detections_async(resave_cache=True)
+                # `full=True` for the same reason: a cached stamp is only corrected by re-running
+                # every rule, and this is the one caller whose events were not stamped by THIS
+                # catalogue on the way in.
+                self._refresh_detections_async(resave_cache=True, full=True)
 
         if background_ok and total > LIBRARY_SYNC_LIMIT:
             print(f"[iris] loading {len(rows)} library file(s) ({total / 1e6:.0f} MB) in the background")
@@ -3058,7 +3061,10 @@ class Store:
             if not ds:
                 continue
             h = ((h ^ i) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
-            for d in ds:
+            # ORDER-INDEPENDENT per event: a per-batch stamp followed by a correction can leave the
+            # same detections on an event in a different order from one full pass, and that is not
+            # a change in what the catalogue says.
+            for d in (ds if len(ds) == 1 else sorted(ds, key=lambda d: (d.id, d.level))):
                 h = ((h ^ hash(d.id)) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
                 h = ((h ^ hash(d.level)) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
         return h
@@ -3087,13 +3093,20 @@ class Store:
         self._rule_hits, self._rule_hits_version = counts, v
         return counts
 
-    def _run_detections(self, progress: Optional[Callable[[float], None]] = None) -> bool:
+    def _run_detections(self, progress: Optional[Callable[[float], None]] = None,
+                        correction: bool = False) -> bool:
         """Built-in Sigma-like rules (minus disabled ones) + enabled custom regex rules.
 
         Returns whether the pass actually CHANGED what is stamped on the pool, so a caller whose job is
         to CORRECT the catalogue can stay silent when it corrected nothing — see
         `_refresh_detections_async`. Callers that follow a deliberate change (a rule edit, a restore)
         bump regardless and ignore this.
+
+        `correction=True` is the post-ingest / post-delete pass: only the rules whose answer depends
+        on the rest of the pool are re-evaluated (`detect.CORRECTION_RULE_IDS`, windowed custom rules)
+        and every other stamp is kept. Measured at 300 k synthetic events: 6.0 s full, 1.6 s
+        correction. It is only correct because every event entering the pool was stamped with the
+        per-event rules first (`_stamp_detections`) — a pass after a RULE change must be full.
         """
         # A pass over the pool re-stamps `Event.detections`, and `search._doc` packs each event's
         # detection ids and names - so the index no longer describes the events it covers. Clearing
@@ -3110,9 +3123,12 @@ class Store:
         info = run_rules(self.events, self.ts, disabled=RULES_STORE.detection_disabled(),
                          overrides=RULES_STORE.detection_overrides(),
                          params=RULES_STORE.detection_params(),
-                         exclude=excl, progress=progress)
-        custom = RULES_STORE.apply_all(self.events, excl)
-        EXCLUSIONS.record(excl.counts())
+                         exclude=excl, progress=progress, correction=correction)
+        custom = RULES_STORE.apply_all(self.events, excl, correction=correction)
+        if not correction:
+            # a correction saw only part of the catalogue, so its suppression tallies are partial;
+            # the last FULL pass's whole-pool figures stand until the next one.
+            EXCLUSIONS.record(excl.counts())
         self.rules_fired = int(info["fired"]) + custom  # type: ignore[arg-type]
         return self._detections_fingerprint() != before
 
@@ -3305,8 +3321,21 @@ class Store:
             time.sleep(0.02)
         return False
 
-    def _refresh_detections_async(self, resave_cache: bool = False) -> None:
+    def _refresh_detections_async(self, resave_cache: bool = False, full: bool = False) -> None:
         """Re-evaluate the rule catalogue off the request thread, coalescing repeated calls.
+
+        `full=False` (every post-ingest and post-delete caller) runs a CORRECTION — only the rules
+        whose answer depends on the rest of the pool (`detect.CORRECTION_RULE_IDS`), because the
+        per-event rules were stamped on each event before it entered the pool and cannot have moved.
+        The startup / library-load caller passes `full=True`: the parsed-pool cache holds the stamp
+        the catalogue produced when the file was WRITTEN, and re-stamping everything is how a changed
+        `detect.py` corrects it (see `_resave_pool_cache`).
+
+        It also WAITS while `derived_builds_paused()` — a library load or a phase-2 enrichment run in
+        flight. Every source the enrichment worker finishes used to start a whole-pool pass, so a
+        600-source run kept this thread busy for the entire run (each pass minutes at 11 M events),
+        for anomalies nobody could see: the derived layer is paused for the same window. Requests
+        that arrive while it waits coalesce into the ONE pass after the queue drains.
 
         Only windowed rules can change when events are removed (`find_bursts` counts events inside a
         window), so this is a correction, not the answer — the pool is already usable and correct for
@@ -3323,6 +3352,9 @@ class Store:
         detection. At 11 M events it is a 4.1 GB re-read plus a full analysis and anomaly rebuild for
         nothing at all. `tests/test_detection_refresh_bump.py` pins both directions.
         """
+        # A pass that writes the cache back is correcting a stamp an OLDER catalogue produced, and
+        # only the whole catalogue can do that — a correction keeps every per-event stamp it finds.
+        full = full or resave_cache
         with self.lock:
             if getattr(self, "_detect_busy", False):
                 self._detect_again = True
@@ -3336,9 +3368,15 @@ class Store:
                 self._detect_pct = p
             try:
                 while True:
+                    self._detect_pct = None   # "waiting", not "0 %"
+                    while self.derived_builds_paused():
+                        time.sleep(0.5)
+                    with self.lock:
+                        self._detect_again = False
+                        self._detect_started = time.time()
                     self._detect_pct = 0.0
                     with self._detect_lock:
-                        changed = self._run_detections(progress=tick)
+                        changed = self._run_detections(progress=tick, correction=not full)
                     with self.lock:
                         if changed:
                             self.bump()
