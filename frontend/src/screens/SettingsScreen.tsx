@@ -425,19 +425,28 @@ function AiAssistant({ settings }: { settings: Settings }) {
                 one control labelled "parallel" did nothing for the assistant the analyst was
                 actually watching. It is the investigator's fan-out now: how many of ONE turn's tool
                 calls are dispatched together. */}
-            <label className="field__label" htmlFor="ai-agents">Parallel tool calls</label>
+            <label className="field__label" htmlFor="ai-agents">Parallel tool calls and agents</label>
             <div className="slider-row">
               <input id="ai-agents" type="range" min={1} max={4} step={1} value={agents} onChange={(e) => setAgents(Number(e.target.value))} />
               <span className="slider-row__val">{agents}</span>
               <span className="field__hint">
                 {agents === 1
-                  ? 'one at a time — every call waits for the one before it'
+                  ? 'one call at a time — but a delegation still runs two agents, which is its minimum'
                   : `up to ${agents} independent reads of one turn run at the same time`}
               </span>
             </div>
             <span className="field__hint">
               Only reads share a lane. A tool that changes the case runs on its own, in the order the
               assistant asked for it, so two writes can never race and the undo list stays in order.
+            </span>
+            {/* The same number is the DELEGATION fan-out: the lead assistant can hand whole lines of
+                enquiry to worker agents that research in parallel and report back. Two is the floor
+                whatever this says — one agent is a slower way of making the call yourself. */}
+            <span className="field__hint">
+              It is also how many <strong>worker agents</strong> the assistant may run at once when it
+              delegates parts of an investigation ({Math.max(2, agents)} here — two is always the
+              minimum). A worker has read tools only: the assistant keeps the case and does every
+              write itself, and it re-checks anything decisive before recording it.
             </span>
           </div>
           {/* Run limits. These were env-only, so a case that genuinely needed more just hit the wall

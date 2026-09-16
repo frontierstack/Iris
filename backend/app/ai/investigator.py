@@ -76,7 +76,7 @@ from typing import Any, AsyncIterator, Callable, Optional
 import orjson
 
 from ..config import get_settings
-from . import compaction, continuation, eventids, runs
+from . import compaction, continuation, eventids, runs, subagents
 from .argrepair import repair_arguments
 from .client import (AIError, BadToolArguments, ContextTooLong, LLMClient, ProviderUnavailable,
                      absorb_text_calls, has_tool_call_syntax, parse_text_tool_calls)
@@ -85,8 +85,9 @@ from .loopguard import LoopGuard, call_key as _cache_key, returned_something as 
 from .system_prompts import PROMPTS
 from .prompts import (CONTINUE_OUTPUT, RESET_NOTE, ARG_TOO_BIG, BUDGET_NOTICE, CHECK_IN, COMPACTED_CONTINUE, CONTINUE_WORK,
                       DOCUMENT_CHECK, LOOP_STOP, NO_CASE_LINE, run_budget, RECORD_NUDGE, REPORT_NOW,
-                      SUMMARY_CHECK, WRAP_UP, investigator_user_prompt)
-from .tools import (REGISTRY, RunContext, ToolError, tool_budget_seconds, tool_schemas,
+                      PARALLEL_NUDGE, SUMMARY_CHECK, WRAP_UP, delegation_block,
+                      investigator_user_prompt)
+from .tools import (REGISTRY, RunContext, ToolError, _s, tool_budget_seconds, tool_schemas,
                     unverified_citations)
 
 DISABLED_MESSAGE = ("AI assistant is disabled — choose a provider and add an API key in Settings → AI "
@@ -191,6 +192,12 @@ MAX_OUTPUT_CONTINUES = 3
 # (ai/continuation.py). `_reset_transcript` does exactly that inside the same run — the transcript is
 # rebuilt from the run's own persisted record, which ai/history.py has been writing as it went.
 MAX_RESETS = 3
+
+# When the TOOL SCHEMAS are this share of the whole window, they are the problem and the
+# transcript is not: a fold cannot touch them, because they are not in the messages. Past it
+# the descriptions are traded for room. A third is the point at which the fixed cost plus a
+# system prompt leaves less than half the window for the investigation itself.
+TOOLS_SHARE_COMPACT = 0.33
 # ---- transient provider failures (5xx, 429, a dropped connection, a timeout): retried with a backoff
 # before the run is failed. Nothing of the turn has reached the transcript when they happen.
 PROVIDER_RETRIES = 3
@@ -203,6 +210,15 @@ PROVIDER_BACKOFF = (2.0, 5.0, 10.0)
 RECORD_MIN_CALLS = 4
 RECORD_EVERY = 6
 MAX_RECORD_NUDGES = 3
+
+# KEEPING TWO THINGS IN FLIGHT. `_lanes` parallelises whatever one turn asks for and
+# `delegate_investigation` runs several agents, but nothing makes the model USE either — and a model
+# that emits one read per turn gets the old serial behaviour with all the machinery idle. These bound
+# the reminder: four consecutive single-read turns earn one, twice in a run at most. High and soft on
+# purpose — a chain of DEPENDENT reads is correct work, and a nudge that pushed it into a fan-out it
+# cannot form would be the check-in's old mistake in a new place.
+PARALLEL_STREAK = 4
+MAX_PARALLEL_NUDGES = 2
 # What counts as "the summary is written", so the end-of-run SUMMARY_CHECK is skipped: a note of
 # kind='summary', or update_case setting the case summary. A FINDING note does not count — those are
 # written as findings are found, and the summary is the one that ties them together.
@@ -528,6 +544,12 @@ def build_context(store: Any, fresh: bool = False) -> str:
 MAX_PARALLEL_CAP = 4
 DEFAULT_PARALLEL = 3
 
+# How often the dispatch loop drains `ai/subagents` progress while it waits for a lane, and how often
+# it may roll the workers' individual calls into one line. The poll never delays a result — the wait
+# is still FIRST_COMPLETED, the timeout only gives it somewhere to come up for air.
+AGENT_POLL = 0.5
+AGENT_TICK = 6.0
+
 
 def parallel_limit(settings_ai: Any = None) -> int:
     """The analyst's fan-out, clamped. 1 restores the old strictly-serial behaviour exactly."""
@@ -555,8 +577,11 @@ def _lanes(calls: list[dict[str, Any]], max_parallel: int) -> list[list[dict[str
     for call in calls:
         fn = call.get("function") or {}
         name = str(fn.get("name") or "")
-        writes = bool(getattr(REGISTRY.get(name), "writes", False))
-        if writes:
+        t = REGISTRY.get(name)
+        # A write is a barrier for CORRECTNESS; a `solo` read is a barrier for RESOURCE
+        # (`delegate_investigation` is a fan-out of its own — two of them in one turn would be eight
+        # worker agents against a ceiling of four). Both run alone, in the position they were emitted.
+        if bool(getattr(t, "writes", False)) or bool(getattr(t, "solo", False)):
             lanes.append([call])
             open_read, seen = False, set()
             continue
@@ -619,7 +644,10 @@ async def _run_tool(name: str, args: dict[str, Any], ctx: RunContext) -> tuple[b
                           "note": "identical call already made in this run — the previous result is repeated "
                                   "verbatim, nothing was re-run. A third identical call will be REFUSED."}
         return True, cached
-    budget = float(tool_budget_seconds())
+    # Per-tool budget. Almost every tool is one query and the factor is 1.0; `delegate_investigation`
+    # is legitimately long (several agents, each with a tool loop of its own) and would otherwise be
+    # abandoned mid-fan-out, losing every agent's report at once — see Tool.budget_factor.
+    budget = float(tool_budget_seconds()) * float(getattr(t, "budget_factor", 1.0) or 1.0)
     ctx.begin_call(name, budget)
     try:
         # Tool handlers are synchronous and can be O(the pool) — a search over a million events on the
@@ -794,6 +822,24 @@ _SUMMARY: dict[str, Callable[[dict[str, Any]], str]] = {
     "get_case_set": lambda d: f"{d.get('shown', _len(d, 'entries'))} of {d.get('total', 0)} curated event(s)",
     "get_case_state": lambda d: (f"case {d.get('caseId')} '{d.get('name')}'" if d.get("hasCase")
                                  else "no case — the workspace is case-less"),
+    # The batch reads: the line has to say how much was actually answered, or a call that resolved
+    # twelve questions reads exactly like one that resolved none.
+    "workspace_overview": lambda d: (
+        f"{_len(d, 'sources')} source(s), {(d.get('pool') or {}).get('events', 0)} events"
+        + (f", {_len(d, 'detections')} rule(s) fired" if d.get("detections") is not None else "")
+        + (f" — {_names(d.get('omitted'), 'what')} not built yet" if d.get("omitted") else "")),
+    "batch_query": lambda d: f"{d.get('withMatches', 0)} of {d.get('queries', 0)} queries matched something",
+    "profile_entities": lambda d: f"{d.get('present', 0)} of {d.get('profiled', 0)} entities appear in the logs",
+    "find_related_events": lambda d: (
+        f"{d.get('relatedEvents', 0)} related event(s) around {_len(d, 'pivots')} pivot(s): "
+        f"{_names(d.get('pivots'), '')}" if d.get("pivots") else "no entities to pivot on"),
+    "source_profile": lambda d: (f"{(d.get('source') or {}).get('file', '?')}: "
+                                 f"{(d.get('source') or {}).get('events', 0)} events, "
+                                 f"{_len(d, 'fields')} parsed field(s)"),
+    "delegate_investigation": lambda d: (
+        f"{d.get('agents', 0)} agent(s) ran in parallel, {d.get('toolCallsTotal', 0)} tool calls between "
+        f"them, {int(d.get('tookMs', 0)) / 1000:.0f}s"
+        + (f" — {_names(d.get('incomplete'), '')} did not finish" if d.get("incomplete") else "")),
 }
 
 
@@ -875,7 +921,9 @@ async def investigate(store: Any, objective: str, run_id: str,
     # calls ctx.check() and refuses within 250 ms, instead of the run sitting at `steps: 0` for minutes
     # after the analyst pressed Stop and got an instant HTTP 200.
     ctx = RunContext(run_id=run_id, model=client.model, max_writes=lim["maxWrites"],
-                     stopper=lambda: runs.stop_requested(run_id))
+                     stopper=lambda: runs.stop_requested(run_id),
+                     # so `delegate_investigation`'s worker agents run on THIS run's provider
+                     client=client)
     case_id, case_name = _case_tag(store)
     # A follow-up inherits the conversation, not the run: same thread, fresh budgets. Resolved BEFORE
     # `runs.start`, because the record it writes is what carries `threadId` for every later turn.
@@ -926,7 +974,11 @@ async def investigate(store: Any, objective: str, run_id: str,
         # The budget block goes on the SYSTEM message, after whatever prompt is in force (shipped,
         # analyst-edited, or with saved instructions appended): a run has to know what it is actually
         # working under, and with the limits off that block is the only thing that says so.
-        {"role": "system", "content": system_text + run_budget(lim)},
+        # ...plus the DELEGATION block, for the same reason the budget block is appended rather than
+        # baked in: it states how many agents THIS workspace will run (the analyst's setting), and the
+        # analyst may have edited the built-in prompt — a run must still be told what it actually has.
+        {"role": "system", "content": system_text + delegation_block(subagents.max_agents(max_parallel))
+                                      + run_budget(lim)},
         {"role": "user", "content": investigator_user_prompt(asked, build_context(store, fresh=not continue_from),
                                                               prior_brief)},
     ]
@@ -947,6 +999,8 @@ async def investigate(store: Any, objective: str, run_id: str,
     summary_checks = 0
     guard = LoopGuard()      # the loop guard — see ai/loopguard.py; not subject to the limits switch
     record_nudges = 0        # "record as you go" nudges sent
+    solo_turns = 0           # consecutive turns that asked for exactly ONE read
+    parallel_nudges = 0      # ...and how many times that has been pointed out
     productive_since_write = 0   # reads that returned evidence since the last write (or the start)
     ceiling = lim["maxContextTokens"]   # lowered when the provider refuses the transcript (ContextTooLong)
     result_chars = TOOL_RESULT_CHARS
@@ -958,6 +1012,7 @@ async def investigate(store: Any, objective: str, run_id: str,
     # remaining measured error, learned from the provider's own "limit N, requested M" the first time
     # it refuses a request.
     tools_tokens = len(orjson.dumps(tools)) // 4
+    tools_compact = False    # the schemas have been trimmed to fit a small window
     est_bias = 0
     resets = 0               # in-run restarts from the run's own record (see _reset_transcript)
     output_continues = 0     # replies cut off at the output limit and continued (CONTINUE_OUTPUT)
@@ -1186,6 +1241,27 @@ async def investigate(store: Any, objective: str, run_id: str,
                     real = exc.limit if exc.limit else est_now
                     ceiling = max(MIN_CEILING, min(ceiling, int(real * CONTEXT_SHRINK)))
                     result_chars = min(result_chars, TOOL_RESULT_CHARS_SMALL)
+                    # THE PART OF THE REQUEST A FOLD CANNOT REACH. The tool schemas are sent on every
+                    # request and are not in `messages`, so once they are a large share of the window
+                    # no amount of compacting the transcript can make it fit — measured on this very
+                    # recovery, a fold that got the messages to 8,025 tokens still missed a 21,011
+                    # ceiling, because 13,230 of it was schema. The descriptions are teaching, and on
+                    # a window this size the teaching costs more than it is worth: trimmed to a
+                    # sentence or two the same 58 tools measure ~10.3k. Tool NAMES and PARAMETERS are
+                    # untouched, so nothing the model can call goes away — only the prose about when
+                    # to call it. Once, and only when it actually helps.
+                    if not tools_compact and tools_tokens > ceiling * TOOLS_SHARE_COMPACT:
+                        small = tool_schemas(compact=True)
+                        saved = tools_tokens - len(orjson.dumps(small)) // 4
+                        if saved > 0:
+                            tools, tools_compact = small, True
+                            tools_tokens -= saved
+                            note = (f"the tool definitions alone were ~{tools_tokens + saved:,} tokens of a "
+                                    f"~{ceiling:,}-token window, which no amount of folding can reduce — "
+                                    f"their descriptions were shortened, freeing ~{saved:,} tokens. Every "
+                                    f"tool and every parameter is still available.")
+                            HISTORY.append(run_id, {"kind": "status", "text": note})
+                            yield {"type": "status", "text": note, "toolsCompacted": saved}
                     messages, folded, elided, fits = _fit_context(
                         messages, ctx.actions, ceiling, overhead=tools_tokens + est_bias,
                         brief_chars=_brief_chars(ceiling))
@@ -1525,8 +1601,44 @@ async def investigate(store: Any, objective: str, run_id: str,
                     entry["t0"] = time.perf_counter()
                     tasks[asyncio.ensure_future(_run_tool(entry["name"], entry["args"], ctx))] = entry
                 waiting = set(tasks)
+                # WHILE A LANE IS IN FLIGHT, SAY WHAT THE WORKER AGENTS ARE DOING.
+                # `delegate_investigation` runs several agents inside ONE tool call, on a worker
+                # thread, so it cannot reach this generator or the live bus itself (an asyncio queue
+                # touched off the loop is a data race). It records progress into a thread-safe
+                # registry instead and this is the one place that is both on the event loop and
+                # already waiting: the wait gains a timeout purely so it can drain that registry.
+                # FIRST_COMPLETED still returns the instant a call lands, so nothing is slowed down.
+                # Start and finish are reported per agent as they happen; the calls in between are
+                # rolled into ONE line every few seconds, because thirty "agent A called
+                # count_events" rows is exactly the transcript noise this panel keeps deleting.
+                pending_calls: dict[str, int] = {}
+                said_at = time.monotonic()
                 while waiting:
-                    done, waiting = await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
+                    done, waiting = await asyncio.wait(waiting, timeout=AGENT_POLL,
+                                                       return_when=asyncio.FIRST_COMPLETED)
+                    for ev in subagents.drain(run_id):
+                        phase = str(ev.get("phase") or "")
+                        who = str(ev.get("agent") or "agent")
+                        if phase == "call":
+                            pending_calls[who] = pending_calls.get(who, 0) + 1
+                            continue
+                        if phase == "start":
+                            line = f"agent {who} started: {_s(ev.get('objective'), 160)}"
+                        else:
+                            ended = _s(ev.get("stopped"), 120)
+                            line = (f"agent {who} finished — {int(ev.get('calls') or 0)} tool calls in "
+                                    f"{int(ev.get('tookMs') or 0) / 1000:.1f}s"
+                                    + (f" ({ended})" if ended else ""))
+                        HISTORY.append(run_id, {"kind": "status", "text": line})
+                        yield {"type": "status", "text": line, "agent": who, "phase": phase}
+                    if pending_calls and time.monotonic() - said_at >= AGENT_TICK:
+                        said_at = time.monotonic()
+                        line = ("agents working: "
+                                + ", ".join(f"{a} ({n} call{'s' if n != 1 else ''})"
+                                            for a, n in sorted(pending_calls.items())))
+                        pending_calls = {}
+                        HISTORY.append(run_id, {"kind": "status", "text": line})
+                        yield {"type": "status", "text": line, "agents": True}
                     for task in done:
                         entry = tasks[task]
                         try:
@@ -1556,6 +1668,31 @@ async def investigate(store: Any, objective: str, run_id: str,
                     if action:
                         HISTORY.note_action(run_id, action)
                         yield {"type": "write", "action": action}
+            # KEEP MORE THAN ONE THING WORKING.
+            # The lanes and the worker agents are both already there; what neither can do is make the
+            # model ASK for concurrency. A run that emits one read per turn gets exactly the serial
+            # behaviour the feature exists to remove, and the analyst watches one spinner at a time.
+            # The threshold is deliberately high and the nudge is deliberately soft: a chain of
+            # DEPENDENT reads (search, then read those ids, then pivot on what they said) is correct
+            # work and must not be pushed into a fan-out it cannot form. So it fires only after
+            # PARALLEL_STREAK consecutive single-read turns, at most twice, and it asks — it does not
+            # instruct — for the independent reads to go together or for a delegation.
+            if len(calls) == 1 and not any(bool(getattr(REGISTRY.get(
+                    str((c.get("function") or {}).get("name") or "")), "writes", False)) for c in calls):
+                solo_turns += 1
+            else:
+                solo_turns = 0
+            if (solo_turns >= PARALLEL_STREAK and parallel_nudges < MAX_PARALLEL_NUDGES
+                    and not guard.tripped and not runs.stop_requested(run_id) and est() < ceiling):
+                parallel_nudges += 1
+                solo_turns = 0
+                messages.append({"role": "user", "content": PARALLEL_NUDGE.format(
+                    n=PARALLEL_STREAK, agents=subagents.max_agents(max_parallel))})
+                note = (f"{PARALLEL_STREAK} turns in a row with a single read — reminded the assistant "
+                        f"that independent reads run together and that it can delegate")
+                HISTORY.append(run_id, {"kind": "status", "text": note})
+                yield {"type": "status", "text": note, "parallelNudge": parallel_nudges}
+
             if guard.tripped:
                 # A WARNING, never folded in the panel: the analyst should see that the run was ended
                 # by Iris and why. The report still follows — `loop` takes the wrap-up turn below.
@@ -1708,6 +1845,11 @@ async def investigate(store: Any, objective: str, run_id: str,
         error = _kept_note(f"investigation failed: {type(exc).__name__}: {exc}", tool_calls, ctx.writes)
         runs.finish(run_id, "error", "error", step, tool_calls, answer, ctx.actions, [], error)
         yield {"type": "error", "message": error, "actions": ctx.actions}
+    finally:
+        # The worker agents' progress registry is drained by the dispatch loop while it waits; this is
+        # the only thing that clears an entry nobody drained — a run that died mid-delegation, or a
+        # caller that is not this loop at all (MCP). Bounded either way, so it is tidiness, not a leak.
+        subagents.forget(run_id)
 
 
 def _kept_note(error: str, tool_calls: int, writes: int) -> str:

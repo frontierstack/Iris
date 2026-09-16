@@ -41,7 +41,8 @@
  * rejoins by POLLING `GET /api/ai/runs/{id}?since=<seq>`. Both write into the same
  * `AiTranscriptEntry[]`, so there is one renderer, not two.
  */
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
+         useSyncExternalStore } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { api } from '../api/client';
@@ -97,6 +98,8 @@ const STREAM_LAG_MAX_MS = 600;      // and at most, however coarse the packets a
 const STREAM_RATE_WINDOW_MS = 1200; // the window the arrival rate and the gaps are measured over
 const STREAM_CATCHUP_MS = 400;      // a backlog beyond the lag is worked off across this long
 const STREAM_DEFAULT_CPS = 180;     // characters per second assumed until there is a rate to measure
+const EVENT_DRAIN_MS = 260;         // longest a tool card waits for the sentence that introduces it
+const EVENT_DRAIN_MIN = 12;         // ...below which draining is a frame's work and not worth waiting
 
 /**
  * DOCKED OR DETACHED, and the choice is remembered.
@@ -381,6 +384,57 @@ const LiveMarkdown = memo(function LiveMarkdown({ text, className }: { text: str
       {head ? <LiveHead text={head} /> : null}
       {renderMarkdown(closeDangling(tail))}
     </div>
+  );
+});
+
+/**
+ * THE GROWING TAIL LIVES OUTSIDE REACT STATE, AND THAT IS WHAT MAKES THE STREAM SMOOTH.
+ *
+ * The jitter buffer above decides WHEN a character should appear. It cannot decide what that costs,
+ * and the cost was the whole panel: each frame called `setEntries`, so `AiPanel` re-rendered, and
+ * with it `toBlocks` over every entry, `trailNodes` twice, an `answer.includes` pass per prose block,
+ * a fresh `nodes` array (so `StepsCard` reconciled every tool card it holds), the composer, the
+ * header and the history rail. At sixty frames a second on a transcript holding thirty calls, the
+ * frame budget went on rebuilding the conversation around the sentence being written — so frames were
+ * dropped in clumps and the text arrived in the lumps the buffer had just smoothed out. Memoising the
+ * markdown fixed the PARSING and left all of that in place.
+ *
+ * So the tail is a module-level store and one leaf subscribes to it. A frame now re-renders exactly
+ * one component and re-parses exactly one paragraph; nothing above it in the tree is told anything.
+ * The text is committed into `entries` only when a non-delta event arrives or the stream ends — the
+ * same boundaries `flushText` always used, so the ORDER on screen is unchanged and a tool card can
+ * still never appear ahead of the sentence that introduced it.
+ *
+ * `prefix` is the last committed prose block. The tail renders it in the same `<div>` so a sentence
+ * that straddles a commit is one paragraph rather than two, and `splitLive`/`LiveHead` mean the
+ * settled part of it is not re-parsed per frame either.
+ */
+const liveTail = {
+  text: '',
+  subs: new Set<() => void>(),
+  get() { return this.text; },
+  set(t: string) { if (t !== this.text) { this.text = t; this.subs.forEach((f) => f()); } },
+  subscribe(f: () => void) { this.subs.add(f); return () => { this.subs.delete(f); }; },
+};
+
+const LiveTail = memo(function LiveTail({ prefix, className, onPaint }: {
+  prefix: string; className: string; onPaint?: () => void;
+}) {
+  const tail = useSyncExternalStore(
+    useCallback((f: () => void) => liveTail.subscribe(f), []),
+    useCallback(() => liveTail.get(), []),
+  );
+  // Pinning to the bottom is a LAYOUT effect for the reason the panel's own one is: a passive effect
+  // runs after the frame has painted, so the paragraph would grow a line with the scroller still at
+  // its old bottom and jump a frame later — a stutter at exactly the line being read. It lives here
+  // rather than in the panel because the panel no longer re-renders while the text grows.
+  useLayoutEffect(() => { onPaint?.(); }, [tail, prefix, onPaint]);
+  if (!prefix && !tail) return null;
+  return (
+    <>
+      <LiveMarkdown className={className} text={prefix + tail} />
+      <span className="aic-caret" aria-hidden />
+    </>
   );
 });
 
@@ -886,9 +940,12 @@ function canContinue(run: AiRun): boolean {
   return !!run.reason && run.reason !== 'complete';
 }
 
-function Turn({ run, entries, live, undoing, onUndo, onRetry, onContinue }: {
+function Turn({ run, entries, live, undoing, onUndo, onRetry, onContinue, onStreamPaint }: {
   run: AiRun; entries: AiTranscriptEntry[]; live: boolean; undoing: boolean;
   onUndo: (id: string) => void; onRetry: (run: AiRun) => void; onContinue: (run: AiRun) => void;
+  /** Called after each frame of the live tail paints — the panel pins the scroller with it,
+   *  because the panel itself no longer re-renders while the text grows. */
+  onStreamPaint?: () => void;
 }) {
   const blocks = useMemo(() => toBlocks(entries), [entries]);
   const warnings = useMemo(
@@ -941,11 +998,16 @@ function Turn({ run, entries, live, undoing, onUndo, onRetry, onContinue }: {
           <>
             {warnings.map((w) => <Warning key={w.key} text={w.text} />)}
             <StepsCard nodes={liveNodes} live title="Working" startOpen />
-            {liveProse.map((b) => <LiveMarkdown key={b.key} className="md aic-prose" text={b.text} />)}
+            {/* Every SETTLED prose block, then the one still being written. The last settled block is
+                handed to `LiveTail` as its prefix rather than rendered here, so a sentence that
+                straddles a commit stays ONE paragraph — and so the only thing a frame re-renders is
+                that leaf. See the note on `liveTail`. */}
+            {liveProse.slice(0, -1).map((b) => <Markdown key={b.key} className="md aic-prose" text={b.text} />)}
+            <LiveTail className="md aic-prose" onPaint={onStreamPaint}
+                      prefix={liveProse.length ? liveProse[liveProse.length - 1]!.text : ''} />
             {!blocks.length && (
               <div className="aic-busy"><span className="spinner" style={{ width: 12, height: 12 }} />Starting the investigation</div>
             )}
-            {!!liveProse.length && <span className="aic-caret" aria-hidden />}
             <Changes actions={run.actions} busy={undoing} onUndo={() => onUndo(run.id)} />
           </>
         ) : (
@@ -1187,6 +1249,9 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
     if (previous) setThread((prev) => [...prev, { ...previous, transcript: entriesRef.current }]);
     else setThread([]);
     setEntries([]);
+    // The tail is module state, not React state, so it does NOT go with the transcript: a few
+    // characters still playing out from the previous turn would be the first thing on the new one.
+    liveTail.set('');
     follow(true);            // a new turn always starts by following it
     setRun({
       id: rid, prompt: text, focus: focus ?? '', model: settings.data?.ai.model ?? '',
@@ -1216,6 +1281,8 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
     let carry = 0;                                   // the fraction of a character owed to the next frame
     const arrivals: Array<[number, number]> = [];    // [when, chars] inside the rate window
     let arrived = 0;                                 // chars inside the window
+    let queued: AiRunEvent[] = [];                   // events waiting for the prose ahead of them
+    let drainBy = 0;                                 // performance.now() the queue must be released by
 
     const noteArrival = (chars: number) => {
       arrivals.push([performance.now(), chars]);
@@ -1234,6 +1301,12 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
       };
     };
 
+    // WHAT A FRAME COSTS. `paint` puts the character on screen; it does NOT touch React state, so a
+    // frame re-renders the one leaf subscribed to `liveTail` and nothing else. `commit` is the
+    // expensive one — it moves the played-out text into the transcript — and it runs only at the
+    // boundaries `flushText` always used, which is why the ORDER on screen is unchanged.
+    const paint = (t: string) => liveTail.set(liveTail.get() + t);
+
     const commit = (t: string) => {
       setEntries((prev) => {
         const last = prev[prev.length - 1];
@@ -1246,29 +1319,88 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
       if (raf) { cancelAnimationFrame(raf); raf = 0; }
       prevTs = 0;
       carry = 0;
+      drainBy = 0;
     };
 
-    /** Everything still buffered, at once. Used by every non-delta event and at end of stream. */
+    /** End of stream: type nothing more, commit what is left, release anything still queued.
+     *  The `done` event is in that queue, and it may not be held back waiting for a frame. */
+    const endStream = () => {
+      flushText();
+      flushQueue();
+    };
+
+    /** Everything still buffered, at once, and the played-out tail folded into the transcript.
+     *  Used at end of stream, and whenever a queued event has waited long enough (see `queue`). */
     const flushText = () => {
       stopRaf();
       const t = buffered;
       buffered = '';
       // A pending flush must never land on the NEXT conversation: `startRun` aborts the old stream, and
       // a frame that fires after that would append the previous run's tail to a fresh transcript.
-      if (!t || ac.signal.aborted) return;
-      commit(t);
+      if (ac.signal.aborted) { liveTail.set(''); return; }
+      const played = liveTail.get();
+      liveTail.set('');
+      if (played || t) commit(played + t);
+    };
+
+    /**
+     * A TOOL CARD MUST NOT MAKE THE SENTENCE BEFORE IT APPEAR ALL AT ONCE.
+     *
+     * Everything above smooths the arrival of prose. None of it survived contact with the thing the
+     * analyst actually watches, which is not a report streaming into an empty panel — it is the
+     * running NARRATION: one line of prose, then the tool call it introduces, over and over. Those
+     * two arrive in the SAME assistant message, milliseconds apart, and every non-delta event used to
+     * dump the whole buffer instantly so that the card could not be drawn ahead of its sentence. So
+     * the line was not typed at all: it appeared whole, then a card, then the next line appeared
+     * whole. Measured on a twelve-call run against a local-gateway-shaped stream: a median frame
+     * advanced the text by 2 characters and eight frames advanced it by SIXTY — those eight are the
+     * jumps, and they are what "very skippy and not smooth" describes.
+     *
+     * The ordering constraint is real and is kept exactly: an event may never be applied before the
+     * prose that precedes it. What changes is which side waits. A non-delta event now QUEUES, the
+     * frame loop drains the buffer at whatever rate empties it within `EVENT_DRAIN_MS`, and the queue
+     * is applied the moment the buffer is empty. The card is late by up to a quarter of a second and
+     * the sentence is typed; nothing is reordered, nothing is dropped, and a queue that is already
+     * empty of text (a `status` with no prose in front of it, the common case) is applied at once.
+     */
+    const flushQueue = () => {
+      const evs = queued;
+      queued = [];
+      if (evs.length) {
+        // the text that has PLAYED is committed first, so the card lands after its own sentence
+        const played = liveTail.get();
+        liveTail.set('');
+        if (played) commit(played);
+        for (const e of evs) apply(e);
+      }
+    };
+
+    const queue = (ev: AiRunEvent) => {
+      queued.push(ev);
+      if (ac.signal.aborted) { queued = []; return; }
+      // Nothing left to type, or so little that draining it is a frame's work: apply immediately and
+      // keep the old behaviour exactly.
+      if (buffered.length <= EVENT_DRAIN_MIN) { flushText(); flushQueue(); return; }
+      if (!drainBy) drainBy = performance.now() + EVENT_DRAIN_MS;
+      if (!raf) raf = requestAnimationFrame(tick);
     };
 
     const tick = (ts: number) => {
       raf = 0;
-      if (ac.signal.aborted) { buffered = ''; prevTs = 0; carry = 0; return; }
+      if (ac.signal.aborted) { buffered = ''; prevTs = 0; carry = 0; liveTail.set(''); return; }
       const dt = prevTs ? Math.min(160, ts - prevTs) : 16;
       prevTs = ts;
       const { rate: r, lagMs } = wire(ts);
       const lag = Math.max(1, r * lagMs);
       const fill = Math.min(1, buffered.length / lag);
       const excess = Math.max(0, buffered.length - lag);
-      const want = r * dt * (0.5 + 0.5 * fill) + (excess / STREAM_CATCHUP_MS) * dt + carry;
+      let want = r * dt * (0.5 + 0.5 * fill) + (excess / STREAM_CATCHUP_MS) * dt + carry;
+      // Something is WAITING behind this text (a tool card, a warning). Type the rest out at whatever
+      // rate clears it by the deadline — faster than the wire, but still typed rather than dumped.
+      if (drainBy) {
+        const left = Math.max(dt, drainBy - ts);
+        want = Math.max(want, (buffered.length / left) * dt + carry);
+      }
       let n = Math.floor(want);
       carry = want - n;
       if (n >= buffered.length) { n = buffered.length; carry = 0; }
@@ -1276,93 +1408,36 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
       // would paint the replacement glyph for a frame before the other half arrived.
       else if (n > 0 && (buffered.charCodeAt(n - 1) & 0xfc00) === 0xd800) n += 1;
       if (n > 0) {
-        commit(buffered.slice(0, n));
+        paint(buffered.slice(0, n));
         buffered = buffered.slice(n);
       }
-      if (buffered) raf = requestAnimationFrame(tick);
-      else { prevTs = 0; carry = 0; }
+      if (buffered) { raf = requestAnimationFrame(tick); return; }
+      prevTs = 0;
+      carry = 0;
+      // The buffer is empty, so whatever was queued behind it can go now — in arrival order, after
+      // the text it was waiting for. This is the ONLY place a queued event is released on the happy
+      // path, which is what guarantees a card can never precede its own sentence.
+      drainBy = 0;
+      if (queued.length) flushQueue();
     };
+    // NO `flushText()` here any more. It was the second half of the dump: `queue` holds an event
+    // until the prose ahead of it has been typed out, and then `flushQueue` commits that text before
+    // applying the event — so by the time `push` runs, the ordering is already settled. Flushing
+    // again would empty a buffer that has only just started refilling from the NEXT delta, which is
+    // the same instant-lump this exists to remove.
     const push = (e: Partial<AiTranscriptEntry> & { kind: AiTranscriptEntry['kind'] }) => {
-      flushText();
       setEntries((prev) => [...prev, { ...blank(++sseSeqRef.current, e.kind), ...e }]);
     };
 
     api
       .aiInvestigate(body, (ev: AiRunEvent) => {
-        if (ev.type !== 'delta') flushText();
-        switch (ev.type) {
-          case 'run':
-            setRun((r) => (r ? {
-              ...r, id: ev.runId, model: ev.model,
-              threadId: ev.threadId ?? r.threadId, parentId: ev.parentId ?? r.parentId,
-            } : r));
-            setStreamingId(ev.runId);
-            break;
-          case 'status':
-            push({ kind: 'status', text: ev.text });
-            break;
-          case 'step':
-            push({ kind: 'step', step: ev.step });
-            break;
-          case 'delta':
-            buffered += ev.text;
-            noteArrival(ev.text.length);
-            if (!raf) raf = requestAnimationFrame(tick);
-            break;
-          case 'tool_call':
-            push({ kind: 'tool', id: ev.id, name: ev.name, args: ev.arguments, lane: ev.lane ?? 1,
-                   writes: writeToolsRef.current.has(ev.name) });
-            break;
-          case 'tool_result':
-            // Match on the call id; fall back to the LAST unfinished call of the same name. The card's
-            // spinner is what says "this is still running", so a result that matches nothing leaves it
-            // spinning for the rest of the run — reported as "the spinner on tool calls does not stop
-            // when the call is completed". The server now stamps both events with the same id (a
-            // provider that omits one made every card carry `id: null`); this is the belt to that
-            // brace, and it also covers a stream that drops a frame.
-            setEntries((prev) => {
-              let hit = prev.findIndex((e) => e.kind === 'tool' && e.id === ev.id && e.ok === null);
-              if (hit < 0) hit = prev.findIndex((e) => e.kind === 'tool' && e.id === ev.id);
-              if (hit < 0) {
-                for (let i = prev.length - 1; i >= 0; i--) {
-                  const e = prev[i]!;
-                  if (e.kind === 'tool' && e.name === ev.name && e.ok === null) { hit = i; break; }
-                }
-              }
-              if (hit < 0) return prev;
-              const next = prev.slice();
-              next[hit] = { ...next[hit]!, ok: ev.ok, summary: ev.summary, tookMs: ev.tookMs };
-              return next;
-            });
-            break;
-          case 'write':
-            setRun((r) => (r ? { ...r, actions: [...r.actions, ev.action] } : r));
-            refreshWorkspace();
-            break;
-          case 'warning':
-            push({ kind: 'warning', text: ev.message });
-            setRun((r) => (r ? { ...r, unverifiedCitations: ev.ids } : r));
-            break;
-          case 'answer':
-            setRun((r) => (r ? { ...r, answer: ev.text } : r));
-            break;
-          case 'done':
-            setRun((r) => (r ? {
-              ...r, answer: ev.answer || r.answer, actions: ev.actions ?? r.actions,
-              reason: ev.reason, state: (ev.state as AiRun['state']) || 'done', endedAt: new Date().toISOString(),
-              steps: ev.steps, toolCalls: ev.toolCalls,
-            } : r));
-            refreshWorkspace();
-            break;
-          case 'error':
-            setError(ev.message);
-            setRun((r) => (r ? { ...r, state: 'error', error: ev.message } : r));
-            break;
-        }
+        // A NON-DELTA EVENT NO LONGER DUMPS THE BUFFER — it QUEUES BEHIND IT. See `queue`.
+        if (ev.type !== 'delta') { queue(ev); return; }
+        apply(ev);
       }, ac.signal)
-      .then(() => flushText())
+      .then(() => endStream())
       .catch((e: unknown) => {
-        flushText();
+        endStream();
         if (ac.signal.aborted) return;
         setError(errMsg(e));
       })
@@ -1381,6 +1456,78 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
           .catch(() => { /* offline: keep what the stream already showed */ })
           .finally(() => { setStreamingId(null); void loadHistory(); });
       });
+
+    function apply(ev: AiRunEvent) {
+      switch (ev.type) {
+        case 'run':
+          setRun((r) => (r ? {
+            ...r, id: ev.runId, model: ev.model,
+            threadId: ev.threadId ?? r.threadId, parentId: ev.parentId ?? r.parentId,
+          } : r));
+          setStreamingId(ev.runId);
+          break;
+        case 'status':
+          push({ kind: 'status', text: ev.text });
+          break;
+        case 'step':
+          push({ kind: 'step', step: ev.step });
+          break;
+        case 'delta':
+          buffered += ev.text;
+          noteArrival(ev.text.length);
+          if (!raf) raf = requestAnimationFrame(tick);
+          break;
+        case 'tool_call':
+          push({ kind: 'tool', id: ev.id, name: ev.name, args: ev.arguments, lane: ev.lane ?? 1,
+                 writes: writeToolsRef.current.has(ev.name) });
+          break;
+        case 'tool_result':
+          // Match on the call id; fall back to the LAST unfinished call of the same name. The card's
+          // spinner is what says "this is still running", so a result that matches nothing leaves it
+          // spinning for the rest of the run — reported as "the spinner on tool calls does not stop
+          // when the call is completed". The server now stamps both events with the same id (a
+          // provider that omits one made every card carry `id: null`); this is the belt to that
+          // brace, and it also covers a stream that drops a frame.
+          setEntries((prev) => {
+            let hit = prev.findIndex((e) => e.kind === 'tool' && e.id === ev.id && e.ok === null);
+            if (hit < 0) hit = prev.findIndex((e) => e.kind === 'tool' && e.id === ev.id);
+            if (hit < 0) {
+              for (let i = prev.length - 1; i >= 0; i--) {
+                const e = prev[i]!;
+                if (e.kind === 'tool' && e.name === ev.name && e.ok === null) { hit = i; break; }
+              }
+            }
+            if (hit < 0) return prev;
+            const next = prev.slice();
+            next[hit] = { ...next[hit]!, ok: ev.ok, summary: ev.summary, tookMs: ev.tookMs };
+            return next;
+          });
+          break;
+        case 'write':
+          setRun((r) => (r ? { ...r, actions: [...r.actions, ev.action] } : r));
+          refreshWorkspace();
+          break;
+        case 'warning':
+          push({ kind: 'warning', text: ev.message });
+          setRun((r) => (r ? { ...r, unverifiedCitations: ev.ids } : r));
+          break;
+        case 'answer':
+          setRun((r) => (r ? { ...r, answer: ev.text } : r));
+          break;
+        case 'done':
+          setRun((r) => (r ? {
+            ...r, answer: ev.answer || r.answer, actions: ev.actions ?? r.actions,
+            reason: ev.reason, state: (ev.state as AiRun['state']) || 'done', endedAt: new Date().toISOString(),
+            steps: ev.steps, toolCalls: ev.toolCalls,
+          } : r));
+          refreshWorkspace();
+          break;
+        case 'error':
+          setError(ev.message);
+          setRun((r) => (r ? { ...r, state: 'error', error: ev.message } : r));
+          break;
+      }
+    }
   }, [target, settings.data?.ai.model, refreshWorkspace, loadHistory, spChoice, systemPrompts.data]);
 
   /** Stop the run SERVER-side. Aborting the fetch alone would leave the agent writing to the case. */
@@ -1491,19 +1638,27 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
    * pulled straight back. ANY deliberate upward scroll now stops the follow, however small; scrolling
    * back down to the end resumes it. Reading is an explicit act and it wins.
    */
-  // A LAYOUT effect, not a passive one: a passive effect runs after the frame has painted, so every
-  // commit painted the paragraph one line taller with the container still scrolled to its OLD bottom
-  // and pinned it a frame later — a per-frame stutter at exactly the line being read.
-  useLayoutEffect(() => {
+  /** Put the scroller at the bottom, if we are still following. Stable: it reads refs only, so the
+   *  live tail can call it every frame without re-rendering anything that holds it. */
+  const pinToBottom = useCallback(() => {
     if (!atBottomRef.current) return;
     const el = bodyRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
     // Remember where WE put it, so the scroll event this causes is not read as the analyst moving up.
     lastTopRef.current = el.scrollTop;
-    // `detached` is in here because the two shells hold DIFFERENT scroll containers: docking a window
-    // that was following a live run must not silently jump the analyst back to the top of it.
-  }, [entries, run?.answer, atBottom, detached]);
+  }, []);
+
+  // A LAYOUT effect, not a passive one: a passive effect runs after the frame has painted, so every
+  // commit painted the paragraph one line taller with the container still scrolled to its OLD bottom
+  // and pinned it a frame later — a per-frame stutter at exactly the line being read.
+  //
+  // The streaming text is no longer in `entries` (see `liveTail`), so this no longer fires per frame
+  // and must not: `LiveTail` calls `pinToBottom` from its own layout effect instead. This one still
+  // covers everything that IS state — a tool card landing, the answer arriving, the shell swapping.
+  // `detached` is in here because the two shells hold DIFFERENT scroll containers: docking a window
+  // that was following a live run must not silently jump the analyst back to the top of it.
+  useLayoutEffect(pinToBottom, [entries, run?.answer, atBottom, detached, pinToBottom]);
 
   const onScroll = useCallback(() => {
     const el = bodyRef.current;
@@ -1654,7 +1809,8 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
                       undoing={undoingId === t.id} onUndo={undoRun} onRetry={retry} onContinue={continueRun} />
               ))}
               <Turn run={run} entries={entries} live={live} undoing={undoingId === run.id}
-                    onUndo={undoRun} onRetry={retry} onContinue={continueRun} />
+                    onUndo={undoRun} onRetry={retry} onContinue={continueRun}
+                    onStreamPaint={pinToBottom} />
             </>
           )}
 

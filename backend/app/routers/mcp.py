@@ -62,8 +62,21 @@ def _ok(rpc_id: Any, result: Any) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": rpc_id, "result": result}
 
 
+#: Tools the registry has that this server deliberately does NOT offer.
+#:
+#: `delegate_investigation` is the only one, and it is not about safety. An MCP client is ALREADY a
+#: tool-using model — Cursor, Claude Code, Claude Desktop — so it does not need Iris to run agents
+#: for it: it can call the read tools itself, in its own loop, with its own context. What delegating
+#: would actually do is spend the ANALYST's provider (their key, their tokens) and send their log
+#: lines to it, on an impulse that came from another editor entirely. Offering an action whose cost
+#: lands on someone who did not ask for it is worse than not offering it, which is the same reasoning
+#: that keeps a write tool unlisted when writes are off.
+NOT_EXPOSED = {"delegate_investigation"}
+
+
 def exposed_tools(allow_writes: bool) -> list[Any]:
-    return [t for t in REGISTRY.values() if allow_writes or not t.writes]
+    return [t for t in REGISTRY.values()
+            if t.name not in NOT_EXPOSED and (allow_writes or not t.writes)]
 
 
 def _tool_descriptor(t: Any) -> dict[str, Any]:
@@ -163,7 +176,9 @@ def _handle(msg: dict[str, Any], allow_writes: bool, state: dict[str, Any]) -> O
         if not isinstance(args, dict):
             args = {}
         tool = REGISTRY.get(name)
-        if tool is None or (tool.writes and not allow_writes):
+        # A tool that is not LISTED must not be CALLABLE either — a client that learned the name
+        # somewhere else (an older listing, the internal agent's transcript) would otherwise reach it.
+        if tool is None or tool.name in NOT_EXPOSED or (tool.writes and not allow_writes):
             known = ", ".join(sorted(t.name for t in exposed_tools(allow_writes)))
             reason = (f"no such tool: {name}" if tool is None else
                       f"{name} writes to the case, and write access is disabled in Iris "
@@ -279,8 +294,10 @@ def mcp_status(request: Request) -> dict[str, Any]:
     # the snippet still shows the analyst that an Authorization header is part of the config.
     snippet_token = TOKEN_PLACEHOLDER if token else ""
     blocked = _serving_block(s)
-    reads = [t.name for t in REGISTRY.values() if not t.writes]
-    writes = [t.name for t in REGISTRY.values() if t.writes]
+    # what this server ACTUALLY offers, not what the registry holds — the Settings panel is where the
+    # analyst checks what a client can reach, so it may not list a tool `tools/list` withholds
+    reads = [t.name for t in exposed_tools(True) if not t.writes]
+    writes = [t.name for t in exposed_tools(True) if t.writes]
     return {
         "enabled": s.mcp.enabled,
         "allowWrites": s.mcp.allowWrites,

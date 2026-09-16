@@ -1210,7 +1210,10 @@ type AiRunEvent =
       interrupted); budgetNotice = the "leave room to write it up" one; documentCheck = the "you
       recorded nothing in the case" one. All three are ordinary status lines. */
   | { type:'status'; text:string; parallel?:number; checkIn?:number; budgetNotice?:boolean; documentCheck?:boolean;
-      recordNudge?:number; summaryCheck?:boolean }
+      recordNudge?:number; summaryCheck?:boolean;
+      agent?:string; phase?:'start'|'done'; agents?:true;     // a WORKER AGENT started or finished, or a roll-up of what they are all doing
+      parallelNudge?:number;                                  // N turns in a row asked for a single read - a reminder that independent reads go together
+      toolsCompacted?:number }                                // the tool schemas were shortened to fit the window; that many tokens freed
   /** recordNudge = the "record as you go" nudge: N productive reads and nothing written to the case yet — record
       what is solid, then CONTINUE (never a request to finish; at most 3 per run). summaryCheck = the end-of-run
       "you recorded findings as you went, now write the summary note + case summary" one (once, only when the run
@@ -1231,6 +1234,19 @@ type AiRunEvent =
       sends BACK to the provider stay in emitted order regardless, because an OpenAI-shaped API matches
       them to its own tool_calls. Two IDENTICAL reads are never put in one lane — the second is answered
       from the run's dedupe cache, exactly as when calls ran one at a time. */
+  /** DELEGATION. `delegate_investigation` is one tool call that runs SEVERAL worker agents at the same
+      time (ai/subagents.py), each with its own read-only tool loop over the same pool. The lead model
+      decides the questions, keeps the case and does all the writing; a worker is handed no write tool at
+      all, so a fan-out can never race on case.json. TWO tasks is the MINIMUM the tool accepts - one agent
+      is a slower way of making the call yourself - and the ceiling is settings.ai.agents (at least 2, at
+      most 4). While the call runs, `status` events carry `agent` + `phase` as each agent starts and
+      finishes, plus a periodic `agents:true` roll-up naming what they are each doing; all of them are in
+      the persisted transcript, so a reloaded conversation says the same. The result carries one row per
+      agent: `{agent, objective, report, eventIds, toolCalls, steps, tookMs, endedEarly?, droppedCitations?,
+      error?}`. `report` is a MODEL's prose, not a tool result - every event id in it is verified against
+      the live pool for the lead and the invented ones are listed in `droppedCitations`, never silently
+      removed. `delegate_investigation` carries a larger per-call watchdog than any other tool
+      (Tool.budget_factor), because abandoning it would throw away every agent's work at once. */
   | { type:'write'; action:AiAction }                                // something in the case actually changed
   | { type:'warning'; message:string; ids:string[];                  // cited ids that do not exist, or:
       contextCeiling?:number; compactions?:number; retry?:number;

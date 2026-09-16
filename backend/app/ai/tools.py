@@ -155,6 +155,11 @@ class RunContext:
     stopper: Optional[Callable[[], bool]] = None   # investigator wires this to runs.stop_requested
     deadline: float = 0.0                          # time.monotonic() the CURRENT call must give up at
     tool_name: str = ""                            # the call in flight, for the refusal message
+    # The provider this run is talking to. Only `delegate_investigation` needs it — its worker agents
+    # are model loops of their own and must run on the SAME model the analyst chose for this run, not
+    # on whatever settings.json says at the moment the tool happens to fire. A caller with no client
+    # (MCP, a direct call in a test) falls back to the settings, which is the old behaviour.
+    client: Any = None
 
     # ---------------------------------------------------------------- interruption
     def begin_call(self, name: str, budget: Optional[float] = None) -> None:
@@ -219,6 +224,19 @@ class Tool:
     required: list[str]
     writes: bool
     fn: Callable[[dict[str, Any], RunContext], dict[str, Any]]
+    # Multiplier on `tool_budget_seconds()` for THIS tool's watchdog (investigator._watch). Almost
+    # every tool is one query and 1.0 is right for it. `delegate_investigation` is not: it runs
+    # several agents, each with a tool loop of its own, so the default 90 s would abandon the call
+    # while the agents were still working and throw away every report at once. A per-tool factor is
+    # the honest way to say "this one is legitimately long" — raising the global budget instead would
+    # also raise the ceiling on the single runaway search the watchdog exists to catch.
+    budget_factor: float = 1.0
+    # This tool may not share a lane, even though it only READS. `delegate_investigation` is a fan-out
+    # of its own: two of them in one turn would be eight worker agents against a ceiling of four, each
+    # holding a provider stream and a tool call in flight. A write is a barrier for CORRECTNESS (the
+    # undo order, the read cache); this is a barrier for RESOURCE, and folding it into `writes` would
+    # make `_lanes` claim a read changes the case.
+    solo: bool = False
 
     def schema(self) -> dict[str, Any]:
         return {"type": "function", "function": {
@@ -255,15 +273,53 @@ REGISTRY: dict[str, Tool] = {}
 
 
 def tool(name: str, description: str, properties: dict[str, Any], required: Optional[list[str]] = None,
-         writes: bool = False) -> Callable[[Callable], Callable]:
+         writes: bool = False, budget_factor: float = 1.0,
+         solo: bool = False) -> Callable[[Callable], Callable]:
     def deco(fn: Callable[[dict[str, Any], RunContext], dict[str, Any]]) -> Callable:
-        REGISTRY[name] = Tool(name, description, properties, required or [], writes, fn)
+        REGISTRY[name] = Tool(name, description, properties, required or [], writes, fn,
+                              budget_factor, solo)
         return fn
     return deco
 
 
-def tool_schemas() -> list[dict[str, Any]]:
-    return [t.schema() for t in REGISTRY.values()]
+#: sentence boundary, for the compact schemas below. Deliberately naive: it only ever has to find a
+#: reasonable place to stop a description written in this file.
+_SENTENCE = re.compile(r"(?<=[.!?]) +")
+
+
+def _compact(text: str, sentences: int = 2) -> str:
+    return " ".join(_SENTENCE.split(text or "")[:sentences])
+
+
+def compact_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """The same tool, described in a sentence or two instead of a paragraph.
+
+    The descriptions here are TEACHING — when to reach for aggregation instead of rows, why an
+    entity: query cannot see a raw source, what a preview number means. That teaching is worth its
+    tokens on any model with room for it, and it is why the registry's schemas measure ~13k tokens.
+    On a small window it is worth less than nothing: the schemas are sent on EVERY request and cannot
+    be folded away, so past a certain size no amount of compacting the transcript can make a request
+    fit — measured, a fold that got the messages down to 8k still missed a 21k ceiling by 244 tokens,
+    because 13.2k of it was schema. Shorter descriptions are worse teaching; no tools at all is worse
+    still, and that is the actual alternative.
+    """
+    fn = dict(schema.get("function") or {})
+    fn["description"] = _compact(str(fn.get("description") or ""))
+    params = dict(fn.get("parameters") or {})
+    props = {}
+    for name, spec in (params.get("properties") or {}).items():
+        if isinstance(spec, dict) and spec.get("description"):
+            spec = {**spec, "description": _compact(str(spec["description"]), 1)}
+        props[name] = spec
+    params["properties"] = props
+    fn["parameters"] = params
+    return {**schema, "function": fn}
+
+
+def tool_schemas(compact: bool = False) -> list[dict[str, Any]]:
+    """Every tool's JSON Schema. `compact` trims the prose for a model that cannot afford it."""
+    out = [t.schema() for t in REGISTRY.values()]
+    return [compact_schema(s) for s in out] if compact else out
 
 
 # --------------------------------------------------- calling a route handler directly
@@ -1152,15 +1208,26 @@ def _list_detections(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
 
 @tool("list_event_fields",
       "Field facets for a query: which parsed fields the matching events carry and their most common "
-      "values. Use it to discover what field:value terms are worth searching before guessing.",
+      "values. Use it to discover what field:value terms are worth searching before guessing. Scope it "
+      "with `sources` to ask what ONE log file actually carries — field names differ per parser, and a "
+      "facet taken over the whole pool answers a question you did not ask (source_profile is the fuller "
+      "version of that question).",
       {"query": {"type": "string", "description": "the same DSL query as search_events ('' = everything)"},
        "scope": {"type": "string", "enum": ["all", "case"]},
+       "sources": {"type": "string", "description": "comma-separated source ids to restrict to"},
+       "sev": {"type": "string", "description": "comma-separated severities to restrict to"},
+       "from": {"type": "string", "description": "ISO-8601 UTC lower bound"},
+       "to": {"type": "string", "description": "ISO-8601 UTC upper bound"},
        "limit": {"type": "integer", "description": "fields to return, 1-40 (default 20)"}})
 def _list_fields(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
     from ..routers.events import list_fields
     validate_query(_s(args.get("query"), 2000))
-    # every omitted parameter (from_/to/sources/sev) gets its REAL default here — see call_route
+    # every omitted parameter gets its REAL default here — see call_route. The filters were NOT passed
+    # through before, so `list_event_fields(sources=…)` silently answered over the whole pool: a facet
+    # about the wrong evidence, which is the one kind of wrong answer this tool layer must not give.
     res = call_route(list_fields, q=_s(args.get("query"), 2000), scope=_scope(args),
+                     sources=_s(args.get("sources"), 500), sev=_s(args.get("sev"), 100),
+                     from_=_s(args.get("from"), 64) or None, to=_s(args.get("to"), 64) or None,
                      limit=_int(args, "limit", 20, 1, 40))
     return {"events": res["events"], "sampled": res["sampled"],
             "fields": [{"name": f["name"], "count": f["count"],
@@ -1611,6 +1678,540 @@ def _get_case_state(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
                            "investigation, call create_case; if they named another existing case, "
                            "list_cases + activate_case. Never rename or re-summarise this case to fit a "
                            "different investigation.")
+    return out
+
+
+# ================================================== READ tools that answer N questions in ONE call
+#
+# Every tool above answers one question. That is the right shape for a tool and the wrong shape for an
+# investigation: orienting in a workspace is five questions, triaging a list of addresses is one
+# question per address, and a model that has to spend a whole model turn on each of them runs out of
+# steps before it runs out of leads. Each tool here is a BATCH of an existing question, computed in
+# the backend, and none of them can disagree with the single-question version because they go through
+# the same `_matching` / `_aggregate` / store accessors.
+#
+# They are also what makes a WORKER agent (ai/subagents.py) worth delegating to: a worker has ten
+# steps, so "twelve counts in one call" is the difference between an answer and a partial one.
+
+BATCH_MAX = 12          # queries one batch_query call may carry
+PROFILE_MAX = 10        # entities one profile_entities call may carry
+PIVOT_ENTITIES = 8      # entities find_related_events will pivot on
+MIN_AGENTS = 2          # delegate_investigation refuses fewer — see ai/subagents.py
+MAX_AGENT_TASKS = 6
+# `delegate_investigation` runs several agents, each with a tool loop of its own, so the 90 s that is
+# right for one query would abandon the call while they were still working and throw away every report
+# at once. The agents size their own clock from what is left of THIS factor (subagents.run_tasks).
+DELEGATE_BUDGET_FACTOR = 4.0
+
+
+def _entity_query(value: str) -> str:
+    """`entity:"..."` for one value, escaped by the graph's own definition of that query.
+
+    `GraphBuilder.node_query` is the single implementation: a colon inside the value (a URL, an
+    ip:port) splits into another field:value term if it is not escaped, so a hand-rolled quote here
+    would silently search for something else. One definition, or the graph and the tools disagree
+    about what "this entity's events" means.
+    """
+    from ..graph import GraphBuilder
+    return GraphBuilder.node_query(value)
+
+
+def _phrase(value: str) -> str:
+    """The FREE-TEXT form of a value: a quoted phrase, which reaches raw (phase 1) lines too."""
+    return '"' + value.replace(chr(92), chr(92) * 2).replace(chr(34), chr(92) + chr(34)) + '"'
+
+
+@tool("workspace_overview",
+      "ORIENT IN ONE CALL — what is in this workspace, what state it is in, and what has already "
+      "fired. Returns the sources with their event counts, parsers, time ranges and whether each is "
+      "still RAW (phase 1, so entity:/field: queries cannot reach it), the pool totals and window, the "
+      "active case, the detection roll-up and the entity-graph findings when those are already built, "
+      "and the enrichment backlog. This replaces the get_case_state + list_sources + list_detections + "
+      "list_graph_findings opening and costs one step instead of four. It NEVER builds anything: if "
+      "the detection roll-up or the graph is still building it says so in `omitted` rather than "
+      "waiting or returning an empty list — an omission is not an absence of evidence.",
+      {"sources": {"type": "integer", "description": "source rows to return, 1-100 (default 25), largest first"},
+       "detections": {"type": "integer", "description": "detection rules to return, 1-40 (default 10)"}})
+def _workspace_overview(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
+    from .. import anomalies as anomalies_mod
+    from .. import graph_findings
+    store = _store()
+    c = store.case()
+    n_src = _int(args, "sources", 25, 1, 100)
+    n_det = _int(args, "detections", 10, 1, 40)
+
+    rows: list[dict[str, Any]] = []
+    raw_events = 0
+    for src, origin in [(s, "case") for s in c.sources] + [(s, "library") for s in c.librarySources]:
+        enrich = str(getattr(src, "enrich", "") or "enriched")
+        interpreted = enrich == "enriched"
+        if not interpreted:
+            raw_events += int(src.events or 0)
+        rows.append({"id": src.id, "file": src.file, "parser": src.parser, "events": int(src.events or 0),
+                     "state": src.state, "origin": origin, "enrich": enrich,
+                     "interpreted": interpreted,
+                     "range": list(src.range) if src.range else None,
+                     **({"error": _s(getattr(src, "error", ""), 200)} if getattr(src, "error", "") else {})})
+    rows.sort(key=lambda r: -r["events"])
+    # The pool's window is the union of the sources' own ranges — O(sources), never a walk of the pool.
+    lo = min((r["range"][0] for r in rows if r["range"]), default=None)
+    hi = max((r["range"][1] for r in rows if r["range"]), default=None)
+
+    out: dict[str, Any] = {
+        "pool": {"events": c.poolEventCount, "sources": len(rows), "caseSources": len(c.sources),
+                 "librarySources": len(c.librarySources), "loading": c.poolLoading,
+                 "first": lo, "last": hi},
+        "sources": rows[:n_src],
+        "moreSources": max(0, len(rows) - n_src),
+        "case": {"hasCase": not c.pending, "caseId": c.id, "name": c.name,
+                 "summary": _s(getattr(store, "summary", ""), 600), "caseSetSize": len(c.caseSet),
+                 "notes": len(c.notes), "eventCount": c.eventCount},
+    }
+    omitted: list[dict[str, Any]] = []
+    try:
+        enr = c.enrichment
+        out["enrichment"] = {"counts": dict(getattr(enr, "counts", {}) or {}),
+                             "pending": getattr(enr, "pending", 0), "outstanding": getattr(enr, "outstanding", 0)}
+    except Exception:  # noqa: BLE001 — orientation must never fail on a reporting detail
+        pass
+    if raw_events:
+        out["coverage"] = {
+            "uninterpretedSources": [r["file"] for r in rows if not r["interpreted"]][:20],
+            "uninterpretedEvents": raw_events,
+            "note": "these sources are still RAW: their lines are in the pool and fully searchable by "
+                    "FREE TEXT, but they carry no parsed fields and no extracted entities, so "
+                    "entity:\"…\" and field:value cannot match them. Use the bare value as free text "
+                    "for any coverage question, and never call something absent on an entity: query "
+                    "alone while this list is non-empty."}
+
+    # NON-BLOCKING, both of them. This is the first call of a run and the rule the whole tool layer is
+    # built on (see `entity_profile`) is that the first call may never start or wait for a derived
+    # build: at 11 M events that is minutes with the run parked at step 1.
+    dets = anomalies_mod.ready()
+    if dets is None:
+        st = anomalies_mod.status() or {}
+        omitted.append({"what": "detections", "state": st.get("state"), "pct": st.get("pct"),
+                        "note": st.get("note") or "the detection roll-up is still building",
+                        "instead": "call list_detections later in the run (it waits, bounded), or "
+                                   "search sev:critical OR sev:high directly"})
+    else:
+        out["detections"] = [{"ruleId": a.ruleId, "name": a.name, "sev": a.sev, "hits": a.hits,
+                              "firstSeen": a.firstSeen, "lastSeen": a.lastSeen,
+                              "sampleEventIds": [e.id for e in a.sample][:3]} for a in dets[:n_det]]
+        out["detectionRules"] = len(dets)
+    # WHOLE POOL, always: this is the orientation call, and the case set is a curated subset that
+    # answers a different question (get_case_set does). The tool declares no `scope` parameter, and
+    # `validate_args` refuses anything it does not declare, so there is nothing to read from `args`.
+    gf, gstat = graph_findings.ready("all")
+    if gf is None:
+        omitted.append({"what": "graphFindings", "state": (gstat or {}).get("state"),
+                        "note": "the entity graph has not been built for this pool yet",
+                        "instead": "call list_graph_findings later (it waits, bounded); entity_profile "
+                                   "and aggregate_events need no graph at all"})
+    else:
+        out["graphFindings"] = {"total": len(gf),
+                                "top": [{"rule": f.name, "sev": f.sev, "entity": f.nodeValue,
+                                         "what": _s(f.summary, 200)} for f in gf[:8]]}
+    if omitted:
+        out["omitted"] = omitted
+    return out
+
+
+@tool("batch_query",
+      "ASK UP TO TWELVE QUESTIONS IN ONE CALL — the fastest way to explore. Each entry is a DSL query "
+      "with a label; you get back the EXACT number of matching events for each, and a grouped "
+      "breakdown for any entry that names a `groupBy`. This is how you test a hypothesis against a "
+      "list of candidates (twelve accounts, twelve ports, twelve sources, a rule's condition against "
+      "each log) without spending twelve model turns on it. A query that is malformed comes back with "
+      "its own `error` and the other entries still answer — one bad query never costs you the batch. "
+      "Counts are computed over every match, never sampled. " + DSL_HELP,
+      {"queries": {"type": "array",
+                   "description": f"1-{BATCH_MAX} questions. Each: {{label, query, groupBy?, top?}} — "
+                                  "`label` is your own name for it and comes back on the result; "
+                                  "`groupBy` is any field name (source, host, user, sev, detection, "
+                                  "entity, or a parsed field) and adds a count-descending breakdown.",
+                   "items": {"type": "object", "properties": {
+                       "label": {"type": "string"},
+                       "query": {"type": "string"},
+                       "groupBy": {"type": "string"},
+                       "top": {"type": "integer", "description": "groups to return for this entry (default 10)"}}}},
+       "sources": {"type": "string", "description": "comma-separated source ids applied to EVERY query"},
+       "sev": {"type": "string"}, "from": {"type": "string"}, "to": {"type": "string"},
+       "scope": {"type": "string", "enum": ["all", "case"]}},
+      ["queries"])
+def _batch_query(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
+    raw = args.get("queries")
+    if not isinstance(raw, list) or not raw:
+        raise ToolError("queries must be a non-empty array of {label, query, groupBy?} objects.")
+    if len(raw) > BATCH_MAX:
+        raise ToolError(f"batch_query takes at most {BATCH_MAX} queries per call — you sent {len(raw)}. "
+                        "Split them across two calls (you can send both calls in the same reply and "
+                        "they will run at the same time).")
+    shared = {k: args.get(k) for k in ("sources", "sev", "from", "to", "scope") if args.get(k) is not None}
+    results: list[dict[str, Any]] = []
+    for i, item in enumerate(raw):
+        # Interruptible between entries: twelve queries over a large pool is real work, and the whole
+        # point of ctx.check() is that a Stop lands inside a tool rather than after it.
+        ctx.check("batch_query")
+        if not isinstance(item, dict):
+            results.append({"label": f"#{i + 1}", "error": "each entry must be an object with a `query`"})
+            continue
+        label = _s(item.get("label"), 120) or f"#{i + 1}"
+        q = _s(item.get("query"), 2000)
+        group = _s(item.get("groupBy"), 80).strip()
+        try:
+            call = {**shared, "query": q}
+            if group:
+                res = _matching(call)
+                groups, distinct, missing = _aggregate(res["rows"], group)
+                top = max(1, min(MAX_GROUPS, int(item.get("top") or 10)))
+                results.append({"label": label, "query": q, "total": res["total"], "groupBy": group,
+                                "distinctGroups": distinct, "withoutField": missing,
+                                "groups": [{"value": g["value"], "count": g["count"]} for g in groups[:top]],
+                                "truncated": distinct > top, **_cost(res)})
+            else:
+                res = _matching(call, cap=1)
+                results.append({"label": label, "query": q, "total": res["total"], **_cost(res)})
+        except ToolError as exc:
+            # A malformed query is the common case and it must not cost the other eleven answers.
+            results.append({"label": label, "query": q, "error": str(exc)})
+        except Exception as exc:  # noqa: BLE001
+            results.append({"label": label, "query": q, "error": f"{type(exc).__name__}: {exc}"})
+    hits = [r for r in results if r.get("total")]
+    return {"queries": len(results), "withMatches": len(hits),
+            "results": results,
+            "note": "counts are exact over every match, not sampled. A query with total 0 matched "
+                    "nothing — check it is not a raw-source coverage problem before calling it absence "
+                    "(see workspace_overview → coverage)."}
+
+
+def _entity_row(value: str, args: dict[str, Any], samples: int) -> dict[str, Any]:
+    """One compact entity profile: what the extractor found, what the raw text says, and where."""
+    exact = _matching({**args, "query": _entity_query(value)})
+    rows = exact["rows"]
+    row: dict[str, Any] = {"value": value, "extractedEvents": exact["total"]}
+    if rows:
+        srcs, _n, _m = _aggregate(rows, "source")
+        hosts, _n, _m = _aggregate(rows, "host")
+        users, _n, _m = _aggregate(rows, "user")
+        sevs, _n, _m = _aggregate(rows, "sev")
+        dets, ndet, _m = _aggregate(rows, "detection")
+        stamped = [e.ts for e in rows if e.ts]
+        row.update({
+            "first": min(stamped) if stamped else None,
+            "last": max(stamped) if stamped else None,
+            "sources": [{"value": g["value"], "count": g["count"]} for g in srcs[:4]],
+            "hosts": [{"value": g["value"], "count": g["count"]} for g in hosts[:4]],
+            "users": [{"value": g["value"], "count": g["count"]} for g in users[:4]],
+            "severity": {g["value"]: g["count"] for g in sevs},
+            "detections": [{"ruleId": g["value"], "count": g["count"]} for g in dets[:4]],
+            "detectionRules": ndet,
+            "sampleEventIds": [e.id for e in rows[:samples]],
+        })
+    # The free-text count is the COVERAGE half and it is the whole reason this tool is not just N
+    # count_events calls: on a raw-first workspace the extracted count is a count of the INTERPRETED
+    # subset, and reporting it as the total is the silent-omission bug this project keeps fighting.
+    mention = _matching({**args, "query": _phrase(value)}, cap=1)
+    row["mentions"] = mention["total"]
+    if mention["total"] > exact["total"]:
+        row["coverageNote"] = (f"{mention['total']} lines MENTION this value but only "
+                               f"{exact['total']} have it as an extracted entity — the difference is "
+                               "in sources that are still raw. Use the free-text form for coverage.")
+    return row
+
+
+@tool("profile_entities",
+      "PROFILE UP TO TEN ENTITIES IN ONE CALL — triage a list of addresses, accounts, hosts or hashes "
+      "without a call each. For every value: the exact number of events that carry it as an extracted "
+      "entity, the number of lines that MENTION it (which is larger wherever sources are still raw, "
+      "and that gap is reported), first and last seen, the top sources / hosts / users, the severity "
+      "mix, which detection rules fired on it, and citable sample event ids. Use entity_profile "
+      "(singular) when you want ONE entity in full — its histogram, its graph relations and more "
+      "sample lines. Use this when you have a LIST and need to know which of them matter.",
+      {"values": {"type": "array", "items": {"type": "string"},
+                  "description": f"1-{PROFILE_MAX} entity values exactly as they appear in the logs — "
+                                 "an IP, a user, a host, a process, a file path, a hash, a domain"},
+       "samples": {"type": "integer", "description": "sample event ids per entity, 0-5 (default 3)"},
+       "sources": {"type": "string"}, "sev": {"type": "string"},
+       "from": {"type": "string"}, "to": {"type": "string"},
+       "scope": {"type": "string", "enum": ["all", "case"]}},
+      ["values"])
+def _profile_entities(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
+    raw = args.get("values")
+    if isinstance(raw, str):
+        raw = [v.strip() for v in raw.split(",")]
+    if not isinstance(raw, list) or not raw:
+        raise ToolError("values must be a non-empty array of entity values.")
+    values = [_s(v, 200).strip() for v in raw if _s(v, 200).strip()]
+    if not values:
+        raise ToolError("values must be a non-empty array of entity values.")
+    if len(values) > PROFILE_MAX:
+        raise ToolError(f"profile_entities takes at most {PROFILE_MAX} values per call — you sent "
+                        f"{len(values)}. Send the rest in a second call (both calls in one reply run "
+                        "at the same time).")
+    samples = _int(args, "samples", 3, 0, 5)
+    shared = {k: args.get(k) for k in ("sources", "sev", "from", "to", "scope") if args.get(k) is not None}
+    out: list[dict[str, Any]] = []
+    for v in values:
+        ctx.check("profile_entities")
+        try:
+            out.append(_entity_row(v, shared, samples))
+        except ToolError as exc:
+            out.append({"value": v, "error": str(exc)})
+        except Exception as exc:  # noqa: BLE001
+            out.append({"value": v, "error": f"{type(exc).__name__}: {exc}"})
+    present = [r for r in out if (r.get("extractedEvents") or 0) or (r.get("mentions") or 0)]
+    return {"profiled": len(out), "present": len(present), "entities": out,
+            "note": "an entity with extractedEvents 0 AND mentions 0 does not appear in this workspace "
+                    "at all. One with mentions > extractedEvents appears in a source that is still raw "
+                    "— cite it from the free-text query, not the entity: one."}
+
+
+@tool("find_related_events",
+      "WHAT ELSE WAS HAPPENING — the pivot, in one call. Give it the event ids you already care about "
+      "and it takes the entities those events carry (addresses, accounts, hosts, processes, hashes), "
+      "widens the time window around them, and reports what else in the WHOLE pool shares those "
+      "entities: which logs, which hosts, which users, which other entities co-occur, how the activity "
+      "is distributed in time, and sample ids to read. This is the call that turns one alert into an "
+      "investigation, and it replaces the get_event / read its entities / search each one sequence.",
+      {"eventIds": {"type": "array", "items": {"type": "string"},
+                    "description": "the events to pivot FROM, 1-40 of them"},
+       "windowMinutes": {"type": "integer",
+                         "description": "how far either side of those events to look, 1-10080 (default 30)"},
+       "entities": {"type": "array", "items": {"type": "string"},
+                    "description": "pivot on THESE values instead of everything the events carry — "
+                                   "use it when the events name a busy entity you do not care about"},
+       "limit": {"type": "integer", "description": "sample events to return, 0-25 (default 8)"},
+       "scope": {"type": "string", "enum": ["all", "case"]}},
+      ["eventIds"])
+def _find_related_events(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
+    from ..store import _iso_to_epoch
+    from math import isfinite
+    store = _store()
+    ids = _ids(args, "eventIds", cap=40)
+    if not ids:
+        raise ToolError("eventIds is required — give the events you want to pivot from.")
+    seeds = [store.event(i) for i in ids]
+    missing = [i for i, e in zip(ids, seeds) if e is None]
+    seeds = [e for e in seeds if e is not None]
+    if not seeds:
+        raise ToolError("none of those event ids exist in this workspace: " + ", ".join(ids[:10]) +
+                        ". Search for the real ids first — never pass ids you have not seen returned.")
+
+    want = [_s(v, 200).strip() for v in (args.get("entities") or []) if _s(v, 200).strip()]
+    if want:
+        pivots = want[:PIVOT_ENTITIES]
+    else:
+        # Rank the seeds' entities by how many of the SEEDS carry them: the value that ties the seed
+        # events together is the one worth pivoting on, not whichever happened to be extracted first.
+        tally: dict[str, int] = {}
+        for e in seeds:
+            for v in e.entities:
+                tally[v] = tally.get(v, 0) + 1
+        pivots = [v for v, _n in sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))][:PIVOT_ENTITIES]
+    if not pivots:
+        return {"seeds": len(seeds), "pivots": [], "missing": missing,
+                "note": "these events carry NO extracted entities — they are from a source that is "
+                        "still in phase 1 (raw). There is nothing to pivot on structurally. Read the "
+                        "lines with get_events(include='raw'), pick the values out of the text "
+                        "yourself, and search for them as free text (or enrich the source first)."}
+
+    span = [_iso_to_epoch(e.ts) for e in seeds]
+    span = [t for t in span if isfinite(t)]
+    minutes = _int(args, "windowMinutes", 30, 1, 10080)
+    frm = to = None
+    if span:
+        pad = minutes * 60
+        frm = datetime.fromtimestamp(min(span) - pad, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        to = datetime.fromtimestamp(max(span) + pad, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    query = " OR ".join(_entity_query(v) for v in pivots)
+    call: dict[str, Any] = {"query": query, "scope": _scope(args)}
+    if frm:
+        call["from"], call["to"] = frm, to
+    res = _matching(call)
+    rows = res["rows"]
+    seed_ids = {e.id for e in seeds}
+    others = [e for e in rows if e.id not in seed_ids]
+
+    def top(field: str, n: int = 6) -> list[dict[str, Any]]:
+        groups, _d, _m = _aggregate(others, field)
+        return [{"value": g["value"], "count": g["count"]} for g in groups[:n]]
+
+    co, n_co, _m = _aggregate(others, "entity")
+    pivot_set = set(pivots)
+    limit = _int(args, "limit", 8, 0, 25)
+    step = max(1, len(others) // limit) if limit and len(others) > limit else 1
+    picked = others[::step][:limit] if limit else []
+    out = {
+        "seeds": len(seeds), "pivots": pivots,
+        "window": {"from": frm, "to": to, "paddedByMinutes": minutes} if frm else
+                  {"note": "the seed events have no parsed timestamp, so the whole pool was searched"},
+        "query": query,
+        "relatedEvents": max(0, res["total"] - len(seed_ids & {e.id for e in rows})),
+        "bySource": top("source"), "byHost": top("host"), "byUser": top("user"),
+        "bySeverity": {g["value"]: g["count"] for g in (_aggregate(others, "sev")[0])},
+        "byDetection": top("detection", 5),
+        "coOccurringEntities": [{"value": g["value"], "count": g["count"]}
+                                for g in co if g["value"] not in pivot_set][:12],
+        "distinctCoOccurring": max(0, n_co - len(pivot_set)),
+        "timeline": _histogram(others, "auto", 24) if others else None,
+        "sampleEventIds": [e.id for e in picked],
+        **_cost(res),
+    }
+    if missing:
+        out["missingEventIds"] = missing
+    if picked:
+        raw_cap, field_cap = _detail_caps(len(picked))
+        out["rows"] = [_row(r, {"raw"}, raw_cap, field_cap) for r in store.stamp_membership(picked)]
+    return _fit_rows(out)
+
+
+@tool("source_profile",
+      "WHAT IS ACTUALLY IN THIS LOG FILE — one call per source instead of four. Returns the source's "
+      "parser, state, exact event count and time range, which parsed fields its events carry and the "
+      "commonest values of each, the severity mix, the detection rules that fired inside it, an "
+      "activity histogram and a few sample lines to read. Use it before querying a file you have not "
+      "read: guessing field names costs more steps than asking. Field facets are taken from a bounded "
+      "scan and `fieldsSampled` says how many events it covered; every COUNT is exact.",
+      {"sourceId": {"type": "string", "description": "the source id from list_sources / workspace_overview"},
+       "fields": {"type": "integer", "description": "fields to return, 1-40 (default 18)"},
+       "samples": {"type": "integer", "description": "sample log lines to return, 0-10 (default 4)"}},
+      ["sourceId"])
+def _source_profile(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
+    from ..routers.events import list_fields
+    store = _store()
+    sid = _s(args.get("sourceId"), 120).strip()
+    src = store.sources.get(sid)
+    if src is None:
+        known = ", ".join(list(store.sources)[:20])
+        raise ToolError(f"no source with id {sid!r}. Call workspace_overview or list_sources for the "
+                        f"real ids. Known ids include: {known}")
+    facets = call_route(list_fields, q="", sources=sid, limit=_int(args, "fields", 18, 1, 40), values=6)
+    res = _matching({"query": "", "sources": sid})
+    rows = res["rows"]
+    sevs, _d, _m = _aggregate(rows, "sev")
+    dets, ndet, _m = _aggregate(rows, "detection")
+    hosts, nhost, _m = _aggregate(rows, "host")
+    users, nuser, _m = _aggregate(rows, "user")
+    n = _int(args, "samples", 4, 0, 10)
+    picked: list[Any] = []
+    if n and rows:
+        step = max(1, len(rows) // n)
+        picked = rows[::step][:n]
+    raw_cap, field_cap = _detail_caps(len(picked) or 1)
+    enrich = str(getattr(src, "enrich", "") or "enriched")
+    out: dict[str, Any] = {
+        "source": {"id": src.id, "file": src.file, "parser": src.parser, "state": src.state,
+                   "enrich": enrich, "events": int(src.events or 0),
+                   "range": list(src.range) if src.range else None,
+                   **({"error": _s(getattr(src, "error", ""), 300)} if getattr(src, "error", "") else {})},
+        "matched": res["total"],
+        "fields": [{"name": f["name"], "count": f["count"], "topValues": f["topValues"][:6]}
+                   for f in facets["fields"]],
+        "fieldsSampled": facets["sampled"],
+        "severity": {g["value"]: g["count"] for g in sevs},
+        "hosts": [{"value": g["value"], "count": g["count"]} for g in hosts[:8]], "distinctHosts": nhost,
+        "users": [{"value": g["value"], "count": g["count"]} for g in users[:8]], "distinctUsers": nuser,
+        "detections": [{"ruleId": g["value"], "count": g["count"]} for g in dets[:8]],
+        "detectionRules": ndet,
+        "timeline": _histogram(rows, "auto", 24) if rows else None,
+        **_cost(res),
+    }
+    if enrich != "enriched":
+        out["coverage"] = ("this source is RAW (phase 1): its lines are searchable by FREE TEXT only. "
+                           "It has no parsed fields and no extracted entities, which is why `fields` "
+                           "is empty or thin — that is not a parser failure. Query it with free text, "
+                           "or enrich it before using field:/entity: terms against it.")
+    if picked:
+        out["rows"] = [_row(r, {"raw", "fields"}, raw_cap, field_cap)
+                       for r in store.stamp_membership(picked)]
+    return _fit_rows(out)
+
+
+# ==================================================================== DELEGATION
+@tool("delegate_investigation",
+      "RUN SEVERAL ANALYST AGENTS AT THE SAME TIME, each on its own question, and get their findings "
+      "back. You are the lead: you decide the questions, you keep the case and you do all the writing. "
+      "Each agent has the READ tools and a real tool loop of its own, so it can search, aggregate, "
+      "profile and read lines on its own initiative — it is not a single query. Delegate whenever the "
+      "objective breaks into parts that do not depend on each other: one agent per source, per suspect, "
+      "per question, or one to chase a lead while you take another. TWO IS THE MINIMUM — one agent is "
+      "just a slower way of making the call yourself. Give each a question it can answer alone, in its "
+      "own words, and put anything it needs to know in `focus`: an agent cannot see this conversation. "
+      "What comes back is a model's PROSE, not a tool result — the event ids in it are verified against "
+      "the pool for you, the reasoning is not, so re-read anything decisive with get_events before you "
+      "write a finding on it.",
+      {"tasks": {"type": "array",
+                 "description": f"{MIN_AGENTS}-{MAX_AGENT_TASKS} independent questions. Each: "
+                                "{name, objective, focus?} — `name` is a short label you will see in "
+                                "the result ('firewall', 'svc_deploy', 'timeline'), `objective` is the "
+                                "whole question in plain English, `focus` is context the agent cannot "
+                                "otherwise know (what you already established, which ids, which window).",
+                 "items": {"type": "object", "properties": {
+                     "name": {"type": "string"},
+                     "objective": {"type": "string"},
+                     "focus": {"type": "string"}}}}},
+      ["tasks"],
+      budget_factor=DELEGATE_BUDGET_FACTOR, solo=True)
+def _delegate_investigation(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
+    from ..config import get_settings
+    from .client import LLMClient
+    from . import subagents
+    from .investigator import build_context, parallel_limit
+
+    raw = args.get("tasks")
+    if not isinstance(raw, list):
+        raise ToolError("tasks must be an array of {name, objective, focus?} objects.")
+    tasks = [t for t in raw if isinstance(t, dict) and _s(t.get("objective"), 4000).strip()]
+    if len(tasks) < MIN_AGENTS:
+        # THE FLOOR IS THE FEATURE. One worker costs a whole provider round trip, returns second-hand
+        # prose you then have to verify, and saves nothing — the lead could have made the calls itself
+        # in the same time. Refusing is more useful than running it badly.
+        raise ToolError(
+            f"delegate_investigation needs at least {MIN_AGENTS} tasks and you sent "
+            f"{len(tasks)}. Delegation is for work that can happen AT THE SAME TIME: one agent is "
+            "slower than doing it yourself, because you would still have to verify what it says. "
+            "Either split this into two or more questions that do not depend on each other (per "
+            "source, per suspect, per time window, per question) and call again, or just make the "
+            "tool calls yourself — several independent reads in one reply already run in parallel.")
+    if len(tasks) > MAX_AGENT_TASKS:
+        raise ToolError(f"delegate_investigation takes at most {MAX_AGENT_TASKS} tasks per call — you "
+                        f"sent {len(tasks)}. Delegate the most valuable {MAX_AGENT_TASKS} now and the "
+                        "rest once you have read what comes back; their answers will usually change "
+                        "what the next questions should be.")
+    settings = get_settings()
+    client = ctx.client or LLMClient.from_settings(settings.ai)
+    if not getattr(client, "configured", False):
+        raise ToolError("no AI provider is configured, so there is nothing to delegate to. Do the work "
+                        "yourself with the read tools.")
+    width = subagents.max_agents(parallel_limit(settings.ai))
+    store = _store()
+    context_block = build_context(store)
+    started = time.perf_counter()
+    # NOT drained here. The progress this records is what `investigator` turns into live status events
+    # WHILE it waits for this call, so clearing it on the way out would throw away exactly the thing
+    # the analyst asked to be able to see. It is bounded (subagents.note caps the list) and the run
+    # clears its own entry when it finishes, which also covers a caller that never drains at all (MCP).
+    results = subagents.run_blocking(tasks, client=client, ctx=ctx, context_block=context_block,
+                                     run_id=ctx.run_id, width=width)
+    took = int((time.perf_counter() - started) * 1000)
+    early = [r["agent"] for r in results if r.get("endedEarly") or r.get("error")]
+    out = {
+        "agents": len(results), "ranInParallel": min(width, len(results)), "tookMs": took,
+        "toolCallsTotal": sum(int(r.get("toolCalls") or 0) for r in results),
+        "results": results,
+        "note": "each `report` is one agent's OWN WORDS after doing its own research — read it as a "
+                "colleague's note, not as a tool result. Every event id in a report has been checked "
+                "against this workspace (invented ones are listed in `droppedCitations` and must not "
+                "be cited). Re-read anything decisive with get_events before you write it to the case, "
+                "and say in your report what you delegated and what each agent found.",
+    }
+    if early:
+        out["incomplete"] = early
+        out["incompleteNote"] = ("these agents did not finish their question (see `endedEarly` / "
+                                 "`error`). Their findings are real but partial: delegate the "
+                                 "remainder again, more narrowly, or finish it yourself.")
     return out
 
 
