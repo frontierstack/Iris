@@ -908,6 +908,10 @@ class AiTranscriptEntry(BaseModel):
     ok: Optional[bool] = None
     summary: str = ""
     tookMs: int = 0
+    # How many calls were dispatched TOGETHER in this one's lane (1 = it ran alone). The panel draws
+    # "N in parallel" from it, and it is persisted so a reloaded transcript says the same thing the
+    # live run did — an indication that exists only in the live stream is not an indication.
+    lane: int = 1
     # When this entry was last CHANGED, on the same counter as `seq`. A tool entry is patched in place
     # when its result lands, which keeps its `seq` — so `?since=<lastSeq>` never resent it and a polling
     # client (any tab that is not the one streaming) kept the card's spinner turning for the rest of the

@@ -28,6 +28,7 @@ import inspect
 import os
 import re
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
@@ -122,6 +123,18 @@ class ToolError(Exception):
     """A tool refused the call. The message goes back to the model as the tool result."""
 
 
+# The call in flight, per TASK rather than per RunContext. Two reads of one turn now run at the same
+# time on one shared context (see investigator._lanes), and `deadline`/`tool_name` are the only state
+# on it that belongs to ONE call: written as plain fields, the second dispatch overwrote the first, so
+# a handler calling ctx.check() read its neighbour's deadline and refused citing its neighbour's name.
+# A ContextVar set inside each call's own Task is private to that task, and `asyncio.to_thread` copies
+# the context into the worker thread, so a handler sees its own budget whichever thread it is on. The
+# dataclass fields stay and are still written: a tool called directly (tests, MCP) has no Task of its
+# own, and anything reading ctx.tool_name keeps working.
+_CALL_DEADLINE: ContextVar[float] = ContextVar("iris_tool_deadline", default=-1.0)
+_CALL_NAME: ContextVar[str] = ContextVar("iris_tool_name", default="")
+
+
 @dataclass
 class RunContext:
     """State shared by every tool call of one investigation."""
@@ -146,8 +159,20 @@ class RunContext:
     # ---------------------------------------------------------------- interruption
     def begin_call(self, name: str, budget: Optional[float] = None) -> None:
         """Start the clock for one tool call. Called by the investigator before it dispatches."""
+        deadline = time.monotonic() + float(budget if budget is not None else tool_budget_seconds())
         self.tool_name = name
-        self.deadline = time.monotonic() + float(budget if budget is not None else tool_budget_seconds())
+        self.deadline = deadline
+        # ...and the same two values where a CONCURRENT sibling cannot overwrite them.
+        _CALL_NAME.set(name)
+        _CALL_DEADLINE.set(deadline)
+
+    def _my_deadline(self) -> float:
+        """This call's deadline: the task-local one when there is one, else the shared field."""
+        mine = _CALL_DEADLINE.get()
+        return mine if mine >= 0.0 else self.deadline
+
+    def _my_name(self) -> str:
+        return _CALL_NAME.get() or self.tool_name
 
     def stopping(self) -> bool:
         """True once the analyst has pressed Stop. Safe to call from a handler thread."""
@@ -158,19 +183,21 @@ class RunContext:
 
     def remaining(self) -> float:
         """Seconds left in this call's budget. Unset deadline = the default budget, not infinity."""
-        if not self.deadline:
+        deadline = self._my_deadline()
+        if not deadline:
             return float(tool_budget_seconds())
-        return max(0.0, self.deadline - time.monotonic())
+        return max(0.0, deadline - time.monotonic())
 
     def check(self, what: str = "") -> None:
         """Cooperative checkpoint: raise a ToolError if the analyst stopped or the budget is spent.
 
         A handler that loops or waits calls this. It is the ONLY way a stop can land inside a tool —
         killing the thread is not an option (see the module note on `TOOL_SECONDS_DEFAULT`)."""
-        label = what or self.tool_name or "this call"
+        label = what or self._my_name() or "this call"
         if self.stopping():
             raise ToolError(f"stopped by the analyst while {label} was running — nothing was left half done.")
-        if self.deadline and time.monotonic() >= self.deadline:
+        deadline = self._my_deadline()
+        if deadline and time.monotonic() >= deadline:
             raise ToolError(f"{label} ran out of its time budget ({tool_budget_seconds()}s) and was "
                             "abandoned cleanly. Try a narrower call.")
 

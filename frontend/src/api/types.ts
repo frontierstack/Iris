@@ -497,6 +497,12 @@ export interface AiTranscriptEntry {
   id: string; name: string; args: Record<string, unknown>; writes: boolean;
   ok: boolean | null; summary: string; tookMs: number;
   /**
+   * How many calls were dispatched TOGETHER with this one (1 = it ran alone). Independent READS of one
+   * model turn run at the same time; a write is a barrier and always has lane 1. Persisted, so a
+   * reloaded conversation shows the same thing the live run did.
+   */
+  lane?: number;
+  /**
    * When this entry was last CHANGED, on the same counter as `seq`. A tool entry is patched in place
    * when its result lands, so `?since=<lastSeq>` alone never resent it and the card kept spinning in
    * every polling tab. Merge by `seq` (the entry keeps its place); this only decides what is SENT.
@@ -531,10 +537,10 @@ export type AiRunEvent =
      `budgetNotice` the "leave room to write it up" one and `documentCheck` the "you recorded nothing in
      the case" one. All three are ordinary status lines; the flags exist so the panel can tell a nudge
      from a step announcement. */
-  | { type: 'status'; text: string; compactions?: number; droppedMessages?: number; checkIn?: number; budgetNotice?: boolean; documentCheck?: boolean; recordNudge?: number; summaryCheck?: boolean }
+  | { type: 'status'; text: string; compactions?: number; droppedMessages?: number; checkIn?: number; budgetNotice?: boolean; documentCheck?: boolean; recordNudge?: number; summaryCheck?: boolean; parallel?: number }
   | { type: 'step'; step: number; elapsedSec: number }
   | { type: 'delta'; text: string; step: number }
-  | { type: 'tool_call'; id: string; name: string; arguments: Record<string, unknown>; step: number }
+  | { type: 'tool_call'; id: string; name: string; arguments: Record<string, unknown>; step: number; lane?: number }
   | { type: 'tool_result'; id: string; name: string; ok: boolean; tookMs: number; summary: string; data: unknown }
   | { type: 'write'; action: AiAction }
   /** contextCeiling: the provider refused the transcript for its size and Iris folded it — this run now

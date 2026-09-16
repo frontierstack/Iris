@@ -1209,7 +1209,7 @@ type AiRunEvent =
       (it fires on a BARREN STREAK, never on the call count: a run still finding things is never
       interrupted); budgetNotice = the "leave room to write it up" one; documentCheck = the "you
       recorded nothing in the case" one. All three are ordinary status lines. */
-  | { type:'status'; text:string; checkIn?:number; budgetNotice?:boolean; documentCheck?:boolean;
+  | { type:'status'; text:string; parallel?:number; checkIn?:number; budgetNotice?:boolean; documentCheck?:boolean;
       recordNudge?:number; summaryCheck?:boolean }
   /** recordNudge = the "record as you go" nudge: N productive reads and nothing written to the case yet — record
       what is solid, then CONTINUE (never a request to finish; at most 3 per run). summaryCheck = the end-of-run
@@ -1217,8 +1217,20 @@ type AiRunEvent =
       wrote something and no add_note / update_case landed). */
   | { type:'step'; step:number; elapsedSec:number }
   | { type:'delta'; text:string; step:number }                       // the model's prose, streamed
-  | { type:'tool_call'; id:string; name:string; arguments:object; step:number }
+  | { type:'tool_call'; id:string; name:string; arguments:object; step:number; lane:number }
   | { type:'tool_result'; id:string; name:string; ok:boolean; tookMs:number; summary:string; data:unknown }
+  /** LANES. The tool calls of ONE assistant message are dispatched in lanes: consecutive READS share a
+      lane and run AT THE SAME TIME (up to settings.ai.agents, 1-4, the "Parallel tool calls" slider),
+      and a call that WRITES is always a lane of its own, in the position the model emitted it. `lane`
+      is how many were dispatched together with this one (1 = it ran alone) and is persisted on the
+      transcript entry, so a reloaded conversation shows what the live run showed. A `status` carrying
+      `parallel:N` precedes a lane of more than one.
+      Two consequences a client must handle: a `tool_result` arrives in COMPLETION order, not emission
+      order, so match it to its call by `id` and never by position (the panel patches the card in place,
+      which is why one card can resolve while its neighbour still spins); and the tool messages Iris
+      sends BACK to the provider stay in emitted order regardless, because an OpenAI-shaped API matches
+      them to its own tool_calls. Two IDENTICAL reads are never put in one lane — the second is answered
+      from the run's dedupe cache, exactly as when calls ran one at a time. */
   | { type:'write'; action:AiAction }                                // something in the case actually changed
   | { type:'warning'; message:string; ids:string[];                  // cited ids that do not exist, or:
       contextCeiling?:number; compactions?:number; retry?:number;

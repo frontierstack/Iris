@@ -225,8 +225,9 @@ export function Sidebar() {
         {/* The template's identity block. Iris has no user model and is not getting one — one
             analyst, one machine, one evidence pool — so what it states is the WORKSPACE: the build
             that is running and whether the API is answering. */}
+        {/* No monogram. A circled "IR" next to the word Iris is a logo mark by another name, and
+            this app has removed one twice already. */}
         <div className="sidebar__ver">
-          <div className="sidebar__ver-mark" aria-hidden>IR</div>
           <div className="sidebar__ver-text">
             <div className="sidebar__ver-name">Iris {health.data ? `v${health.data.version}` : ''}</div>
             <div className={cx('sidebar__ver-role', !online && 'sidebar__ver-role--off')}>{online ? 'API online' : 'API unreachable'}</div>

@@ -521,6 +521,83 @@ def build_context(store: Any, fresh: bool = False) -> str:
 # same canonical form, or a call the cache misses could still be refused as a repeat (or the reverse).
 
 
+# How many tool calls of one turn may be in flight at once. The analyst sets it (settings.ai.agents,
+# the "Parallel tool calls" slider); the cap is a real bound, not a guess: every concurrent call holds
+# a worker thread and an O(pool) handler's worth of memory, and the point of the feature is the four
+# independent reads a model actually asks for, not a fan-out.
+MAX_PARALLEL_CAP = 4
+DEFAULT_PARALLEL = 3
+
+
+def parallel_limit(settings_ai: Any = None) -> int:
+    """The analyst's fan-out, clamped. 1 restores the old strictly-serial behaviour exactly."""
+    raw = getattr(settings_ai, "agents", DEFAULT_PARALLEL) if settings_ai is not None else DEFAULT_PARALLEL
+    try:
+        n = int(raw or DEFAULT_PARALLEL)
+    except (TypeError, ValueError):
+        n = DEFAULT_PARALLEL
+    return max(1, min(MAX_PARALLEL_CAP, n))
+
+
+def _lanes(calls: list[dict[str, Any]], max_parallel: int) -> list[list[dict[str, Any]]]:
+    """Split one turn's tool calls into lanes that may run together, preserving emitted order.
+
+    Consecutive READS share a lane (up to `max_parallel`) because they are independent questions about
+    a pool that is not changing. A WRITE is always a lane of its own: two writes race on case.json and
+    on the run's write budget, the undo list must record them in the order they were asked for, and a
+    write clears the read cache — so a read beside it could answer about a case that has just changed.
+    A read is never moved past a write, so `[read, write, read]` is three lanes, not two.
+    """
+    lanes: list[list[dict[str, Any]]] = []
+    seen: set[str] = set()          # dedupe keys already in the OPEN lane
+    open_read = False
+    width = max(1, int(max_parallel))
+    for call in calls:
+        fn = call.get("function") or {}
+        name = str(fn.get("name") or "")
+        writes = bool(getattr(REGISTRY.get(name), "writes", False))
+        if writes:
+            lanes.append([call])
+            open_read, seen = False, set()
+            continue
+        # TWO IDENTICAL READS ARE NOT TWO QUESTIONS — the second IS the first, and the run's own
+        # dedupe cache is what makes it free. That cache is only consulted when the call is
+        # dispatched, so siblings in one lane would both miss it and both do the work; splitting the
+        # lane on the key restores it exactly. The key is the cache's own (loopguard.call_key), so
+        # the two cannot disagree about what "identical" means.
+        try:
+            key = _cache_key(name, orjson.loads(fn.get("arguments") or "{}"))
+        except Exception:  # noqa: BLE001 — unparsable arguments are refused later, not grouped here
+            key = name + "|" + str(fn.get("arguments") or "")
+        if open_read and key not in seen and len(lanes[-1]) < width:
+            lanes[-1].append(call)
+            seen.add(key)
+        else:
+            lanes.append([call])
+            open_read, seen = True, {key}
+    return lanes
+
+
+def _finish_call(run_id: str, entry: dict[str, Any], result_chars: int) -> list[dict[str, Any]]:
+    """Record one finished call and return the events to stream for it.
+
+    Separated from the dispatch loop because a lane's results arrive in completion order while the
+    transcript the provider sees must stay in emitted order: this writes the entry's `body` for that
+    later ordered pass and streams the analyst's copy now.
+    """
+    payload = entry["result"] if entry["ok"] else {"error": entry["result"]}
+    if entry["repairs"] and isinstance(payload, dict):
+        # the model has to know what it actually sent, or it cannot re-send what was lost
+        payload = {**payload, "argumentsRepaired": entry["repairs"]}
+    body = _clip(orjson.dumps(payload).decode(), result_chars)
+    entry["body"] = body
+    summary = _summarize(entry["name"], entry["ok"], entry["result"])
+    HISTORY.tool_result(run_id, entry["id"], entry["ok"], summary, entry["took"])
+    return [{"type": "tool_result", "id": entry["id"], "name": entry["name"], "ok": entry["ok"],
+             "tookMs": entry["took"], "summary": summary,
+             "data": payload if len(body) <= 4000 else {"truncated": True}}]
+
+
 async def _run_tool(name: str, args: dict[str, Any], ctx: RunContext) -> tuple[bool, Any]:
     t = REGISTRY.get(name)
     if t is None:
@@ -792,6 +869,7 @@ async def investigate(store: Any, objective: str, run_id: str,
     """
     lim = limits(max_steps, max_seconds)
     settings = get_settings()
+    max_parallel = parallel_limit(settings.ai)
     client = client or LLMClient.from_settings(settings.ai)
     # `stopper` is what makes a stop observable INSIDE a tool: a handler that waits on a derived build
     # calls ctx.check() and refuses within 250 ms, instead of the run sitting at `steps: 0` for minutes
@@ -1312,115 +1390,172 @@ async def investigate(store: Any, objective: str, run_id: str,
             # it trips mid-turn the remaining calls are refused (never skipped — every tool_call must
             # be answered or the provider rejects the transcript) and the run goes to the wrap-up.
             guard.begin_turn()
-            for call in calls:
+            # LANES. A turn's tool calls used to run one after another, however many the model asked
+            # for in one reply — so four independent counts over an 11 M-event pool cost four times
+            # one search, in series, while the analyst watched a single spinner. They are independent
+            # questions about a pool that is not changing, so consecutive READS now run AT THE SAME
+            # TIME, up to `max_parallel` (settings.ai.agents).
+            #
+            # A WRITE is a barrier and runs alone, in the position the model emitted it:
+            #   * two writes would race on case.json, on `ctx.writes` and on `ctx.actions` — and the
+            #     undo list has to record them in the order they were asked for, or "revert" replays
+            #     a different investigation;
+            #   * `ctx.record` CLEARS the read cache, because a write can change what a read returns,
+            #     so a read running alongside a write would answer about a case that no longer exists.
+            # Reads are never hoisted past a write either: the lanes preserve emitted order exactly.
+            #
+            # What stays strictly in EMITTED order regardless of who finishes first: the tool messages
+            # appended to the transcript (a provider matches them to its own tool_calls), the guard's
+            # view of the turn, and the barren/record streak counters. Only the waiting overlaps.
+            for lane in _lanes(calls, max_parallel):
                 if runs.stop_requested(run_id):
                     break
-                fn = call.get("function") or {}
-                name = str(fn.get("name") or "")
-                raw_args = fn.get("arguments") or "{}"
-                # A local model writing a long call is the common failure here, and it fails in one
-                # of two ways: the reply is cut off mid-string at the token limit, or a quote/newline
-                # inside a long string was never escaped. Both used to refuse the whole call, which
-                # cost the run a turn and the analyst the write. Try strict JSON, then the mechanical
-                # repair in ai/argrepair.py — and if the repair DROPPED anything, say so loudly:
-                # a write that quietly lands nine of ten links is the silent-omission bug.
-                writes = bool(getattr(REGISTRY.get(name), "writes", False))
-                repairs: list[str] = []
-                parse_err = ""
-                blocked_write = False
-                try:
-                    args = orjson.loads(raw_args) if raw_args.strip() else {}
-                    if not isinstance(args, dict):
-                        raise ValueError("arguments were not a JSON object")
-                except (orjson.JSONDecodeError, ValueError) as exc:
-                    fixed, repairs = repair_arguments(raw_args)
-                    if fixed is None:
+                prepared: list[dict[str, Any]] = []
+                for call in lane:
+                    fn = call.get("function") or {}
+                    name = str(fn.get("name") or "")
+                    raw_args = fn.get("arguments") or "{}"
+                    # A local model writing a long call is the common failure here, and it fails in one
+                    # of two ways: the reply is cut off mid-string at the token limit, or a quote/newline
+                    # inside a long string was never escaped. Both used to refuse the whole call, which
+                    # cost the run a turn and the analyst the write. Try strict JSON, then the mechanical
+                    # repair in ai/argrepair.py — and if the repair DROPPED anything, say so loudly:
+                    # a write that quietly lands nine of ten links is the silent-omission bug.
+                    writes = bool(getattr(REGISTRY.get(name), "writes", False))
+                    repairs: list[str] = []
+                    parse_err = ""
+                    blocked_write = False
+                    try:
+                        args = orjson.loads(raw_args) if raw_args.strip() else {}
+                        if not isinstance(args, dict):
+                            raise ValueError("arguments were not a JSON object")
+                    except (orjson.JSONDecodeError, ValueError) as exc:
+                        fixed, repairs = repair_arguments(raw_args)
+                        if fixed is None:
+                            args, repairs = {}, []
+                            parse_err = _bad_args_message(exc, finish)
+                        else:
+                            args = fixed
+                    # A SALVAGED WRITE IS NOT A WRITE. `argrepair` closes a cut-off blob by dropping the
+                    # incomplete trailing element, which is a reasonable trade for a read — the model can
+                    # see what came back and ask again. For a write it is the silent-omission bug: an
+                    # add_note whose `text` survived and whose trailing `citedEventIds` did not would land
+                    # on the analyst's case as a finding with no evidence behind it. On the run this was
+                    # written for, the salvage happened to come out `{}` and the schema check refused it —
+                    # that was luck. Refuse it here instead, before the handler exists to be called.
+                    if writes and any("CUT OFF" in r for r in repairs):
+                        blocked_write = True
                         args, repairs = {}, []
-                        parse_err = _bad_args_message(exc, finish)
+                        parse_err = ("your arguments were CUT OFF before they finished, and this tool WRITES "
+                                     "to the case — the call was refused whole rather than run with the "
+                                     "missing part guessed at. NOTHING was changed. Send it again smaller: "
+                                     "split a long `links` / `eventIds` / note into several calls and keep "
+                                     "prose short.")
+                    tool_calls += 1
+                    call_id = str(call.get("id") or f"{run_id}-c{tool_calls}")
+                    # Stamped INTO the assistant message too (it is the same dict — `final_msg` is already
+                    # on the transcript), so the tool result below answers an id the provider can match. A
+                    # tool message whose `tool_call_id` names no call in the preceding assistant turn is
+                    # rejected outright by an OpenAI-shaped API.
+                    call["id"] = call_id
+                    entry: dict[str, Any] = {"id": call_id, "name": name, "args": args, "writes": writes,
+                                             "repairs": repairs, "run": False, "ok": False,
+                                             "result": "", "took": 0, "body": "", "t0": 0.0,
+                                             "blocked": blocked_write, "lane": len(lane)}
+                    if parse_err:
+                        guard.skip()
+                        entry["result"] = parse_err
                     else:
-                        args = fixed
-                # A SALVAGED WRITE IS NOT A WRITE. `argrepair` closes a cut-off blob by dropping the
-                # incomplete trailing element, which is a reasonable trade for a read — the model can
-                # see what came back and ask again. For a write it is the silent-omission bug: an
-                # add_note whose `text` survived and whose trailing `citedEventIds` did not would land
-                # on the analyst's case as a finding with no evidence behind it. On the run this was
-                # written for, the salvage happened to come out `{}` and the schema check refused it —
-                # that was luck. Refuse it here instead, before the handler exists to be called.
-                if writes and any("CUT OFF" in r for r in repairs):
-                    blocked_write = True
-                    args, repairs = {}, []
-                    parse_err = ("your arguments were CUT OFF before they finished, and this tool WRITES "
-                                 "to the case — the call was refused whole rather than run with the "
-                                 "missing part guessed at. NOTHING was changed. Send it again smaller: "
-                                 "split a long `links` / `eventIds` / note into several calls and keep "
-                                 "prose short.")
-                tool_calls += 1
-                call_id = str(call.get("id") or f"{run_id}-c{tool_calls}")
-                # Stamped INTO the assistant message too (it is the same dict — `final_msg` is already
-                # on the transcript), so the tool result below answers an id the provider can match. A
-                # tool message whose `tool_call_id` names no call in the preceding assistant turn is
-                # rejected outright by an OpenAI-shaped API.
-                call["id"] = call_id
-                HISTORY.append(run_id, {"kind": "tool", "id": call_id, "name": name, "args": args,
-                                        "writes": writes})
-                # `call_id`, NOT `call.get("id")`: a provider that omits the id (or repeats one) made
-                # every live tool_call carry `id: null`, so the panel matched the RESULT against the
-                # first null-id card and the rest span forever. The persisted transcript already used
-                # the stamped id; the stream now uses the same one, so live and reloaded agree.
-                yield {"type": "tool_call", "id": call_id, "name": name, "arguments": args, "step": step}
-                if blocked_write:
-                    note = (f"the model's arguments for {name} were CUT OFF mid-value (the reply hit its "
-                            f"token limit). {name} writes to the case, so the call was refused whole "
-                            f"rather than repaired — the write was blocked and nothing was changed. The "
-                            f"assistant was asked to send a smaller call.")
-                    HISTORY.append(run_id, {"kind": "warning", "text": note})
-                    yield {"type": "warning", "message": note, "ids": []}
-                elif repairs:
-                    note = (f"the model's arguments for {name} were not valid JSON and were repaired "
-                            f"before the call: {'; '.join(repairs)}. Check what this "
-                            f"{'wrote to the case' if writes else 'returned'}.")
-                    HISTORY.append(run_id, {"kind": "warning", "text": note})
-                    yield {"type": "warning", "message": note, "ids": []}
-                t0 = time.perf_counter()
-                if parse_err:
-                    guard.skip()
-                    ok, result = False, parse_err
-                else:
-                    # An identical call on its third attempt, an identical successful write, a ninth
-                    # page of one query or a 25th call in one turn is refused HERE, before the handler
-                    # exists to be called, with a message that says what to do instead.
-                    refusal = guard.admit(name, args, writes)
-                    if refusal:
-                        ok, result = False, refusal
-                    else:
-                        ok, result = await _run_tool(name, args, ctx)
-                took = int((time.perf_counter() - t0) * 1000)
-                payload = result if ok else {"error": result}
-                if repairs and isinstance(payload, dict):
-                    # the model has to know what it actually sent, or it cannot re-send what was lost
-                    payload = {**payload, "argumentsRepaired": repairs}
-                body = _clip(orjson.dumps(payload).decode(), result_chars)
-                # `call_id`, not `call.get("id")`: the live stream and the persisted transcript both
-                # use the stamped id, and a provider that omits or repeats ids otherwise desynchronises
-                # the message sent BACK to it from the two the analyst is looking at.
-                messages.append({"role": "tool", "tool_call_id": call_id, "name": name, "content": body})
-                # ONE judgement of "did this move the investigation", shared by the guard's streaks and
-                # the check-in's — two implementations would eventually disagree about a result.
-                productive = guard.observe(ok, result)
-                barren = 0 if productive else barren + 1
-                if writes and ok:
-                    productive_since_write = 0
-                elif productive and not writes:
-                    productive_since_write += 1
-                summary = _summarize(name, ok, result)
-                HISTORY.tool_result(run_id, call_id, ok, summary, took)
-                yield {"type": "tool_result", "id": call_id, "name": name, "ok": ok, "tookMs": took,
-                       "summary": summary,
-                       "data": payload if len(body) <= 4000 else {"truncated": True}}
-                action = result.get("action") if (ok and isinstance(result, dict)) else None
-                if action:
-                    HISTORY.note_action(run_id, action)
-                    yield {"type": "write", "action": action}
+                        # An identical call on its third attempt, an identical successful write, a ninth
+                        # page of one query or a 25th call in one turn is refused HERE, before the handler
+                        # exists to be called, with a message that says what to do instead.
+                        refusal = guard.admit(name, args, writes)
+                        if refusal:
+                            entry["result"] = refusal
+                        else:
+                            entry["run"] = True
+                    # The guard stages one decision at a time and `observe` consumes it. A lane admits
+                    # several before any of them runs, so each decision is carried on its own call.
+                    entry["pending"] = guard.take_pending()
+                    prepared.append(entry)
+
+                # THE ANNOUNCEMENT COMES FIRST, then the cards it announces. Nothing above this point
+                # has been shown to the analyst — parsing and the guard's decision are silent — so the
+                # lane can say what it is about to do before it does it. The analyst has to be able to
+                # SEE that two things are in flight; several spinners at once is the live signal, and
+                # this line is the one that survives into the persisted transcript, so a reloaded
+                # conversation says it too.
+                runnable = [e for e in prepared if e["run"]]
+                if len(runnable) > 1:
+                    note = (f"{len(runnable)} tools running in parallel: "
+                            + ", ".join(e["name"] for e in runnable))
+                    HISTORY.append(run_id, {"kind": "status", "text": note})
+                    yield {"type": "status", "text": note, "parallel": len(runnable)}
+                for entry in prepared:
+                    HISTORY.append(run_id, {"kind": "tool", "id": entry["id"], "name": entry["name"],
+                                            "args": entry["args"], "writes": entry["writes"],
+                                            "lane": entry["lane"]})
+                    # The STAMPED id, not the provider's: one that omits the id (or repeats one) made
+                    # every live tool_call carry `id: null`, so the panel matched the RESULT against the
+                    # first null-id card and the rest span forever. The persisted transcript already
+                    # used the stamped id; the stream uses the same one, so live and reloaded agree.
+                    yield {"type": "tool_call", "id": entry["id"], "name": entry["name"],
+                           "arguments": entry["args"], "step": step, "lane": entry["lane"]}
+                    if entry["blocked"]:
+                        note = (f"the model's arguments for {entry['name']} were CUT OFF mid-value (the "
+                                f"reply hit its token limit). {entry['name']} writes to the case, so the "
+                                f"call was refused whole rather than repaired — the write was blocked and "
+                                f"nothing was changed. The assistant was asked to send a smaller call.")
+                        HISTORY.append(run_id, {"kind": "warning", "text": note})
+                        yield {"type": "warning", "message": note, "ids": []}
+                    elif entry["repairs"]:
+                        note = (f"the model's arguments for {entry['name']} were not valid JSON and were "
+                                f"repaired before the call: {'; '.join(entry['repairs'])}. Check what this "
+                                f"{'wrote to the case' if entry['writes'] else 'returned'}.")
+                        HISTORY.append(run_id, {"kind": "warning", "text": note})
+                        yield {"type": "warning", "message": note, "ids": []}
+                # Refusals next: they answer instantly, and holding them back until the lane's real
+                # work lands would make a refused call look like it was running all that time.
+                for entry in prepared:
+                    if not entry["run"]:
+                        for ev in _finish_call(run_id, entry, result_chars):
+                            yield ev
+                tasks: dict[Any, dict[str, Any]] = {}
+                for entry in runnable:
+                    entry["t0"] = time.perf_counter()
+                    tasks[asyncio.ensure_future(_run_tool(entry["name"], entry["args"], ctx))] = entry
+                waiting = set(tasks)
+                while waiting:
+                    done, waiting = await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
+                    for task in done:
+                        entry = tasks[task]
+                        try:
+                            entry["ok"], entry["result"] = task.result()
+                        except Exception as exc:  # noqa: BLE001 — a lane sibling must still be reported
+                            entry["ok"], entry["result"] = False, f"{type(exc).__name__}: {exc}"
+                        entry["took"] = int((time.perf_counter() - entry["t0"]) * 1000)
+                        # Streamed the moment it lands, out of order on purpose: the card was appended
+                        # in emitted order and is PATCHED in place by id, so one result arriving while
+                        # its neighbour still spins is exactly what the analyst should see.
+                        for ev in _finish_call(run_id, entry, result_chars):
+                            yield ev
+                # ...and everything the RUN's own state depends on, strictly in emitted order.
+                for entry in prepared:
+                    messages.append({"role": "tool", "tool_call_id": entry["id"],
+                                     "name": entry["name"], "content": entry["body"]})
+                    # ONE judgement of "did this move the investigation", shared by the guard's streaks and
+                    # the check-in's — two implementations would eventually disagree about a result.
+                    productive = guard.observe(entry["ok"], entry["result"], pending=entry["pending"])
+                    barren = 0 if productive else barren + 1
+                    if entry["writes"] and entry["ok"]:
+                        productive_since_write = 0
+                    elif productive and not entry["writes"]:
+                        productive_since_write += 1
+                    action = (entry["result"].get("action")
+                              if (entry["ok"] and isinstance(entry["result"], dict)) else None)
+                    if action:
+                        HISTORY.note_action(run_id, action)
+                        yield {"type": "write", "action": action}
             if guard.tripped:
                 # A WARNING, never folded in the panel: the analyst should see that the run was ended
                 # by Iris and why. The report still follows — `loop` takes the wrap-up turn below.

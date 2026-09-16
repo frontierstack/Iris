@@ -183,14 +183,25 @@ class LoopGuard:
         self._pending = (key, writes, "run")
         return None
 
+    def take_pending(self) -> tuple[str, bool, str]:
+        """Hand the staged decision to the caller and clear the slot.
+
+        `admit`/`skip` stage the call in flight and `observe` consumes it, which only works while the
+        two strictly alternate. They no longer do: a lane of reads is admitted and then dispatched
+        together, so the investigator takes each decision here and hands it back to `observe` with the
+        result it belongs to. Everything that still calls them in pairs is unaffected.
+        """
+        pending, self._pending = self._pending, ("", False, "")
+        return pending
+
     # ---------------------------------------------------------------- after a call
-    def observe(self, ok: bool, result: Any) -> bool:
+    def observe(self, ok: bool, result: Any, pending: Optional[tuple[str, bool, str]] = None) -> bool:
         """Record what the call in flight came back with. Returns whether it was PRODUCTIVE.
 
         A call the guard refused counts as a repeat; a run's own dedupe cache hit does too; anything
         else is judged on its result. This is also where the streaks trip.
         """
-        key, writes, kind = self._pending
+        key, writes, kind = pending if pending is not None else self._pending
         self._pending = ("", False, "")
         cached = bool(ok and isinstance(result, dict) and result.get("cached"))
         productive = False

@@ -492,6 +492,12 @@ const ToolCall = memo(function ToolCall({ e, live, lead = '' }: { e: AiTranscrip
         <span className="tcall__glyph" aria-hidden><Glyph /></span>
         <span className="tcall__name">{e.name}</span>
         {e.writes && <span className="tcall__kind" title="this tool changed the case">write</span>}
+        {(e.lane ?? 1) > 1 && (
+          <span className="tcall__kind tcall__kind--par"
+                title={`dispatched at the same time as ${(e.lane ?? 1) - 1} other call${e.lane === 2 ? '' : 's'}`}>
+            parallel
+          </span>
+        )}
         {e.ok === null && live && <span className="spinner" style={{ width: 9, height: 9, borderWidth: 1.5 }} />}
         {e.ok === null && !live && <span className="tcall__unknown" title="the run ended before this call reported back">—</span>}
         {!!e.tookMs && <span className="tcall__ms">{e.tookMs} ms</span>}
@@ -543,16 +549,19 @@ function sameNode(a: TrailNode, b: TrailNode): boolean {
 }
 
 /** The counts that head the steps card — one sentence, computed in one place. */
-function countsOf(nodes: TrailNode[]): { bits: string[]; pending: boolean; tools: number } {
+function countsOf(nodes: TrailNode[]): { bits: string[]; pending: boolean; tools: number; inflight: number } {
   const tools = nodes.filter((n): n is Extract<TrailNode, { k: 'tool' }> => n.k === 'tool');
   const writes = tools.filter((t) => t.e.writes).length;
   const failed = tools.filter((t) => t.e.ok === false).length;
+  // Cards still waiting for a result. More than one at a time is the whole visible difference the
+  // parallel lanes make, and it is what the analyst asked to be able to SEE.
+  const inflight = tools.filter((t) => t.e.ok === null).length;
   const bits: string[] = [];
   if (tools.length) bits.push(`${tools.length} tool call${tools.length === 1 ? '' : 's'}`);
   else if (nodes.length) bits.push(`${nodes.length} note${nodes.length === 1 ? '' : 's'}`);
   if (writes) bits.push(`${writes} write${writes === 1 ? '' : 's'}`);
   if (failed) bits.push(`${failed} refused`);
-  return { bits, pending: tools.some((t) => t.e.ok === null), tools: tools.length };
+  return { bits, pending: inflight > 0, tools: tools.length, inflight };
 }
 
 /**
@@ -585,7 +594,7 @@ const StepsCard = memo(function StepsCard({ nodes, live, title, startOpen }: {
     );
   }
 
-  const { bits, pending } = countsOf(nodes);
+  const { bits, pending, inflight } = countsOf(nodes);
 
   return (
     <section className={cx('aic-disc', 'aic-steps', open && 'aic-disc--open')}>
@@ -597,6 +606,12 @@ const StepsCard = memo(function StepsCard({ nodes, live, title, startOpen }: {
           </span>
           <span className="aic-disc__ident">
             <span className="aic-disc__title">{title}</span>
+            {live && inflight > 1 && (
+              <span className="aic-par" title="independent reads of one turn are dispatched together; writes are not">
+                <span className="aic-par__dots" aria-hidden><i /><i /><i /></span>
+                {inflight} running in parallel
+              </span>
+            )}
             {!!bits.length && <span className="aic-disc__meta">{bits.join(' · ')}</span>}
           </span>
           <span className="aic-disc__state" aria-hidden>{open ? <><Icon.Minus /> Collapse</> : <><Icon.Plus /> Expand</>}</span>
@@ -1295,7 +1310,8 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
             if (!raf) raf = requestAnimationFrame(tick);
             break;
           case 'tool_call':
-            push({ kind: 'tool', id: ev.id, name: ev.name, args: ev.arguments, writes: writeToolsRef.current.has(ev.name) });
+            push({ kind: 'tool', id: ev.id, name: ev.name, args: ev.arguments, lane: ev.lane ?? 1,
+                   writes: writeToolsRef.current.has(ev.name) });
             break;
           case 'tool_result':
             // Match on the call id; fall back to the LAST unfinished call of the same name. The card's

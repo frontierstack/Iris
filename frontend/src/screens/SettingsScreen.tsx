@@ -371,7 +371,7 @@ function AiAssistant({ settings }: { settings: Settings }) {
   };
 
   return (
-    <Section id="ai" title="AI assistant" desc="parallel analysis agents over the case · keys are stored server-side and masked on read" collapsible
+    <Section id="ai" title="AI assistant" desc="the tool-using investigator · keys are stored server-side and masked on read" collapsible
       footer={<>
         <button className="btn btn--primary" onClick={onSave} disabled={save.isPending || !dirty}>{save.isPending && <span className="btn__spinner" />}Save</button>
         {enabled && (
@@ -388,7 +388,7 @@ function AiAssistant({ settings }: { settings: Settings }) {
     >
       <div className="ai-toggle-row">
         <Toggle on={enabled} onChange={(v) => { setEnabled(v); setTest(null); }} label="Enable AI assistant" />
-        <span className="field__hint">{enabled ? 'Triage, timeline, entity and IOC agents run in parallel on the backend and stream into the assistant panel.' : 'AI features are hidden; nothing leaves this machine.'}</span>
+        <span className="field__hint">{enabled ? 'The assistant investigates using the tools of the app itself and streams its work into the panel.' : 'AI features are hidden; nothing leaves this machine.'}</span>
       </div>
       {enabled && (
         <>
@@ -420,12 +420,25 @@ function AiAssistant({ settings }: { settings: Settings }) {
             </div>
           </div>
           <div className="field">
-            <label className="field__label" htmlFor="ai-agents">Parallel analysis agents</label>
+            {/* This slider used to describe the fixed triage/timeline/entity/IOC pipeline, which
+                nothing in the UI has driven since the tool-using investigator replaced it — so the
+                one control labelled "parallel" did nothing for the assistant the analyst was
+                actually watching. It is the investigator's fan-out now: how many of ONE turn's tool
+                calls are dispatched together. */}
+            <label className="field__label" htmlFor="ai-agents">Parallel tool calls</label>
             <div className="slider-row">
               <input id="ai-agents" type="range" min={1} max={4} step={1} value={agents} onChange={(e) => setAgents(Number(e.target.value))} />
               <span className="slider-row__val">{agents}</span>
-              <span className="field__hint">{['', 'triage only', 'triage + timeline', 'triage + timeline + entities', 'triage + timeline + entities + IOCs'][agents]} → synthesizer</span>
+              <span className="field__hint">
+                {agents === 1
+                  ? 'one at a time — every call waits for the one before it'
+                  : `up to ${agents} independent reads of one turn run at the same time`}
+              </span>
             </div>
+            <span className="field__hint">
+              Only reads share a lane. A tool that changes the case runs on its own, in the order the
+              assistant asked for it, so two writes can never race and the undo list stays in order.
+            </span>
           </div>
           {/* Run limits. These were env-only, so a case that genuinely needed more just hit the wall
               and the analyst had no way to say "this one is worth it". Off is a real option, and the
