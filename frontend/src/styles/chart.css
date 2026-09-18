@@ -1,0 +1,86 @@
+/* ───────────────────────────────────────────────────────────────────────────
+   CHARTS ON A CASE (components/CaseChartView.tsx)
+
+   Every colour is a theme variable. A literal hex here would be wrong in eight
+   of the nine themes and nothing in the build could see it — see the note at
+   the top of themes.css.
+
+   The figure is a PANEL, not a card with a shadow: same 6px radius, same
+   hairline and same ground as the tables and the filter panels, because a
+   chart on this screen is one more surface stating something about the
+   evidence and not an ornament.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+.case-charts { display: flex; flex-direction: column; gap: 14px; }
+
+.chart {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 6px);
+  background: var(--panel);
+  padding: 10px 12px 9px;
+  outline: none;
+}
+.chart:focus-visible { border-color: var(--accent-border); box-shadow: 0 0 0 2px var(--accent-soft); }
+
+.chart__head {
+  display: flex; align-items: baseline; gap: 10px;
+  padding-bottom: 8px; margin-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.chart__title { font-weight: 600; font-size: 13.5px; color: var(--text); }
+.chart__meta { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.chart__del { margin-left: auto; opacity: 0.66; }
+.chart__del:hover { opacity: 1; }
+
+/* The legend is the only place a series NAME appears, so it carries its total: a line with no number
+   next to it makes the reader hunt for the peak to find out which line is the big one. */
+.chart__legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-bottom: 6px; }
+.chart__key { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-dim); }
+.chart__key i { width: 9px; height: 3px; border-radius: 1px; display: inline-block; }
+.chart__key b { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+
+.chart__plot { position: relative; }
+.chart__svg { display: block; width: 100%; height: auto; }
+
+.chart__grid { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; opacity: 0.55; }
+.chart__axis { stroke: var(--border-strong, var(--border)); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.chart__cursor { stroke: var(--accent-border); stroke-width: 1; vector-effect: non-scaling-stroke; stroke-dasharray: 2 3; }
+.chart__tick, .chart__xtick {
+  fill: var(--muted); font-size: 9.5px; font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.chart__bar { transition: opacity 90ms linear; }
+
+/* The readout sits over the plot rather than following the pointer: a tooltip that moves with the
+   cursor covers the very points being compared. */
+.chart__read {
+  position: absolute; top: 2px; right: 2px;
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 6px 8px;
+  background: var(--panel-raised, var(--panel));
+  border: 1px solid var(--border); border-radius: 4px;
+  font-size: 11px; color: var(--text-dim);
+  pointer-events: none;
+}
+.chart__read-x { color: var(--muted); font-family: var(--font-mono); font-size: 10.5px; }
+.chart__read-v { display: inline-flex; align-items: center; gap: 6px; }
+.chart__read-v i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+.chart__read-v b { color: var(--text); font-variant-numeric: tabular-nums; }
+
+/* The caption carries the provenance and every caveat. Quiet, but never hidden: a chart whose read
+   was bounded and does not say so is the silent-omission bug. */
+.chart__foot {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px;
+  margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--border);
+  font-size: 11px; color: var(--muted);
+}
+.chart__note { color: var(--text-dim); }
+.chart__prov { font-family: var(--font-mono); font-size: 10.5px; opacity: 0.85; }
+.chart__caveat { color: var(--warn); }
+.chart__by { margin-left: auto; }
+.chart__by--ai { color: var(--accent); }
+
+@media (max-width: 700px) {
+  .chart__read { position: static; margin-top: 6px; }
+}

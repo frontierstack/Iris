@@ -1,8 +1,7 @@
 import type {
   AiAnalyzeRequest, AiStreamEvent, AiTestRequest, AiTestResult, Case, ClearAllResult, ComputeStatus, DeepPartial, Entity, EventDetail,
   EventsHistogram, EventsPage, EventsQuery, ExportFormat, Health, MappingSuggestion, ParsersResponse, Report, Settings, Source, Timeline, MetricsResponse,
-  Attachment, CaseSummary, CaseDetail, CaseNote, CaseSetEntry, CaseSetResponse, NoteRef, Scope, IocResponse, IocInput, Ioc, EventLocation, GraphV2, GraphQuery, GraphNodeDetail, GraphPath, GraphEdge, GraphReviewEvent, PendingMappings, AutoMapResponse, LibraryFile, TrashEntry, Rule, RuleInput, RuleTestRequest, RuleTestResult, RuleSuggestRequest, RuleSuggestResult, AnomaliesResponse, Severity,
-} from './types';
+  Attachment, CaseSummary, CaseDetail, CaseNote, CaseSetEntry, CaseSetResponse, NoteRef, Scope, IocResponse, IocInput, Ioc, EventLocation, GraphV2, GraphQuery, GraphNodeDetail, GraphPath, GraphEdge, GraphReviewEvent, PendingMappings, AutoMapResponse, LibraryFile, TrashEntry, Rule, RuleInput, RuleTestRequest, RuleTestResult, RuleSuggestRequest, RuleSuggestResult, AnomaliesResponse, Severity, CaseChart, ChartCreate } from './types';
 import type { FieldFacetsQuery, FieldFacetsResponse, JobsResponse, RawLogPage, UploadJob } from './types';
 import type { AiInvestigateRequest, AiRun, AiRunEvent, AiThread, AiToolsResponse, AiUndoResult, IocMarkers } from './types';
 import type { SystemPrompt, SystemPromptsResponse } from './types';
@@ -278,6 +277,14 @@ export const api = {
   createCase: (body: { name: string; analyst?: string }) => request<CaseSummary>('/api/cases', json('POST', body)),
   activateCase: (id: string) => request<Case>(`/api/cases/${encodeURIComponent(id)}/activate`, json('POST')),
   caseDetail: (id: string) => request<CaseDetail>(`/api/cases/${encodeURIComponent(id)}`),
+
+  // Charts on the active case. Iris computes every point from the queries the chart carries
+  // (backend/app/charts.py) — the same search path the result list uses — so a chart and a search of
+  // the same query can never disagree. The assistant draws them through `create_chart`.
+  caseCharts: () => request<CaseChart[]>('/api/case/charts'),
+  createChart: (body: ChartCreate) => request<CaseChart>('/api/case/charts', json('POST', body)),
+  deleteChart: (chartId: string) =>
+    request<CaseChart[]>(`/api/case/charts/${encodeURIComponent(chartId)}`, { method: 'DELETE' }),
 
   // Case notes — a timestamped feed; entries can link to events, searches, entities…
   notes: (caseId: string) => request<CaseNote[]>(`/api/cases/${encodeURIComponent(caseId)}/notes`),

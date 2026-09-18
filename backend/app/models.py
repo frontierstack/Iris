@@ -912,6 +912,17 @@ class AiTranscriptEntry(BaseModel):
     # "N in parallel" from it, and it is persisted so a reloaded transcript says the same thing the
     # live run did — an indication that exists only in the live stream is not an indication.
     lane: int = 1
+    # WHICH lane, as a per-run ordinal (0 = not applicable / an older transcript). `lane` alone is the
+    # WIDTH of the group, which cannot separate two successive pairs from one group of four — so the
+    # panel could tag a card "parallel" but never draw the group. The analyst asked to be able to see
+    # that calls are being made TOGETHER, and a group is a shape, not a tag on each member.
+    laneId: int = 0
+    # A `status` entry about a worker agent (ai/subagents.py): who it was and what happened —
+    # start | call | end, or `tick` for the rolled-up "agents working" line. Persisted for the same
+    # reason `lane` is: an indication that exists only in the live SSE stream is not an indication,
+    # because the polling path and every reload go through the transcript instead.
+    agent: str = ""
+    phase: str = ""
     # When this entry was last CHANGED, on the same counter as `seq`. A tool entry is patched in place
     # when its result lands, which keeps its `seq` — so `?since=<lastSeq>` never resent it and a polling
     # client (any tab that is not the one streaming) kept the card's spinner turning for the rest of the
@@ -990,11 +1001,62 @@ class CaseSummary(BaseModel):
     sizeBytes: int = 0
 
 
+# ------------------------------------------------------------------ charts
+class ChartSeries(BaseModel):
+    """One line (or one set of bars) and the QUERY it was computed from.
+
+    The query is part of the series, not decoration: a chart is a claim about the evidence, and the
+    only thing that makes it checkable is being able to re-run what drew it. `total` is the query's
+    whole match count, which can exceed the plotted sum when the read was bounded or when events
+    carry no timestamp — see app/charts.py.
+    """
+    label: str = ""
+    query: str = ""
+    points: list[float] = Field(default_factory=list)
+    total: int = 0
+
+
+class CaseChart(BaseModel):
+    """A chart Iris computed and the case keeps. Persisted in case.json beside notes and graph links.
+
+    NOT a picture: the points, the queries, the bucket size, the filters and the exactness of the read
+    all travel together, so the same chart can be re-derived and a bounded read can never be presented
+    as the whole picture. `x` is bucket starts (ISO, `mode: time`) or category labels.
+    """
+    id: str
+    title: str
+    kind: Literal["line", "area", "bar"] = "line"
+    mode: Literal["time", "category"] = "time"
+    x: list[str] = Field(default_factory=list)
+    xLabel: str = ""
+    yLabel: str = "events"
+    series: list[ChartSeries] = Field(default_factory=list)
+    bucketSec: float = 0.0
+    groupBy: str = ""
+    scope: str = "all"
+    sources: str = ""
+    sev: str = ""
+    rangeFrom: str = ""
+    rangeTo: str = ""
+    total: int = 0
+    counted: int = 0
+    withoutTimestamp: int = 0
+    withoutField: int = 0
+    distinctGroups: int = 0
+    truncated: bool = False
+    exact: bool = True
+    note: str = ""
+    createdAt: str = ""
+    createdBy: str = ""
+    runId: str = ""
+
+
 class CaseDetail(CaseSummary):
     """Everything the case detail screen needs — works for inactive cases via the persisted snapshot."""
     notes: list[CaseNote] = Field(default_factory=list)
     snapshot: Optional[CaseSnapshot] = None
     sourceList: list[SourceBrief] = Field(default_factory=list)
+    charts: list[CaseChart] = Field(default_factory=list)
 
 
 # ------------------------------------------------------------------ rules

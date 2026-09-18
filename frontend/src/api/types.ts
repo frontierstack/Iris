@@ -503,6 +503,19 @@ export interface AiTranscriptEntry {
    */
   lane?: number;
   /**
+   * WHICH lane, as a per-run ordinal. `lane` alone is the WIDTH of the group, which cannot tell two
+   * successive pairs from one group of four — so the panel could tag a card "parallel" but never draw
+   * the group. Calls sharing a laneId were dispatched together and are drawn as one block.
+   */
+  laneId?: number;
+  /**
+   * A `status` entry about a worker agent (delegate_investigation): which agent, and
+   * start | call | end | tick (the rolled-up "agents working" line). Persisted, so the agent roster
+   * survives a reload and appears in a polling tab too.
+   */
+  agent?: string;
+  phase?: string;
+  /**
    * When this entry was last CHANGED, on the same counter as `seq`. A tool entry is patched in place
    * when its result lands, so `?since=<lastSeq>` alone never resent it and the card kept spinning in
    * every polling tab. Merge by `seq` (the entry keeps its place); this only decides what is SENT.
@@ -733,6 +746,35 @@ export interface SourceBrief {
 }
 export interface CaseDetail extends CaseSummary {
   notes: CaseNote[]; snapshot: CaseSnapshot | null; sourceList: SourceBrief[];
+  charts: CaseChart[];
+}
+
+/* ───── Charts: a series Iris computed, and the queries it came from ─────
+   The query travels WITH the series on purpose. A chart is a claim about the evidence — a spike at
+   02:00 is read as "41 failures happened at 02:00" — and the only thing that makes it checkable is
+   being able to re-run what drew it. `total` is the query's whole match count, which can exceed the
+   plotted sum when the read was bounded (`exact: false`) or when events carry no timestamp. */
+export interface ChartSeries { label: string; query: string; points: number[]; total: number }
+export interface CaseChart {
+  id: string; title: string;
+  kind: 'line' | 'area' | 'bar';
+  mode: 'time' | 'category';
+  /** bucket starts (ISO, mode 'time') or category labels */
+  x: string[];
+  xLabel: string; yLabel: string;
+  series: ChartSeries[];
+  bucketSec: number; groupBy: string;
+  scope: string; sources: string; sev: string; rangeFrom: string; rangeTo: string;
+  total: number; counted: number; withoutTimestamp: number; withoutField: number;
+  distinctGroups: number; truncated: boolean;
+  /** false = the read was bounded, so the shape is of the first `counted` matches, not of all of them */
+  exact: boolean;
+  note: string; createdAt: string; createdBy: string; runId: string;
+}
+export interface ChartCreate {
+  title: string; kind?: 'line' | 'area' | 'bar'; mode?: 'time' | 'category';
+  queries?: string[]; labels?: string[]; groupBy?: string; bucket?: string; points?: number;
+  note?: string; sources?: string; sev?: string; rangeFrom?: string; rangeTo?: string; scope?: string;
 }
 
 /* ───── Case notes: a timestamped feed, each entry optionally linking to evidence ───── */

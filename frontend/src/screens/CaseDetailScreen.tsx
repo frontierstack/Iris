@@ -6,6 +6,7 @@ import type { Severity } from '../api/types';
 import { SEVERITIES } from '../api/types';
 import { CaseNotesFeed } from '../components/CaseNotes';
 import { CaseTimeline } from '../components/CaseTimeline';
+import { CaseChartView } from '../components/CaseChartView';
 import { IocPanel } from '../components/IocPanel';
 import { Icon } from '../components/icons';
 import { EmptyState, ErrorState, Loading, SectionHead } from '../components/ui';
@@ -101,6 +102,7 @@ export function CaseDetailScreen() {
   // "IOCs found in this case — should also be collapsible": closed by default like the Anomalies cards,
   // remembered, and forced open by the Add control (adding into a closed section is a hidden form).
   const [iocOpen, toggleIoc] = useSectionOpen('iris.case.open', 'iocs');
+  const [chartsOpen, toggleCharts] = useSectionOpen('iris.case.open', 'charts');
 
   const activate = useMutation({
     mutationFn: () => api.activateCase(id!),
@@ -114,6 +116,9 @@ export function CaseDetailScreen() {
   }
   const d = detail.data;
   const snap = d.snapshot;
+  // Charts ride on the case detail payload rather than in a query of their own: they change only when
+  // something writes one, which already invalidates this query.
+  const charts = d.charts ?? [];
 
   return (
     <div className="page case-detail">
@@ -203,6 +208,25 @@ export function CaseDetailScreen() {
                 this case" that listed every IP extracted from every log in the workspace: reported as
                 "these iocs are being populated every time and seem unrelated". They were unrelated. */}
             <IocPanel scope="case" adding={addingIoc} onAddingDone={() => setAddingIoc(false)} />
+          </div>)}
+        </section>
+      )}
+
+      {/* CHARTS. Second to the timeline on purpose: when the finding IS the shape - it started at
+          02:11, peaked at 02:13, stopped at 02:14 - a line graph says it better than a paragraph, and
+          the assistant now draws them (ai/tools.create_chart). Every point was computed by Iris from
+          the queries the chart carries, so the caption can state its own provenance and every way the
+          picture is less than the whole truth. Collapsible like the rest, through the shared hook. */}
+      {isActive && !!charts.length && (
+        <section>
+          <SectionHead eyebrow="Charts" title="What the evidence looks like"
+            open={chartsOpen} onToggle={toggleCharts}
+            hint={`${charts.length} chart${charts.length === 1 ? '' : 's'} · computed from the queries each one carries, so they can be re-derived`} />
+          {chartsOpen && (<div className="sec-card__body case-charts">
+            {charts.map((c) => (
+              <CaseChartView key={c.id} chart={c}
+                onDelete={() => { void api.deleteChart(c.id).then(() => qc.invalidateQueries({ queryKey: ['case-detail'] })); }} />
+            ))}
           </div>)}
         </section>
       )}

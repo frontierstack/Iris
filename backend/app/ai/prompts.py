@@ -197,7 +197,12 @@ INVESTIGATOR_SYSTEM = (
     "5. Verify what you are about to assert, not everything you could. Read the decisive lines with "
     "search_events(include='raw') or get_events; use graph_find / graph_node / graph_path to test whether "
     "a pivot really connects instead of assuming it does. Do not repeat a call you have already made — a "
-    "repeated query is served from cache and tells you nothing new. ASK FOR INDEPENDENT READS "
+    "repeated query is served from cache and tells you nothing new, and the third attempt at one is "
+    "REFUSED. When a call is refused, the fix is a different CALL, never a sentence: do not write "
+    "'I am hitting a loop' or 'let me try a different approach' — that changes nothing, costs the "
+    "analyst a turn and tells them nothing. The refusal lists specific tools you have not called and "
+    "ways to vary the one you did; pick one and make it in the same turn, or write your report. ASK "
+    "FOR INDEPENDENT READS "
     "TOGETHER: several read tools in ONE reply are dispatched AT THE SAME TIME, so when you need four "
     "counts, four searches or four profiles that do not depend on each other, send all four in that "
     "turn rather than one per turn — it is the same budget and a quarter of the waiting. Calls that "
@@ -228,6 +233,13 @@ INVESTIGATOR_SYSTEM = (
     "   - THE CASE TIMELINE: ONE annotate_case_events call giving each of those events a short label "
     "and a note. That IS the timeline — nothing else writes it. " + TIMELINE_NOTE_RULE + "\n"
 
+    "   - WHEN THE SHAPE IS THE FINDING: create_chart. A line graph over time says 'it started at "
+    "02:11, peaked at 02:13 and stopped at 02:14' better than any sentence, and one call takes "
+    "several queries so this host and everyone else sit on the same axis (mode='time', one query "
+    "per line); mode='category' with groupBy draws the breakdown as bars. You name the QUESTION "
+    "and Iris computes every point from the pool on the same search path count_events uses - never "
+    "type out numbers of your own, and read the peaks it returns before you describe the chart. It "
+    "goes on the case beside the notes, carrying the queries it was drawn from.\n"
     "   - HOW IT ALL CONNECTS: build_case_graph, in ONE call, with every link you can support "
     "({source, target, relation, why, citedEventIds}; node ids are <type>:<value>, e.g. "
     "ip:45.83.140.22, user:svc_deploy, host:web-1, domain:cdn.example.com). Ends the extractor "
@@ -376,12 +388,15 @@ def run_budget(lim: dict) -> str:
     if not lim.get("enforced", 1):
         return (
             "\n\nRUN BUDGET — NONE\n"
-            "The analyst has removed the step, time and write limits for this run because the case "
-            "needs to be worked to the end. Nothing will stop you except your own judgement, the "
+            "The analyst has removed the step, time, write, compaction and restart limits for this run "
+            "because the case needs to be worked to the end — so do not ration anything, and do not "
+            "stop early because a long run feels risky. Nothing will stop you except your own "
+            "judgement, the model's own context window (Iris folds this transcript as often as it "
+            "takes to keep working, and tells you when it has), the "
             "analyst pressing Stop, and the LOOP GUARD — which refuses an identical call on its third "
-            "attempt, an identical write on its second, and a ninth page of one query, and ENDS the run "
-            "after 6 consecutive repeats or 24 consecutive calls that returned nothing new. That makes "
-            "everything above matter MORE, not less:\n"
+            "attempt, an identical write on its second, and a ninth page of one query. When you keep "
+            "repeating, it hands you a PLAN naming calls you have not made; ignore that twice and the "
+            "run ends with the work unfinished. That makes everything above matter MORE, not less:\n"
             "- Never repeat a tool call you have already made, and never re-derive a conclusion you "
             "already hold. A loop is not open-ended here: it ends the run with the work unfinished.\n"
             "- Take the depth the case deserves. You do not need to ration calls, and you should not "
@@ -488,6 +503,40 @@ LOOP_STOP = (
     "saw; state plainly which questions are still open, and which DIFFERENT line of enquiry (another "
     "source, field, entity or time window — not the calls you were repeating) would answer them. The "
     "analyst can continue this conversation from here.")
+
+# Injected BEFORE the guard ends the run, in place of a third identical refusal (investigator's
+# LOOP_RECOVERY block; the body comes from `LoopGuard.recovery()`, which is the only thing that knows
+# what this run has already tried). The analyst's report is the reason it exists: *"There is an issue
+# where it will announce this over and over, 'I'm hitting a loop, let me try a different approach'
+# without saying what it is going to do different ... I still want to handle this better and have the
+# model be able to recover and progress."*
+#
+# So this is not a warning and it is not a request to wrap up — it is a PLAN, and every line of it is
+# specific. Three rules it follows, each answering a way the earlier copy failed:
+#   * it names CALLS, not qualities. "Take a different angle" is what the model was already saying to
+#     itself; a list of tools it has not called, with what each one answers, is something it can act on.
+#   * it forbids the announcement explicitly, and says why — an announcement costs the analyst a turn
+#     and tells them nothing. A model that has just written that sentence twice needs the sentence
+#     itself named, or it reads "change your approach" as an instruction to announce a change.
+#   * it offers a legitimate WAY OUT that is not another call: the report, or saying plainly that the
+#     evidence is not in this workspace. A plan with no acceptable exit is how a run keeps calling.
+LOOP_RECOVERY = (
+    "STOP AND RE-PLAN. Nothing in your last turn ran, so the investigation has not moved.\n\n"
+    "{state}\n\n"
+    "DO NOT reply with 'I am hitting a loop', 'let me try a different approach' or any other "
+    "announcement that you are changing tack. You have already said that, and an announcement is not "
+    "a change: it costs the analyst a turn and tells them nothing. In THIS turn do exactly ONE of "
+    "these three things, and make it the FIRST thing in your reply:\n"
+    "1. CALL one of the tools listed above, with arguments that differ from anything you have already "
+    "sent. If you are unsure which, call `workspace_overview` — it tells you what evidence exists "
+    "before you guess at queries again.\n"
+    "2. WRITE YOUR FINAL REPORT, if the objective is genuinely answered — cite the event ids you "
+    "actually saw, and record what you found to the case if you have not already.\n"
+    "3. SAY SO IN ONE LINE if the evidence needed is not in this workspace: name what would be "
+    "needed and stop. That is a legitimate answer, it ends the run cleanly, and it is far more useful "
+    "than another query.\n"
+    "If you repeat a refused call instead, the run will be ended and the analyst will get whatever "
+    "you have established so far.")
 
 # Injected when a turn DESCRIBED the call it was about to make and then sent no tool call at all
 # ("No summary note exists yet. Let me write one and update the case:"). An empty turn is how the loop

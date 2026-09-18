@@ -41,7 +41,7 @@
  * rejoins by POLLING `GET /api/ai/runs/{id}?since=<seq>`. Both write into the same
  * `AiTranscriptEntry[]`, so there is one renderer, not two.
  */
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
          useSyncExternalStore } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
@@ -94,7 +94,13 @@ const POLL_MS = 900;
  * stutter of a different kind.
  */
 const STREAM_LAG_MIN_MS = 160;      // how far behind the wire the screen runs on a per-token stream
-const STREAM_LAG_MAX_MS = 600;      // and at most, however coarse the packets are
+const STREAM_LAG_MAX_MS = 1200;     // and at most, however coarse the packets are
+// ...raised from 600 on the third report of a skippy stream. A buffer can only absorb a gap it is
+// LONGER than, and the lag is sized from the largest gap in the window (`1.2 * gap`), so a gateway
+// that coalesces a second of tokens into one packet was clamped to 600 ms and still painted a lump
+// every second. The window itself bounds this: gaps are measured inside STREAM_RATE_WINDOW_MS, so
+// the lag can never exceed ~1.2x that, and a fine per-token stream still pays the MINIMUM — the cap
+// only ever applies to a wire that has already been measured as coarse.
 const STREAM_RATE_WINDOW_MS = 1200; // the window the arrival rate and the gaps are measured over
 const STREAM_CATCHUP_MS = 400;      // a backlog beyond the lag is worked off across this long
 const STREAM_DEFAULT_CPS = 180;     // characters per second assumed until there is a rate to measure
@@ -290,7 +296,7 @@ function toBlocks(entries: AiTranscriptEntry[]): Block[] {
  */
 type TrailNode =
   | { k: 'tool'; key: number; e: AiTranscriptEntry; turn: boolean; lead: string }
-  | { k: 'note'; key: number; text: string; turn: boolean }
+  | { k: 'note'; key: number; text: string; turn: boolean; agent?: string; phase?: string }
   | { k: 'prose'; key: number; text: string; turn: boolean };
 
 function trailNodes(blocks: Block[]): TrailNode[] {
@@ -306,7 +312,13 @@ function trailNodes(blocks: Block[]): TrailNode[] {
     for (const e of b.entries) {
       if (e.kind === 'step') { turn = out.length > 0; continue; }   // a break, not a numbered line
       if (e.kind === 'status') {
-        if (e.text.trim()) { out.push({ k: 'note', key: e.seq, text: e.text, turn }); turn = false; }
+        // `agent`/`phase` ride along so the card can fold a delegation's per-agent lines into ONE
+        // roster instead of a column of near-identical sentences. Persisted on the entry, so this
+        // works in a polling tab and after a reload too.
+        if (e.text.trim()) {
+          out.push({ k: 'note', key: e.seq, text: e.text, turn, agent: e.agent, phase: e.phase });
+          turn = false;
+        }
         continue;
       }
       // The model narrates what it is looking for in the SAME turn as the call (see the NARRATE
@@ -602,6 +614,98 @@ function sameNode(a: TrailNode, b: TrailNode): boolean {
   return a.text === (b as { text: string }).text;
 }
 
+/**
+ * THE TRAIL IS GROUPED, because the work is grouped.
+ *
+ * A flat column of cards cannot show the one thing the analyst asked to be able to see: that several
+ * calls are in flight AT THE SAME TIME. `lane` on an entry is the WIDTH of its dispatch group and
+ * `laneId` is WHICH group — both persisted — so consecutive cards sharing a laneId are one block with
+ * one head ("3 calls at the same time"), drawn inside a bracket. A call that ran alone is unchanged.
+ *
+ * The other grouping is the AGENT ROSTER. `delegate_investigation` reports per agent as it goes
+ * (started / working / finished), which arrived as three or more separate status lines per agent —
+ * the transcript noise this panel keeps deleting. Consecutive agent lines become one roster: a row
+ * per agent, its latest state, and nothing repeated.
+ */
+type TrailGroup =
+  | { g: 'one'; key: number; node: TrailNode }
+  | { g: 'lane'; key: number; nodes: Array<Extract<TrailNode, { k: 'tool' }>>; turn: boolean }
+  | { g: 'agents'; key: number; rows: Array<{ agent: string; phase: string; text: string }>; turn: boolean };
+
+function groupTrail(nodes: TrailNode[]): TrailGroup[] {
+  const out: TrailGroup[] = [];
+  for (const n of nodes) {
+    const last = out[out.length - 1];
+    if (n.k === 'tool' && (n.e.lane ?? 1) > 1 && (n.e.laneId ?? 0) > 0) {
+      if (last && last.g === 'lane' && (last.nodes[0]!.e.laneId ?? -1) === n.e.laneId) {
+        last.nodes.push(n);
+        continue;
+      }
+      out.push({ g: 'lane', key: n.key, nodes: [n], turn: n.turn });
+      continue;
+    }
+    if (n.k === 'note' && n.agent) {
+      const row = { agent: n.agent, phase: n.phase ?? '', text: n.text };
+      if (last && last.g === 'agents') {
+        // one row per agent: the latest line about it wins, so "started" is replaced by "finished"
+        const at = last.rows.findIndex((r) => r.agent === row.agent);
+        if (at >= 0) last.rows[at] = row; else last.rows.push(row);
+        continue;
+      }
+      out.push({ g: 'agents', key: n.key, rows: [row], turn: n.turn });
+      continue;
+    }
+    // the rolled-up "agents working: A (3 calls), B (2 calls)" tick belongs to the roster above it
+    if (n.k === 'note' && n.phase === 'tick' && last && last.g === 'agents') continue;
+    out.push({ g: 'one', key: n.key, node: n });
+  }
+  return out;
+}
+
+function sameGroup(a: TrailGroup, b: TrailGroup): boolean {
+  if (a.g !== b.g || a.key !== b.key) return false;
+  if (a.g === 'one') return b.g === 'one' && sameNode(a.node, b.node);
+  if (a.g === 'lane') {
+    return b.g === 'lane' && a.turn === b.turn && a.nodes.length === b.nodes.length
+      && a.nodes.every((n, i) => sameNode(n, b.nodes[i]!));
+  }
+  return b.g === 'agents' && a.turn === b.turn && a.rows.length === b.rows.length
+    && a.rows.every((r, i) => r.agent === b.rows[i]!.agent && r.text === b.rows[i]!.text);
+}
+
+/** The state of one worker agent, for the roster's tag. */
+const AGENT_STATE: Record<string, string> = { start: 'working', call: 'working', end: 'finished' };
+
+function AgentRoster({ rows, live }: { rows: Array<{ agent: string; phase: string; text: string }>; live: boolean }) {
+  const working = rows.filter((r) => r.phase !== 'end').length;
+  return (
+    <div className="aroster">
+      <div className="aroster__head">
+        <span className="aroster__tile" aria-hidden>{rows.length}</span>
+        <span className="aroster__title">
+          {rows.length} agent{rows.length === 1 ? '' : 's'} on separate questions
+        </span>
+        {live && working > 0 && (
+          <span className="aic-par" title="each agent is a read-only tool loop of its own, running now">
+            <span className="aic-par__dots" aria-hidden><i /><i /><i /></span>
+            {working} working
+          </span>
+        )}
+      </div>
+      <ul className="aroster__list">
+        {rows.map((r) => (
+          <li key={r.agent} className={cx('aroster__row', r.phase === 'end' && 'aroster__row--done')}>
+            <span className="aroster__who">{r.agent}</span>
+            <span className="aroster__state">{AGENT_STATE[r.phase] ?? r.phase ?? ''}</span>
+            {live && r.phase !== 'end' && <span className="spinner" style={{ width: 9, height: 9, borderWidth: 1.5 }} />}
+            <span className="aroster__what">{r.text.replace(/^agent \S+ /, '')}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 /** The counts that head the steps card — one sentence, computed in one place. */
 function countsOf(nodes: TrailNode[]): { bits: string[]; pending: boolean; tools: number; inflight: number } {
   const tools = nodes.filter((n): n is Extract<TrailNode, { k: 'tool' }> => n.k === 'tool');
@@ -649,6 +753,7 @@ const StepsCard = memo(function StepsCard({ nodes, live, title, startOpen }: {
   }
 
   const { bits, pending, inflight } = countsOf(nodes);
+  const groups = groupTrail(nodes);
 
   return (
     <section className={cx('aic-disc', 'aic-steps', open && 'aic-disc--open')}>
@@ -673,13 +778,44 @@ const StepsCard = memo(function StepsCard({ nodes, live, title, startOpen }: {
       </div>
       {open && (
         <div className="aic-steps__body">
-          {nodes.map((n) => (
-            <div key={n.key} className={cx('aic-step', n.turn && 'aic-step--turn')}>
-              {n.k === 'tool' && <ToolCall e={n.e} live={live} lead={n.lead} />}
-              {n.k === 'note' && <Markdown className="md aic-bare__note" text={n.text} />}
-              {n.k === 'prose' && <Markdown className="md aic-prose aic-prose--quiet" text={n.text} />}
-            </div>
-          ))}
+          {groups.map((g) => {
+            if (g.g === 'lane') {
+              const done = g.nodes.filter((n) => n.e.ok !== null).length;
+              return (
+                <div key={g.key} className={cx('aic-step', g.turn && 'aic-step--turn')}>
+                  <div className={cx('tlane', done < g.nodes.length && live && 'tlane--live')}>
+                    <div className="tlane__head">
+                      <span className="tlane__bars" aria-hidden><i /><i /><i /></span>
+                      <span className="tlane__what">{g.nodes.length} calls at the same time</span>
+                      <span className="tlane__prog">
+                        {done < g.nodes.length && live
+                          ? `${g.nodes.length - done} still running`
+                          : `${done} of ${g.nodes.length} answered`}
+                      </span>
+                    </div>
+                    <div className="tlane__body">
+                      {g.nodes.map((n) => <ToolCall key={n.key} e={n.e} live={live} lead={n.lead} />)}
+                    </div>
+                  </div>
+                </div>
+              );
+            }
+            if (g.g === 'agents') {
+              return (
+                <div key={g.key} className={cx('aic-step', g.turn && 'aic-step--turn')}>
+                  <AgentRoster rows={g.rows} live={live} />
+                </div>
+              );
+            }
+            const n = g.node;
+            return (
+              <div key={g.key} className={cx('aic-step', n.turn && 'aic-step--turn')}>
+                {n.k === 'tool' && <ToolCall e={n.e} live={live} lead={n.lead} />}
+                {n.k === 'note' && <Markdown className="md aic-bare__note" text={n.text} />}
+                {n.k === 'prose' && <Markdown className="md aic-prose aic-prose--quiet" text={n.text} />}
+              </div>
+            );
+          })}
         </div>
       )}
     </section>
@@ -688,6 +824,9 @@ const StepsCard = memo(function StepsCard({ nodes, live, title, startOpen }: {
   a.live === b.live && a.title === b.title && a.startOpen === b.startOpen &&
   a.nodes.length === b.nodes.length && a.nodes.every((n, i) => sameNode(n, b.nodes[i]!))
 ));
+// `sameGroup` is exported-in-module for the grouping above; keeping it next to `sameNode` is what
+// stops the two drifting if the group shapes ever gain a field.
+void sameGroup;
 
 /** An evidence-integrity signal. Never folded, never subdued — see the panel's header comment. */
 function Warning({ text }: { text: string }) {
@@ -737,6 +876,24 @@ function changeBreakdown(actions: AiAction[]): string {
  * change itself as the line and the family it belongs to as a tag. Every entry is reversible in one
  * click; a reverted one stays on the rail as a hollow node, struck through, rather than disappearing.
  */
+/**
+ * The ledger is grouped by WHAT CHANGED, then chronological inside each group.
+ *
+ * A flat time-ordered list answered "in what order did it write?", which nobody asks. What the
+ * analyst asks is "did it write any indicators?" and "what did it put on the timeline?" — and with
+ * twenty rows of mixed families that is a scan of every line. Groups are ordered by the family's
+ * first appearance, so the list still reads as the run's own sequence rather than as an alphabet.
+ */
+function byFamily(actions: AiAction[]): Array<[string, AiAction[]]> {
+  const groups = new Map<string, AiAction[]>();
+  for (const a of actions) {
+    const f = changeFamily(a.tool);
+    const bucket = groups.get(f);
+    if (bucket) bucket.push(a); else groups.set(f, [a]);
+  }
+  return [...groups];
+}
+
 function Changes({ actions, busy, onUndo }: { actions: AiAction[]; busy: boolean; onUndo: () => void }) {
   const [open, setOpen] = useState(false);
   const active = actions.filter((a) => !a.undone).length;
@@ -763,26 +920,36 @@ function Changes({ actions, busy, onUndo }: { actions: AiAction[]; busy: boolean
       </div>
       {open && (
         <ol className="aic-tl">
-          {actions.map((a) => {
-            const Glyph = toolIcon(a.tool);
-            const clock = clockOf(a.at);
-            return (
-              <li key={a.id} className={cx('aic-tl__item', a.undone && 'aic-tl__item--undone')}>
-                <span className="aic-tl__when">
-                  {clock && <time dateTime={a.at} title={UTC(a.at)}>{clock}</time>}
-                </span>
-                <span className="aic-tl__node" aria-hidden><Glyph /></span>
-                <span className="aic-tl__body">
-                  <span className="aic-tl__summary">{a.summary}</span>
-                  <span className="aic-tl__sub">
-                    <span className="aic-tl__kind" title={a.tool}>{changeFamily(a.tool)}</span>
-                    <span className="aic-tl__what">{writeLabel(a.tool)}</span>
-                    {a.undone && <span className="aic-tl__tag">reverted</span>}
-                  </span>
+          {byFamily(actions).map(([family, rows]) => (
+            <Fragment key={`g-${family}`}>
+              <li className="aic-tl__group" aria-hidden>
+                <span className="aic-tl__gname">{family}</span>
+                <span className="aic-tl__gn">
+                  {rows.filter((r) => !r.undone).length || rows.length}
                 </span>
               </li>
-            );
-          })}
+              {rows.map((a) => {
+              const Glyph = toolIcon(a.tool);
+              const clock = clockOf(a.at);
+              return (
+                <li key={a.id} className={cx('aic-tl__item', a.undone && 'aic-tl__item--undone')}>
+                  <span className="aic-tl__when">
+                    {clock && <time dateTime={a.at} title={UTC(a.at)}>{clock}</time>}
+                  </span>
+                  <span className="aic-tl__node" aria-hidden><Glyph /></span>
+                  <span className="aic-tl__body">
+                    <span className="aic-tl__summary">{a.summary}</span>
+                    <span className="aic-tl__sub">
+                      <span className="aic-tl__kind" title={a.tool}>{changeFamily(a.tool)}</span>
+                      <span className="aic-tl__what">{writeLabel(a.tool)}</span>
+                      {a.undone && <span className="aic-tl__tag">reverted</span>}
+                    </span>
+                  </span>
+                  </li>
+                );
+              })}
+            </Fragment>
+          ))}
         </ol>
       )}
     </section>

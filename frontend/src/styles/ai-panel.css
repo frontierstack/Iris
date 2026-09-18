@@ -1357,3 +1357,99 @@ a.aic__pill { display: inline-block; text-decoration: none; }
 .aic-par__dots i:nth-child(2) { height: 12px; opacity: 0.8; }
 .aic-par__dots i:nth-child(3) { height: 7px; opacity: 0.4; }
 .tcall__kind--par { color: var(--muted); border-color: var(--line); background: transparent; }
+
+/* ───────────────────────────────────────────────────────────────────────────
+   A LANE: the calls of one dispatch group, drawn as a group.
+
+   Reported as *"needs to be more clear if two agents are working and doing
+   work together"*. A per-card `parallel` tag could say that a call had
+   company; it could not show WHICH company, because `lane` is the width of
+   the group and not its identity. With `laneId` persisted on the entry the
+   panel can bracket them: one head, one rule down the side, the cards inside.
+   Quiet by default and accented only while the group still has a call in
+   flight — the group is structure, not an alert.
+   ─────────────────────────────────────────────────────────────────────────── */
+.tlane {
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--border-strong, var(--border));
+  border-radius: var(--radius-md, 6px);
+  background: var(--panel-sunken, transparent);
+}
+.tlane--live { border-left-color: var(--accent-border); }
+.tlane__head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 9px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11.5px; color: var(--muted);
+}
+.tlane__what { color: var(--text-dim); font-weight: 500; }
+.tlane__prog { margin-left: auto; font-variant-numeric: tabular-nums; }
+/* three short bars: the same mark the "N running in parallel" chip uses, so one idea has one glyph */
+.tlane__bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 9px; }
+.tlane__bars i { width: 2px; background: var(--muted); border-radius: 1px; }
+.tlane__bars i:nth-child(1) { height: 5px; }
+.tlane__bars i:nth-child(2) { height: 9px; }
+.tlane__bars i:nth-child(3) { height: 7px; }
+.tlane--live .tlane__bars i { background: var(--accent); }
+.tlane__body { display: flex; flex-direction: column; gap: 6px; padding: 7px; }
+.tlane__body .tcall { margin: 0; }
+
+/* ───────────────────────────────────────────────────────────────────────────
+   THE AGENT ROSTER (delegate_investigation).
+
+   A delegation reported itself as three or more status lines per agent —
+   started, working, finished — which is the transcript noise this panel keeps
+   deleting. One row per agent, its latest state, nothing repeated: the roster
+   answers "how many are working and on what" at a glance, which is the
+   question a fan-out raises.
+   ─────────────────────────────────────────────────────────────────────────── */
+.aroster {
+  border: 1px solid var(--border); border-radius: var(--radius-md, 6px);
+  background: var(--panel-sunken, transparent);
+}
+.aroster__head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 9px; border-bottom: 1px solid var(--border);
+  font-size: 11.5px;
+}
+.aroster__tile {
+  min-width: 17px; height: 17px; padding: 0 4px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--accent-border); border-radius: 3px;
+  color: var(--accent); font-variant-numeric: tabular-nums; font-size: 10.5px;
+}
+.aroster__title { color: var(--text-dim); font-weight: 500; }
+.aroster__list { list-style: none; margin: 0; padding: 5px 7px; display: flex; flex-direction: column; gap: 3px; }
+.aroster__row { display: flex; align-items: baseline; gap: 8px; font-size: 11.5px; color: var(--text-dim); }
+.aroster__row--done { color: var(--muted); }
+.aroster__who { font-family: var(--font-mono); font-size: 11px; color: var(--text); }
+.aroster__state {
+  font-size: 10px; padding: 0 5px; border-radius: 3px;
+  border: 1px solid var(--border); color: var(--muted);
+}
+.aroster__row:not(.aroster__row--done) .aroster__state { border-color: var(--accent-border); color: var(--accent); }
+.aroster__what { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ───────────────────────────────────────────────────────────────────────────
+   THE CHANGE LEDGER, grouped by what changed.
+
+   "Did it write any indicators?" was a scan of every row. A family header with
+   its count answers it without reading a line, and the rows underneath stay in
+   the run's own order.
+   ─────────────────────────────────────────────────────────────────────────── */
+.aic-tl__group {
+  display: flex; align-items: center; gap: 8px;
+  margin: 9px 0 3px;
+  font-size: 10.5px; color: var(--muted);
+}
+.aic-tl__group:first-child { margin-top: 2px; }
+.aic-tl__gname { letter-spacing: 0.01em; }
+.aic-tl__gn {
+  min-width: 15px; text-align: center;
+  border: 1px solid var(--border); border-radius: 3px;
+  font-variant-numeric: tabular-nums;
+}
+/* the rule the timeline nodes hang off must not run through the header */
+.aic-tl__group::after {
+  content: ''; flex: 1; height: 1px; background: var(--border); opacity: 0.7;
+}

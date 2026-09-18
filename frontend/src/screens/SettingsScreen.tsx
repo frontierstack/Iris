@@ -458,7 +458,7 @@ function AiAssistant({ settings }: { settings: Settings }) {
               <span className="field__hint">
                 {enforceLimits
                   ? 'A run stops at whichever ceiling it reaches first and writes its report from what it has.'
-                  : 'No step, time, write or compaction ceiling: the run folds its transcript as often as the model\'s window requires and restarts from its own record when folding is not enough. Use for a case that has to be worked to the end. The loop guard still applies: a run that repeats the same calls, or keeps getting nothing back, is stopped and asked for its report.'}
+                  : 'No step, time, write, compaction or restart ceiling: the run folds its transcript as often as the model\'s window requires and restarts from its own record, as many times as it takes, when folding is not enough. Use for a case that has to be worked to the end. The loop guard still applies - a run that keeps repeating one call is handed a plan naming calls it has not made, and only if it ignores that is it stopped and asked for its report.'}
               </span>
             </div>
             {enforceLimits ? (
@@ -489,7 +489,12 @@ function AiAssistant({ settings }: { settings: Settings }) {
                 cannot run away with the whole investigation, the transcript still folds itself down when it
                 reaches the model's context window, and Stop still halts the run on the server. The assistant
                 is told it has no budget and is instructed to record findings to the case as it goes, because
-                there is no budget warning coming to remind it.
+                there is no budget warning coming to remind it.{' '}
+                A run with the limits off can still end for two reasons, and both say so plainly rather than
+                reporting a budget: the <b>loop guard</b>, after a recovery plan naming other calls was
+                ignored; and the <b>model&apos;s context window</b>, once neither folding the transcript nor
+                restarting from the run&apos;s own record frees any more room - a model with a larger window,
+                or a follow-up in the same conversation, carries on from there.
               </div>
             )}
           </div>

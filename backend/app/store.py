@@ -349,6 +349,10 @@ class Store:
         # Same shape and same lifecycle as `graph_links` — persisted in case.json, overlaid per request,
         # never part of the built structure.
         self.graph_nodes: list[dict[str, Any]] = []
+        # Charts Iris computed for this case (app/charts.py) — persisted in case.json like the graph
+        # links, and for the same reason: they are what someone CONCLUDED from the evidence, not part
+        # of the evidence. Each one carries the queries it was built from, so it can be re-derived.
+        self.charts: list[dict[str, Any]] = []
         self._event_seq = 0
         # True while `activate` has cleared memory and not yet read the new case back off disk. A
         # save_meta() landing in that window writes an EMPTY case over a real one — see save_meta.
@@ -581,6 +585,7 @@ class Store:
             self._drop_derived()
             self.graph_links = []
             self.graph_nodes = []
+            self.charts = []
             self._event_seq = 0
             self.source_id_base = {}
 
@@ -836,7 +841,7 @@ class Store:
                     "created_at": self.created_at.isoformat(), "updated_at": datetime.now(UTC).isoformat(),
                     "case_set": [e.model_dump() for e in self.case_set.values()],
                     "notes": [n.model_dump() for n in self.notes], "manual_iocs": list(self.manual_iocs), "graph_links": list(self.graph_links),
-                    "graph_nodes": list(self.graph_nodes), "snapshot": snap,
+                    "graph_nodes": list(self.graph_nodes), "charts": list(self.charts), "snapshot": snap,
                     "event_count": sum(self.sources[s].events for s in self.case_source_ids()),
                     "sources": [
                         {"id": sid, "file": self.sources[sid].file, "path": str(self.source_paths.get(sid, "")),
@@ -916,6 +921,9 @@ class Store:
             raw_nodes = meta.get("graph_nodes")
             self.graph_nodes = ([n for n in raw_nodes if isinstance(n, dict) and n.get("id")]
                                 if isinstance(raw_nodes, list) else [])
+            raw_charts = meta.get("charts")
+            self.charts = ([c for c in raw_charts if isinstance(c, dict) and c.get("id")]
+                           if isinstance(raw_charts, list) else [])
             raw_iocs = meta.get("manual_iocs")
             self.manual_iocs = [i for i in raw_iocs if isinstance(i, dict) and i.get("value")] if isinstance(raw_iocs, list) else []
             try:

@@ -56,6 +56,7 @@ import './styles/findings.css';
 import './styles/graph-v2.css';
 import './styles/rawlog.css';
 import './styles/search-fields.css';
+import './styles/chart.css';
 import { App, preloadRouteChunk } from './App';
 
 // Ask for THIS route's chunk now, not after React has rendered the shell and reached its Suspense

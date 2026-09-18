@@ -3213,6 +3213,129 @@ def _list_graph_links(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
                       for l in links[:MAX_ROWS]]}
 
 
+# ================================================================= charts
+
+CHART_HELP = (
+    "Iris computes the numbers - you name the QUESTION. Every point comes from the same search the "
+    "result list uses, so the chart, a count_events of the same query and the Search screen can "
+    "never disagree. Never hand over numbers you worked out yourself: a chart is read as a fact "
+    "about the evidence."
+)
+
+
+@tool("create_chart",
+      "Draw a CHART on the case from the evidence - a line graph over time (the usual one: activity per "
+      "hour, one line per query, so 'this host' and 'everyone else' sit on the same axis), an area chart, "
+      "or a bar chart of a breakdown. mode='time' takes 1-6 queries and buckets them on ONE shared time "
+      "grid; mode='category' takes one query plus groupBy and draws a bar per value. " + CHART_HELP
+      + " Use it when the SHAPE is the finding - when the answer is 'it started at 02:11 and stopped at "
+      "02:14', a chart says that better than a sentence. The chart is saved on the case with the queries "
+      "it came from, appears on the case screen, and is reversible.",
+      {"title": {"type": "string", "description": "what the chart shows, as a sentence"},
+       "kind": {"type": "string", "enum": ["line", "area", "bar"], "description": "default line"},
+       "mode": {"type": "string", "enum": ["time", "category"], "description": "default time"},
+       "queries": {"type": "array", "items": {"type": "string"},
+                   "description": "one DSL query per line/series (mode=time); '' means every event"},
+       "labels": {"type": "array", "items": {"type": "string"},
+                  "description": "a short name per series; defaults to the query"},
+       "groupBy": {"type": "string", "description": "mode=category only: the field to count by"},
+       "bucket": {"type": "string", "enum": ["auto", "minute", "hour", "day", "week"],
+                  "description": "time bucket; auto picks a round unit that fits"},
+       "points": {"type": "integer", "description": "buckets (or bars) to draw, 8-240 (default 60)"},
+       "note": {"type": "string", "description": "one line on what it shows - the reading, not the data"},
+       "sources": {"type": "string"}, "sev": {"type": "string"},
+       "from": {"type": "string"}, "to": {"type": "string"},
+       "scope": {"type": "string", "enum": ["all", "case"]}},
+      ["title"], writes=True)
+def _create_chart(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
+    _budget(ctx)
+    _require_case("a chart")
+    from .. import charts as chart_build
+    store = _store()
+    qs = [_s(q, 2000) for q in (args.get("queries") or [])]
+    # `validate_query` RAISES the correction and returns the cleaned query — a malformed query must
+    # never reach the chart, because the DSL is forgiving and a broken one parses to "matches
+    # nothing", which as a line graph is a flat line an analyst reads as a fact about the evidence.
+    for q in qs:
+        validate_query(q)
+    try:
+        chart = chart_build.build(
+            store, title=_s(args.get("title"), 200), kind=_s(args.get("kind"), 20) or "line",
+            mode=_s(args.get("mode"), 20) or "time", queries=qs,
+            labels=[_s(x, 60) for x in (args.get("labels") or [])],
+            group_by=_s(args.get("groupBy"), 80), bucket=_s(args.get("bucket"), 20) or "auto",
+            points=_int(args, "points", 60, 8, 240), sources=_s(args.get("sources"), 400),
+            sev=_s(args.get("sev"), 80), frm=_s(args.get("from"), 40) or None,
+            to=_s(args.get("to"), 40) or None, scope=_scope(args), note=_prose(args.get("note"), 600),
+            created_by=f"AI assistant ({ctx.model})" if getattr(ctx, "model", "") else "AI assistant",
+            run_id=ctx.run_id)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from None
+    row = chart.model_dump()
+    with store.lock:
+        store.charts.append(row)
+    store.save_meta()
+    action = ctx.record("create_chart", f"drew a chart: {chart.title}",
+                        {"kind": "chart", "chartId": chart.id})
+    # The numbers come BACK, so the model can read its own chart and describe what it shows rather
+    # than asserting a shape it never saw. Peaks first: that is what a reader takes from a line graph.
+    peaks = []
+    for s in chart.series:
+        if not s.points:
+            continue
+        i = max(range(len(s.points)), key=lambda k: s.points[k])
+        peaks.append({"series": s.label, "total": s.total, "peak": s.points[i],
+                      "at": chart.x[i] if i < len(chart.x) else ""})
+    counted = f"{chart.counted:,}"
+    return {"chartId": chart.id, "title": chart.title, "kind": chart.kind, "mode": chart.mode,
+            "points": len(chart.x), "bucket": chart.xLabel, "series": len(chart.series),
+            "peaks": peaks, "total": chart.total, "withoutTimestamp": chart.withoutTimestamp,
+            "exact": chart.exact, "action": action,
+            "note": ("every point was computed by Iris from the queries above" if chart.exact else
+                     "the read was bounded, so the shape is from the first " + counted
+                     + " matches - say so if you describe totals")}
+
+
+@tool("list_charts",
+      "The charts already on this case, with the queries each one was built from.",
+      {})
+def _list_charts(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
+    store = _store()
+    with store.lock:
+        rows = [dict(c) for c in store.charts]
+    return {"total": len(rows),
+            "charts": [{"chartId": str(c.get("id") or ""), "title": _s(c.get("title"), 200),
+                        "kind": str(c.get("kind") or ""), "mode": str(c.get("mode") or ""),
+                        "points": len(c.get("x") or []),
+                        "series": [{"label": _s(s.get("label"), 60), "query": _s(s.get("query"), 300),
+                                    "total": s.get("total")}
+                                   for s in (c.get("series") or [])],
+                        "createdBy": _s(c.get("createdBy"), 80), "note": _s(c.get("note"), 300)}
+                       for c in rows[:MAX_ROWS]]}
+
+
+@tool("delete_chart",
+      "Remove a chart from the case - for one that is wrong or has been replaced. Charts are computed, "
+      "so a chart that is merely out of date is better REDRAWN than deleted.",
+      {"chartId": {"type": "string"},
+       "why": {"type": "string", "description": "why it is being removed"}},
+      ["chartId"], writes=True)
+def _delete_chart(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
+    _budget(ctx)
+    _require_case("a chart")
+    store = _store()
+    cid = _s(args.get("chartId"), 40).strip()
+    with store.lock:
+        before = next((dict(c) for c in store.charts if str(c.get("id") or "") == cid), None)
+        if before is None:
+            raise ToolError(f"no chart {cid!r} on this case - list_charts gives the ids")
+        store.charts = [c for c in store.charts if str(c.get("id") or "") != cid]
+    store.save_meta()
+    action = ctx.record("delete_chart", f"removed the chart: {_s(before.get('title'), 120)}",
+                        {"kind": "chart_deleted", "before": before})
+    return {"ok": True, "chartId": cid, "why": _prose(args.get("why"), 300), "action": action}
+
+
 # ================================================================= curation: edit and remove
 
 
@@ -3735,6 +3858,25 @@ def undo_action(action: dict[str, Any]) -> bool:
             if any(str(l.get("id") or "") == lid for l in store.graph_links):
                 return False
             store.graph_links.append(before)
+        store.save_meta()
+        return True
+    if kind == "chart":
+        cid = str(undo.get("chartId") or "")
+        with store.lock:
+            before = len(store.charts)
+            store.charts = [c for c in store.charts if str(c.get("id") or "") != cid]
+            removed = before - len(store.charts)
+        store.save_meta()
+        return removed > 0
+    if kind == "chart_deleted":
+        row = dict(undo.get("before") or {})
+        cid = str(row.get("id") or "")
+        if not cid:
+            return False
+        with store.lock:
+            if any(str(c.get("id") or "") == cid for c in store.charts):
+                return False
+            store.charts.append(row)
         store.save_meta()
         return True
     if kind == "case_active":

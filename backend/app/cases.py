@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import config
-from .models import CaseDetail, CaseNote, CaseSnapshot, CaseSummary, NoteRef, SourceBrief
+from .models import CaseChart, CaseDetail, CaseNote, CaseSnapshot, CaseSummary, NoteRef, SourceBrief
 from .normalize import to_iso
 from .store import STORE, _load_notes
 
@@ -277,6 +277,24 @@ def _detachable(sid: str) -> bool:
     return bool(name) and (config.LIBRARY_DIR / name).is_file()
 
 
+def _charts(rows: object) -> list[CaseChart]:
+    """The case's charts, from live memory or from case.json.
+
+    A row that no longer validates is DROPPED rather than raising: a chart is derived, so losing one
+    costs a redraw, while a 500 on the case screen costs the analyst the whole case. Same reasoning as
+    the snapshot below it.
+    """
+    out: list[CaseChart] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            out.append(CaseChart.model_validate(row))
+        except Exception:  # noqa: BLE001 - one bad chart must not take the case detail down
+            continue
+    return out
+
+
 def detail(case_id: str) -> CaseDetail:
     """Case detail. For the ACTIVE case everything is live; for others it comes from the persisted snapshot."""
     # A pending id has nothing on disk and is absent from /api/cases, so it must 404 here too - the
@@ -290,6 +308,7 @@ def detail(case_id: str) -> CaseDetail:
             srcs = [STORE.sources[s] for s in STORE.case_source_ids()]
             notes = STORE.notes
         return CaseDetail(**base.model_dump(), notes=list(notes), snapshot=STORE.snapshot(),
+                          charts=_charts(STORE.charts),
                           sourceList=[SourceBrief(id=s.id, file=s.file, parser=s.parser, events=s.events,
                                                   size=s.size, state=s.state, fromLibrary=_detachable(s.id))
                                       for s in srcs])
@@ -311,7 +330,8 @@ def detail(case_id: str) -> CaseDetail:
                                       parser=str(s.get("parser") or ""), events=int(s.get("events") or 0),
                                       size=int(s.get("size") or 0), state="READY",
                                       fromLibrary=bool(staged) and (config.LIBRARY_DIR / staged).is_file()))
-    return CaseDetail(**base.model_dump(), notes=_load_notes(meta.get("notes")), snapshot=snap, sourceList=briefs)
+    return CaseDetail(**base.model_dump(), notes=_load_notes(meta.get("notes")), snapshot=snap,
+                      sourceList=briefs, charts=_charts(meta.get("charts")))
 
 
 def list_cases() -> list[CaseSummary]:

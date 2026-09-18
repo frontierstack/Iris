@@ -62,6 +62,9 @@ model's hand — the model can decline any of them and carry on:
     about stopping: the failure it prevents is a run spending its last steps on one more search.
   • DOCUMENT_CHECK, once, when a run that did real work is about to finish having written NOTHING to
     the case. A finding that lives only in the chat is lost when the panel closes.
+And one that is NOT a nudge, because it is not optional and it is not about scope: LOOP_RECOVERY, the
+plan handed to a model that is repeating itself, bounded at MAX_LOOP_RECOVERIES. It exists because
+the alternative was ending the run — see the LOOP GUARD note below and ai/loopguard.py.
 
 The generator NEVER raises: every failure becomes a terminal {"type":"error"} event, like graph_review.
 """
@@ -81,10 +84,11 @@ from .argrepair import repair_arguments
 from .client import (AIError, BadToolArguments, ContextTooLong, LLMClient, ProviderUnavailable,
                      absorb_text_calls, has_tool_call_syntax, parse_text_tool_calls)
 from .history import HISTORY
-from .loopguard import LoopGuard, call_key as _cache_key, returned_something as _returned_something
+from .loopguard import (LoopGuard, MAX_RECOVERIES as MAX_LOOP_RECOVERIES, call_key as _cache_key,
+                        returned_something as _returned_something)
 from .system_prompts import PROMPTS
 from .prompts import (CONTINUE_OUTPUT, RESET_NOTE, ARG_TOO_BIG, BUDGET_NOTICE, CHECK_IN, COMPACTED_CONTINUE, CONTINUE_WORK,
-                      DOCUMENT_CHECK, LOOP_STOP, NO_CASE_LINE, run_budget, RECORD_NUDGE, REPORT_NOW,
+                      DOCUMENT_CHECK, LOOP_RECOVERY, LOOP_STOP, NO_CASE_LINE, run_budget, RECORD_NUDGE, REPORT_NOW,
                       PARALLEL_NUDGE, SUMMARY_CHECK, WRAP_UP, delegation_block,
                       investigator_user_prompt)
 from .tools import (REGISTRY, RunContext, ToolError, _s, tool_budget_seconds, tool_schemas,
@@ -150,6 +154,17 @@ MAX_SUMMARY_CHECKS = 3
 # identical successful write on its second, paging past 8 pages, and more than 24 calls in one turn;
 # 6 consecutive repeats or 24 consecutive calls returning nothing new end the run with reason `loop`,
 # which takes the wrap-up turn so the analyst still gets the report and can press Continue.
+# ...but ENDING the run is the last resort, not the first answer. Before that the model is handed a
+# RECOVERY PLAN (LOOP_RECOVERY + `LoopGuard.recovery()`), as an ordinary user turn, at the point the
+# guard has seen RECOVER_AT repeats or PLAN_REPEATS_AT announcements of a change of approach that
+# changed nothing. That second trigger is the analyst's report — *"it will announce this over and
+# over, 'I'm hitting a loop, let me try a different approach' without saying what it is going to do
+# different"* — and it is read off the turn's PROSE (`guard.begin_turn(prose)`), because when each
+# repeated turn calls a slightly different tool the call-shape rules cannot see the loop at all. The
+# plan names the calls this run has NOT made, forbids the announcement in those words, and offers two
+# exits that are not another call (the report; "the evidence is not in this workspace"). Bounded at
+# MAX_RECOVERIES, and each one SHORTENS the fuse (`repeat_limit`) — two ignored plans is evidence a
+# third would be ignored too, and the report the work earned is worth more than six more turns.
 # How many turns a run may lose to the PROVIDER refusing the model's own tool-call arguments before
 # the run fails. The client already re-sends such a turn once (client.stream_chat); this is the next
 # layer — the model is TOLD its call did not run and asked for a smaller one, which is the only thing
@@ -161,12 +176,14 @@ MAX_SUMMARY_CHECKS = 3
 # CONSECUTIVE: any turn the provider parses resets it, so three unrelated accidents spread across a
 # long run are not treated as one escalating failure.
 MAX_ARG_FAILURES = 3
+MAX_ARG_FAILURES_OFF = 12     # ...with the run limits OFF; see `limits()` on which bounds are POLICY
 # How many times the loop may ask for a call the model DESCRIBED and then did not make. An empty turn
 # is how the loop recognises "finished", so a turn that trails off into the call it was about to make
 # ("Let me write one and update the case:") used to be published as the final report with the work
 # undone. Bounded, because a model that narrates twice will narrate a third time; the run then takes
 # the wrap-up turn instead of shipping the fragment.
 MAX_CONTINUE_NUDGES = 2
+MAX_CONTINUE_NUDGES_OFF = 8
 # ---- the provider's OWN context window, which Iris cannot see and which is often SMALLER than
 # IRIS_AI_MAX_CONTEXT_TOKENS. Reported live as `openai HTTP 400 at .../chat/completions` and a dead
 # run: the analyst's llama.cpp gateway (context shift on — which only helps GENERATED tokens) refused
@@ -185,6 +202,7 @@ TOOL_RESULT_CHARS_SMALL = 2500   # new tool results are clipped harder once the 
 # on from where it stopped and the pieces are joined; bounded, because a model that cannot finish in
 # four replies is not going to.
 MAX_OUTPUT_CONTINUES = 3
+MAX_OUTPUT_CONTINUES_OFF = 12   # a long report on a small n_predict legitimately needs many pieces
 # ---- an IN-RUN RESTART when folding cannot fit. The brief plus the kept tail plus the fixed cost of
 # the system prompt and the tool schemas can exceed a small window outright, and the run used to END
 # there — "budget" between steps, an AIError telling the analyst to raise n_ctx on a provider refusal.
@@ -192,6 +210,10 @@ MAX_OUTPUT_CONTINUES = 3
 # (ai/continuation.py). `_reset_transcript` does exactly that inside the same run — the transcript is
 # rebuilt from the run's own persisted record, which ai/history.py has been writing as it went.
 MAX_RESETS = 3
+# ...and with the limits off there is no cap at all, which is safe by CONSTRUCTION rather than by
+# luck: a restart is taken only when it strictly shrinks the transcript (`est(reset) >= est()` is
+# refused below), so an unbounded count cannot spin — when a restart stops buying room the run ends
+# on the context wall with its own note, exactly as it does today.
 
 # When the TOOL SCHEMAS are this share of the whole window, they are the problem and the
 # transcript is not: a fold cannot touch them, because they are not in the messages. Past it
@@ -235,6 +257,15 @@ def _env_int(name: str, default: int, cap: int) -> int:
     return max(1, min(cap, v))
 
 
+def _of(limit: int) -> str:
+    """" of N" for a real ceiling, and nothing at all for one the analyst has switched off.
+
+    A note that reads "restart 4 of 1000000000" tells the analyst there is a limit where there is
+    none, which is the whole complaint this answers from the other end.
+    """
+    return "" if limit >= NO_LIMIT else f" of {limit}"
+
+
 def limits(max_steps: Optional[int] = None, max_seconds: Optional[int] = None) -> dict[str, int]:
     """The bounds in force for a run.
 
@@ -247,10 +278,34 @@ def limits(max_steps: Optional[int] = None, max_seconds: Optional[int] = None) -
     All three of those are now SETTINGS (`settings.ai`), not env-only constants: changing them used to
     take a restart and a shell, so a case that genuinely needed forty more steps just hit the wall.
     `settings.ai.enforceLimits = False` removes them entirely — `enforced: False` in the result, and
-    the ceilings come back as a sentinel no counter reaches. Two things are deliberately NOT covered by
-    that switch, because neither is policy: `maxToolSeconds` (one call may never eat the whole run) and
-    the context ceiling / compaction (the provider's window is a fact). Env vars still SEED the
-    defaults for a headless install; a value saved in the UI wins.
+    the ceilings come back as a sentinel no counter reaches. Env vars still SEED the defaults for a
+    headless install; a value saved in the UI wins.
+
+    OFF HAS TO MEAN OFF, and it did not. Reported: *"I found an issue with 'Limit how far a run can go'
+    — I found that the assistant still stopped even with that toggle set to off. So make sure that when
+    it's off, the assistant has no limits and will continue until it has finished the work in its
+    entirety."* The switch reached the three headline ceilings (steps, seconds, writes) and the
+    compaction count, and FOUR more ceilings sat behind it, each a module constant that no setting
+    could see and each of which ends a run in a way the analyst reads as a limit:
+
+      * `maxResets` — in-run restarts when folding cannot free room. At 3 a long run stopped with
+        `reason: budget`, i.e. "budget reached" with the budget switched off. Now uncapped when the
+        limits are off, which is safe by construction (see MAX_RESETS above).
+      * `maxArgFailures` — CONSECUTIVE turns the provider refused for unparsable tool arguments.
+      * `maxContinueNudges` — times the loop asks for a call the model described and did not make.
+      * `maxOutputContinues` — pieces a reply cut off at the output limit may be continued in.
+
+    The last three stay FINITE with the limits off (the `_OFF` twins) and that is deliberate, not a
+    half-measure: each one counts turns in which the model produced NOTHING — no parsable call, no
+    call at all, no more report — so an unbounded count is not "working to the end", it is a spin with
+    no evidence coming in and nothing else able to stop it. They are raised to where a model that can
+    make progress has plainly stopped making it.
+
+    THREE things the switch still does not touch, because none of them is policy, and the Settings
+    copy says so: `maxToolSeconds` (one call may never eat the whole run — `_watch`), the context
+    ceiling itself (the provider's window is a fact, and compaction is how a run survives it), and the
+    LOOP GUARD (ai/loopguard.py — a model repeating one call is not working, and it now gets a
+    recovery plan naming other calls before the run is ended at all).
     """
     ai = None
     try:
@@ -260,6 +315,8 @@ def limits(max_steps: Optional[int] = None, max_seconds: Optional[int] = None) -
     steps = _env_int("IRIS_AI_MAX_STEPS", 40, MAX_STEPS_CAP)
     secs = _env_int("IRIS_AI_MAX_SECONDS", 600, MAX_SECONDS_CAP)
     writes = MAX_WRITES
+    resets, arg_fails = MAX_RESETS, MAX_ARG_FAILURES
+    nudges, out_continues = MAX_CONTINUE_NUDGES, MAX_OUTPUT_CONTINUES
     enforced = True
     if ai is not None:
         enforced = bool(getattr(ai, "enforceLimits", True))
@@ -279,9 +336,14 @@ def limits(max_steps: Optional[int] = None, max_seconds: Optional[int] = None) -
         # stays; how many times a run may fold to stay under it is policy, and with the switch off it
         # was the one ceiling left — a long run hit its seventh fold and stopped on "budget" with the
         # limits supposedly off. A fold that makes no progress is still refused (the floor below).
-        steps = secs = writes = compactions = NO_LIMIT
+        steps = secs = writes = compactions = resets = NO_LIMIT
+        # ...and the three that count EMPTY turns are raised rather than removed — see the docstring.
+        arg_fails, nudges, out_continues = (MAX_ARG_FAILURES_OFF, MAX_CONTINUE_NUDGES_OFF,
+                                            MAX_OUTPUT_CONTINUES_OFF)
     return {"maxSteps": steps, "maxSeconds": secs, "maxContextTokens": ctx, "maxWrites": writes,
-            "maxCompactions": compactions, "enforced": int(enforced),
+            "maxCompactions": compactions, "enforced": int(enforced), "maxResets": resets,
+            "maxArgFailures": arg_fails, "maxContinueNudges": nudges,
+            "maxOutputContinues": out_continues,
             # a FIFTH bound, per CALL rather than per run: without it one tool could eat the whole
             # wall clock with nothing able to interrupt it. See `_watch`.
             "maxToolSeconds": tool_budget_seconds()}
@@ -997,7 +1059,12 @@ async def investigate(store: Any, objective: str, run_id: str,
     summarised = False       # the "write the summary note" prompt has been sent once
     document_checks = 0      # ...and how many times in all (re-armed after a fold, bounded)
     summary_checks = 0
-    guard = LoopGuard()      # the loop guard — see ai/loopguard.py; not subject to the limits switch
+    # The loop guard — see ai/loopguard.py; not subject to the limits switch. It is told which tools
+    # this run actually has, because its refusals NAME the calls to make instead and a suggestion the
+    # model cannot act on is worse than none.
+    guard = LoopGuard(available=frozenset(REGISTRY))
+    loop_recoveries = 0      # recovery plans handed to a model that kept repeating itself
+    lane_no = 0              # per-run ordinal of the dispatch lane, so the panel can GROUP a lane
     record_nudges = 0        # "record as you go" nudges sent
     solo_turns = 0           # consecutive turns that asked for exactly ONE read
     parallel_nudges = 0      # ...and how many times that has been pointed out
@@ -1071,7 +1138,8 @@ async def investigate(store: Any, objective: str, run_id: str,
                 # The context ceiling is not a reason to abandon an investigation: fold the earlier turns
                 # into a running brief and carry on. Bounded by maxCompactions (NO_LIMIT with the limits
                 # off) and by the floor below; when folding cannot buy room the run RESTARTS from its own
-                # record (`_reset_transcript`), and only past MAX_RESETS does it stop on the budget.
+                # record (`_reset_transcript`), and only past `maxResets` does it stop on the
+                # context wall — which with the limits OFF is never, by construction.
                 folded = None
                 if compactions < lim["maxCompactions"]:
                     # Try progressively shorter tails: on a run whose individual tool results are large,
@@ -1088,7 +1156,8 @@ async def investigate(store: Any, objective: str, run_id: str,
                 if folded is not None and est(folded[0]) >= floor():
                     folded = None      # it fits no better than before: not a fold worth taking
                 if folded is None:
-                    reset = _reset_transcript(messages, run_id) if resets < MAX_RESETS else None
+                    reset = (_reset_transcript(messages, run_id)
+                             if resets < lim["maxResets"] else None)
                     if reset is None or est(reset) >= floor() or est(reset) >= est():
                         note = ("context is full and neither summarising the earlier steps nor restarting "
                                 "from the run's own record frees enough room — stopping and reporting "
@@ -1102,7 +1171,7 @@ async def investigate(store: Any, objective: str, run_id: str,
                     resets += 1
                     re_arm()
                     note = (f"context is full and folding could not free enough room — restarted the "
-                            f"conversation from this run's own record (restart {resets} of {MAX_RESETS}): "
+                            f"conversation from this run's own record (restart {resets}{_of(lim['maxResets'])}): "
                             f"the objective, every tool call made, the findings so far, the verified "
                             f"event ids and everything written to the case were carried over. The "
                             f"assistant continues from where it was.")
@@ -1114,7 +1183,7 @@ async def investigate(store: Any, objective: str, run_id: str,
                     compactions += 1
                     _tell_compacted(messages)
                     re_arm()
-                    of = "" if lim["maxCompactions"] >= NO_LIMIT else f" of {lim['maxCompactions']}"
+                    of = _of(lim["maxCompactions"])
                     note = (f"compacted {dropped} earlier steps into a running brief "
                             f"(compaction {compactions}{of}) — the objective, the "
                             f"verified event ids and everything already written to the case were kept")
@@ -1200,20 +1269,20 @@ async def investigate(store: Any, objective: str, run_id: str,
                     # investigation here — which is what used to happen — throws away every finding
                     # for a sampling accident. Tell the model instead, and let it send a smaller call.
                     arg_failures += 1
-                    if arg_failures > MAX_ARG_FAILURES:
+                    if arg_failures > lim["maxArgFailures"]:
                         # The tool channel is unusable, but the investigation is not: 37 calls and 16
                         # writes were on the case when this used to `raise`. Stop calling tools and take
                         # the wrap-up turn, which is exactly what a budget stop does.
                         provider_args_exhausted = True
                         note = (f"the provider could not parse the tool-call arguments the model wrote "
-                                f"{MAX_ARG_FAILURES} turns running; no further tool calls will be made. "
+                                f"{lim['maxArgFailures']} turns running; no further tool calls will be made. "
                                 f"Writing the report from what the run already established. Provider "
                                 f"said: {str(exc)[:200]}")
                         HISTORY.append(run_id, {"kind": "warning", "text": note})
                         yield {"type": "warning", "message": note, "ids": []}
                         break
                     note = (f"the provider could not parse the tool-call arguments the model wrote "
-                            f"(attempt {arg_failures} of {MAX_ARG_FAILURES}); nothing ran. Asked it to "
+                            f"(attempt {arg_failures} of {lim['maxArgFailures']}); nothing ran. Asked it to "
                             f"send a smaller call. Provider said: {str(exc)[:200]}")
                     HISTORY.append(run_id, {"kind": "warning", "text": note})
                     yield {"type": "warning", "message": note, "ids": []}
@@ -1273,7 +1342,8 @@ async def investigate(store: Any, objective: str, run_id: str,
                     if exhausted:
                         # Folding is not enough: RESTART from the run's own record, the recovery the
                         # analyst would otherwise perform by hand with "continue" in a new turn.
-                        reset = _reset_transcript(messages, run_id) if resets < MAX_RESETS else None
+                        reset = (_reset_transcript(messages, run_id)
+                                 if resets < lim["maxResets"] else None)
                         if reset is not None and est(reset) < est_now:
                             messages = reset
                             resets += 1
@@ -1282,7 +1352,7 @@ async def investigate(store: Any, objective: str, run_id: str,
                             note = (f"the provider refused the request because the conversation no longer "
                                     f"fits the model's context window (estimated ~{est_now:,} tokens) and "
                                     f"folding could not make it fit — restarted the conversation from this "
-                                    f"run's own record (restart {resets} of {MAX_RESETS}): every tool call "
+                                    f"run's own record (restart {resets}{_of(lim['maxResets'])}): every tool call "
                                     f"made, the findings so far, the verified event ids and everything "
                                     f"written to the case were carried over. Retrying the same turn.")
                             HISTORY.append(run_id, {"kind": "status", "text": note})
@@ -1387,13 +1457,13 @@ async def investigate(store: Any, objective: str, run_id: str,
                 piece = final_msg.get("content") or "".join(buf)
                 # A REPLY CUT OFF AT THE OUTPUT LIMIT IS NOT THE REPORT. finish_reason 'length' with no
                 # call in it means the model was still writing; ask it to go on and join the pieces.
-                if (finish == "length" and output_continues < MAX_OUTPUT_CONTINUES
+                if (finish == "length" and output_continues < lim["maxOutputContinues"]
                         and not runs.stop_requested(run_id)):
                     output_continues += 1
                     partial_answer += piece
                     messages.append({"role": "user", "content": CONTINUE_OUTPUT})
                     note = (f"the model's reply was cut off at its output limit — asked it to continue "
-                            f"from where it stopped ({output_continues} of {MAX_OUTPUT_CONTINUES})")
+                            f"from where it stopped ({output_continues} of {lim['maxOutputContinues']})")
                     HISTORY.append(run_id, {"kind": "status", "text": note})
                     yield {"type": "status", "text": note, "outputContinue": output_continues}
                     continue
@@ -1448,12 +1518,12 @@ async def investigate(store: Any, objective: str, run_id: str,
                 # and the summary note was never written. Ask for the call; past the bound, take the
                 # wrap-up turn so the analyst gets a real report rather than the fragment.
                 if _promises_action(answer) and not runs.stop_requested(run_id):
-                    if continue_nudges < MAX_CONTINUE_NUDGES:
+                    if continue_nudges < lim["maxContinueNudges"]:
                         continue_nudges += 1
                         messages.append({"role": "user", "content": CONTINUE_WORK})
                         note = ("the assistant described a tool call and did not make it — asked it to "
                                 f"make the call or say the work is finished (nudge {continue_nudges} of "
-                                f"{MAX_CONTINUE_NUDGES})")
+                                f"{lim['maxContinueNudges']})")
                         HISTORY.append(run_id, {"kind": "status", "text": note})
                         yield {"type": "status", "text": note, "continueNudge": continue_nudges}
                         continue
@@ -1465,7 +1535,12 @@ async def investigate(store: Any, objective: str, run_id: str,
             # THE LOOP GUARD sees every call of this turn: the per-turn cap counts from here, and once
             # it trips mid-turn the remaining calls are refused (never skipped — every tool_call must
             # be answered or the provider rejects the transcript) and the run goes to the wrap-up.
-            guard.begin_turn()
+            # It also sees what the turn SAID. A turn that narrates "I'm hitting a loop, let me try a
+            # different approach" and then sends a call that is refused again is the reported symptom,
+            # and it is invisible to the call-shape rules when the repeated turns call different tools.
+            # The prose is taken from the assembled message with the deltas as the fallback, exactly as
+            # the back-fill above does, so a provider that streams no deltas is read too.
+            guard.begin_turn(str(final_msg.get("content") or "") or "".join(buf))
             # LANES. A turn's tool calls used to run one after another, however many the model asked
             # for in one reply — so four independent counts over an 11 M-event pool cost four times
             # one search, in series, while the analyst watched a single spinner. They are independent
@@ -1486,6 +1561,7 @@ async def investigate(store: Any, objective: str, run_id: str,
             for lane in _lanes(calls, max_parallel):
                 if runs.stop_requested(run_id):
                     break
+                lane_no += 1
                 prepared: list[dict[str, Any]] = []
                 for call in lane:
                     fn = call.get("function") or {}
@@ -1537,7 +1613,8 @@ async def investigate(store: Any, objective: str, run_id: str,
                     entry: dict[str, Any] = {"id": call_id, "name": name, "args": args, "writes": writes,
                                              "repairs": repairs, "run": False, "ok": False,
                                              "result": "", "took": 0, "body": "", "t0": 0.0,
-                                             "blocked": blocked_write, "lane": len(lane)}
+                                             "blocked": blocked_write, "lane": len(lane),
+                                             "laneId": lane_no}
                     if parse_err:
                         guard.skip()
                         entry["result"] = parse_err
@@ -1570,13 +1647,14 @@ async def investigate(store: Any, objective: str, run_id: str,
                 for entry in prepared:
                     HISTORY.append(run_id, {"kind": "tool", "id": entry["id"], "name": entry["name"],
                                             "args": entry["args"], "writes": entry["writes"],
-                                            "lane": entry["lane"]})
+                                            "lane": entry["lane"], "laneId": entry["laneId"]})
                     # The STAMPED id, not the provider's: one that omits the id (or repeats one) made
                     # every live tool_call carry `id: null`, so the panel matched the RESULT against the
                     # first null-id card and the rest span forever. The persisted transcript already
                     # used the stamped id; the stream uses the same one, so live and reloaded agree.
                     yield {"type": "tool_call", "id": entry["id"], "name": entry["name"],
-                           "arguments": entry["args"], "step": step, "lane": entry["lane"]}
+                           "arguments": entry["args"], "step": step, "lane": entry["lane"],
+                           "laneId": entry["laneId"]}
                     if entry["blocked"]:
                         note = (f"the model's arguments for {entry['name']} were CUT OFF mid-value (the "
                                 f"reply hit its token limit). {entry['name']} writes to the case, so the "
@@ -1629,7 +1707,8 @@ async def investigate(store: Any, objective: str, run_id: str,
                             line = (f"agent {who} finished — {int(ev.get('calls') or 0)} tool calls in "
                                     f"{int(ev.get('tookMs') or 0) / 1000:.1f}s"
                                     + (f" ({ended})" if ended else ""))
-                        HISTORY.append(run_id, {"kind": "status", "text": line})
+                        HISTORY.append(run_id, {"kind": "status", "text": line, "agent": who,
+                                                "phase": phase})
                         yield {"type": "status", "text": line, "agent": who, "phase": phase}
                     if pending_calls and time.monotonic() - said_at >= AGENT_TICK:
                         said_at = time.monotonic()
@@ -1637,8 +1716,8 @@ async def investigate(store: Any, objective: str, run_id: str,
                                 + ", ".join(f"{a} ({n} call{'s' if n != 1 else ''})"
                                             for a, n in sorted(pending_calls.items())))
                         pending_calls = {}
-                        HISTORY.append(run_id, {"kind": "status", "text": line})
-                        yield {"type": "status", "text": line, "agents": True}
+                        HISTORY.append(run_id, {"kind": "status", "text": line, "phase": "tick"})
+                        yield {"type": "status", "text": line, "agents": True, "phase": "tick"}
                     for task in done:
                         entry = tasks[task]
                         try:
@@ -1682,8 +1761,13 @@ async def investigate(store: Any, objective: str, run_id: str,
                 solo_turns += 1
             else:
                 solo_turns = 0
+            # ...and NOT while the run is looping. A model whose calls are being refused is about to be
+            # handed a recovery plan, and "you could have run those reads in parallel" is advice about
+            # the SHAPE of work that is not happening — two user messages in one turn, one of them
+            # irrelevant, competing for the attention of the model least able to spare it.
             if (solo_turns >= PARALLEL_STREAK and parallel_nudges < MAX_PARALLEL_NUDGES
-                    and not guard.tripped and not runs.stop_requested(run_id) and est() < ceiling):
+                    and not guard.tripped and not guard.needs_recovery() and not guard.repeat_streak
+                    and not runs.stop_requested(run_id) and est() < ceiling):
                 parallel_nudges += 1
                 solo_turns = 0
                 messages.append({"role": "user", "content": PARALLEL_NUDGE.format(
@@ -1692,6 +1776,32 @@ async def investigate(store: Any, objective: str, run_id: str,
                         f"that independent reads run together and that it can delegate")
                 HISTORY.append(run_id, {"kind": "status", "text": note})
                 yield {"type": "status", "text": note, "parallelNudge": parallel_nudges}
+
+            # RECOVERY BEFORE ENDING. The guard has seen enough to know this run is looping, and the
+            # analyst's instruction was not "stop it sooner" but *"have the model be able to recover
+            # and progress"*. A third identical refusal cannot do that: the model has already read two
+            # and answered them with a sentence about trying a different approach. So it is handed a
+            # PLAN as an ordinary user turn — what did not run, what it has already called, what it has
+            # NOT, and one instruction with three acceptable answers, one of which is the report.
+            #
+            # `recovered()` then clears the STREAKS so the plan gets a real chance, and nothing else:
+            # the identical call stays refused (the plan asks for a different one, and letting the
+            # repeated call through would make the plan a reset button) and the fuse shortens, so an
+            # ignored plan costs the run less than the one before it.
+            if (not guard.tripped and guard.needs_recovery() and not runs.stop_requested(run_id)
+                    # ...and only with room to pay for the turn. A run at its ceiling that is handed
+                    # one more user message compacts or stops on the budget, which is the same trade
+                    # DOCUMENT_CHECK refuses to make: losing the report to ask for a re-plan is worse
+                    # than letting the streaks end the run with what it has.
+                    and est() < ceiling):
+                plan = guard.recovery()          # counts the recovery and builds the body
+                loop_recoveries = guard.recoveries
+                guard.recovered()
+                messages.append({"role": "user", "content": LOOP_RECOVERY.format(state=plan)})
+                note = (f"the assistant was repeating itself — handed it a recovery plan naming the "
+                        f"calls it has not made (plan {loop_recoveries} of {MAX_LOOP_RECOVERIES})")
+                HISTORY.append(run_id, {"kind": "status", "text": note})
+                yield {"type": "status", "text": note, "loopRecovery": loop_recoveries}
 
             if guard.tripped:
                 # A WARNING, never folded in the panel: the analyst should see that the run was ended
@@ -1714,7 +1824,15 @@ async def investigate(store: Any, objective: str, run_id: str,
         # this turn exists — so they route here too, with a prompt that does not claim a spent budget.
         if reason in ("max_steps", "timeout", "budget", "tool_arguments", "unfinished", "loop") and not runs.stop_requested(run_id):
             budget_stop = reason in ("max_steps", "timeout", "budget")
-            note = (f"budget reached ({reason}) — writing the final report" if budget_stop else
+            # ...and with the LIMITS OFF there is no budget to have reached. `budget` is still reachable
+            # there — it is the one ceiling that is a fact rather than a policy, the provider's context
+            # window, once folding and restarting have both stopped buying room — so the note names
+            # THAT instead. Saying "budget reached" to an analyst who switched the budget off is how
+            # this was reported in the first place ("the assistant still stopped even with that toggle
+            # set to off"), and it sends them looking for a setting that is not there.
+            note = (("the model's context window is full and could not be freed — writing the final "
+                     "report from what is established" if not lim.get("enforced", 1) else
+                     f"budget reached ({reason}) — writing the final report") if budget_stop else
                     ("the provider could not parse the assistant's tool calls — writing the final report "
                      "from what it established" if reason == "tool_arguments" else
                      "the assistant was repeating itself — asking it for the final report" if reason == "loop" else
@@ -1727,7 +1845,7 @@ async def investigate(store: Any, objective: str, run_id: str,
             messages.append({"role": "user", "content": WRAP_UP if budget_stop else
                              (LOOP_STOP.format(why=guard.tripped) if reason == "loop" else REPORT_NOW)})
             pieces: list[str] = []
-            for _n in range(MAX_OUTPUT_CONTINUES + 1):
+            for _n in range(int(lim["maxOutputContinues"]) + 1):
                 buf = []
                 wrap_msg: dict[str, Any] = {}
                 wrap_finish = ""
@@ -1756,12 +1874,13 @@ async def investigate(store: Any, objective: str, run_id: str,
                 pieces.append(piece)
                 # The report itself can be cut off at the output limit — the same continuation as
                 # in the main loop, or a budget stop hands the analyst half a report.
-                if wrap_finish != "length" or runs.stop_requested(run_id) or _n >= MAX_OUTPUT_CONTINUES:
+                if (wrap_finish != "length" or runs.stop_requested(run_id)
+                        or _n >= lim["maxOutputContinues"]):
                     break
                 messages.append({"role": "assistant", "content": piece})
                 messages.append({"role": "user", "content": CONTINUE_OUTPUT})
                 note = (f"the report was cut off at the model's output limit — asked it to continue "
-                        f"from where it stopped ({_n + 1} of {MAX_OUTPUT_CONTINUES})")
+                        f"from where it stopped ({_n + 1} of {lim['maxOutputContinues']})")
                 HISTORY.append(run_id, {"kind": "status", "text": note})
                 yield {"type": "status", "text": note, "outputContinue": _n + 1}
             wrapped = "".join(pieces)
