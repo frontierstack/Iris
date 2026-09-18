@@ -744,6 +744,41 @@ interface CaseSummary { id:string; name:string; analyst:string; createdAt:string
 - Storage: `$IRIS_DATA_DIR/cases/<id>/{case.json, uploads/}`; legacy single-case files at the data root are migrated into `cases/CASE-0001` on first start.
 - `GET /api/case` keeps returning the ACTIVE case (unchanged shape) and all existing endpoints operate on the active case.
 
+## Charts on a case — added
+```ts
+/** One line (or one set of bars) and the QUERY it was computed from. */
+interface ChartSeries { label:string; query:string; points:number[]; total:number }
+interface CaseChart {
+  id:string; title:string; kind:'line'|'area'|'bar'; mode:'time'|'category';
+  x:string[];              /** bucket starts (ISO, mode 'time') or category labels */
+  xLabel:string; yLabel:string; series:ChartSeries[];
+  bucketSec:number; groupBy:string;
+  scope:string; sources:string; sev:string; rangeFrom:string; rangeTo:string;
+  total:number; counted:number; withoutTimestamp:number; withoutField:number;
+  distinctGroups:number; truncated:boolean;
+  exact:boolean;           /** false = the shape is of the first `counted` matches, not of all of them */
+  note:string; createdAt:string; createdBy:string; runId:string;
+}
+```
+- `GET    /api/case/charts` → `CaseChart[]`
+- `POST   /api/case/charts` body `{title; kind?; mode?; queries?:string[]; labels?:string[]; groupBy?;
+   bucket?; points?; note?; sources?; sev?; rangeFrom?; rangeTo?; scope?}` → CaseChart. 400 with an
+   analyst-readable reason (no title, no query, a `groupBy` missing on a category chart, a query that
+   matches nothing with a parsed timestamp); 409 when there is no case to put it on.
+- `DELETE /api/case/charts/{chartId}` → `CaseChart[]` (the remainder). 404 if unknown.
+- `CaseDetail.charts: CaseChart[]` — the case screen reads them from there rather than from a second
+  request, because they change only when something writes one and that already invalidates the detail.
+- **Iris computes every point; the caller names the QUESTION.** `app/charts.py` runs each series
+  through `search_engine.search` — the same path `GET /api/events` and `/api/events/histogram` use — so
+  a chart, a `count_events` of the same query and the result list can never disagree about what
+  matched. A series supplied as numbers is not accepted from anywhere: a chart is read as a fact about
+  the evidence, and one that was typed rather than counted is wrong in a way nothing on screen can
+  show. Two honesty rules travel with the payload: an event with no parsed timestamp is in NO bucket
+  (`withoutTimestamp`, because a raw phase-1 source has no timestamps and inventing one draws a spike
+  where the log is silent), and a bounded read says so (`exact:false` + `counted`).
+- The assistant's equivalents are `create_chart` / `list_charts` / `delete_chart` (writes, undoable,
+  recorded in `AiRun.actions` like every other case write).
+
 ## Case set — curated events that ARE the case — added
 Sources put events into a case; the **case set** is the subset the analyst has explicitly marked as part of the
 investigation. It replaces the old pin concept entirely (`/api/pins` is gone): one action, one list, and it now drives
@@ -1185,6 +1220,15 @@ interface AiAction { id:string; runId:string; tool:string; at:string; summary:st
 interface AiTranscriptEntry { seq:number; kind:'status'|'step'|'text'|'tool'|'warning'; text:string;
   step:number; id:string; name:string; args:Record<string,unknown>; writes:boolean;
   ok:boolean|null; summary:string; tookMs:number;
+  /* how many calls were dispatched TOGETHER with this one (1 = alone), and WHICH dispatch group, as a
+     per-run ordinal (0 = not applicable / an older transcript). `lane` alone is the WIDTH of a group
+     and cannot tell two successive pairs from one group of four, so the panel could tag a card
+     "parallel" but never draw the group; cards sharing a `laneId` are rendered as one block. */
+  lane?:number; laneId?:number;
+  /* a `status` entry about a worker agent (delegate_investigation): which agent, and
+     start | call | end | tick (the rolled-up "agents working" line). Persisted, not live-only, so the
+     agent roster survives a reload and appears in a polling tab. */
+  agent?:string; phase?:string;
   /* when this entry was last patched, on the same counter as `seq`. A `tool` entry is updated in place
      when its result lands and keeps its `seq`, so `?since=` selects on BOTH — without it a polling
      client never received the result and the call rendered as still running. 0 = never patched. */
@@ -1394,7 +1438,7 @@ total), `aggregate_events` (`groupBy` = source/sourceId/file/host/user/sev/detec
 `include=raw,fields,entities`), `get_events` (**batch read, ≤25 ids**), `get_event` (the deep dive on ONE
 event: correlations, baseline, file context), `list_event_fields`, `get_timeline`, `list_detections`,
 `list_anomalies`, `list_detection_rules`, `build_graph`, `graph_sources`, `graph_find`, `graph_node`,
-`graph_path`, `list_iocs`, `list_notes`, `list_cases`, `get_case_set`, `list_graph_links`.
+`graph_path`, `list_iocs`, `list_notes`, `list_cases`, `get_case_set`, `list_graph_links`, `list_charts`.
 Write: `create_case`, `update_case` (name/summary), `activate_case`, `add_events_to_case`,
 `remove_events_from_case`, `annotate_case_event`, `annotate_case_events` (**batch — a whole case timeline in
 one call**), `add_ioc`/`update_ioc`/`delete_ioc`, `add_note`/`update_note`/`delete_note`,
