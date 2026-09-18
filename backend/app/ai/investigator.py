@@ -880,6 +880,7 @@ _SUMMARY: dict[str, Callable[[dict[str, Any]], str]] = {
     "list_iocs": lambda d: f"{_len(d, 'iocs')} indicator(s)",
     "list_notes": lambda d: f"{_len(d, 'notes')} case note(s)",
     "list_graph_links": lambda d: f"{_len(d, 'links')} manual graph link(s)",
+    "list_charts": lambda d: f"{_len(d, 'charts')} chart(s) on the case",
     "list_cases": lambda d: f"{d.get('total', _len(d, 'cases'))} case(s), active {d.get('activeCaseId') or 'none'}",
     "get_case_set": lambda d: f"{d.get('shown', _len(d, 'entries'))} of {d.get('total', 0)} curated event(s)",
     "get_case_state": lambda d: (f"case {d.get('caseId')} '{d.get('name')}'" if d.get("hasCase")
