@@ -605,6 +605,39 @@ PARALLEL_NUDGE = (
     "Either way, keep going — this is about how you ask, not about whether to continue.")
 
 
+# ===================================================================== AUTOMATIC DELEGATION
+# The planner behind `investigator._plan_delegation`. Asking the lead to delegate did not work: on
+# the analyst's own model a run made six tool turns, four of them INDEPENDENT drill-downs taken one
+# ~30 s model turn at a time, was reminded it could delegate, and carried on alone. So Iris plans
+# the split itself, with ONE small request that carries no tool schemas at all (the lead's requests
+# carry ~14k tokens of them, which is most of a local model's prefill) and dispatches the agents
+# through the ordinary tool path. The reply is a JSON object and NOTHING else; an empty list is a
+# legitimate answer and is respected - a dependent chain must not be forced into a fan-out.
+PLANNER_SYSTEM = (
+    "You plan parallel work for a log investigation. A lead analyst is part-way through; you split "
+    "what is LEFT into questions that separate analyst agents can answer AT THE SAME TIME. Reply "
+    "with ONE JSON object and nothing else - no prose, no markdown fence.")
+
+PLANNER_USER = (
+    "THE ANALYST'S OBJECTIVE:" + NL + "{objective}" + NL + NL +
+    "WHAT THE LEAD HAS DONE AND FOUND SO FAR:" + NL + "{digest}" + NL + NL +
+    "THE WORKSPACE:" + NL + "{context}" + NL + NL +
+    "Write between 2 and {agents} tasks. Each task goes to an agent that has read-only search and "
+    "aggregation tools over these logs, works ALONE, and cannot see this conversation or the "
+    "other agents. So each task must be:" + NL +
+    "- INDEPENDENT of the others - none needs another's answer first;" + NL +
+    "- NOT ALREADY ANSWERED above - split what is still open, do not repeat finished work;" + NL +
+    "- SPECIFIC - name the exact values to chase (addresses, accounts, hosts, field names and the "
+    "values already seen in them, time windows). One per suspect, per source, per category of "
+    "activity, or per open question is the usual shape." + NL +
+    "Put everything the agent needs to know in `focus`: the field names that matter, exact values, "
+    "counts already established, the query syntax that worked (field:value, AND, NOT)." + NL + NL +
+    "If what is left is ONE chain where each step depends on the last, or the objective is already "
+    "answered, reply {{\"tasks\": []}} - that is a correct answer, not a failure." + NL + NL +
+    "Reply format:" + NL +
+    '{{"tasks": [{{"name": "short-label", "objective": "the full question", "focus": "context the agent needs"}}]}}')
+
+
 # ===================================================================== DELEGATION
 # The prompts the WORKER agents run on (ai/subagents.py). A worker is not a small copy of the lead:
 # it has no case, no writes and no report to file — it answers ONE scoped question and hands back

@@ -302,7 +302,7 @@ function toBlocks(entries: AiTranscriptEntry[]): Block[] {
  */
 type TrailNode =
   | { k: 'tool'; key: number; e: AiTranscriptEntry; turn: boolean; lead: string }
-  | { k: 'note'; key: number; text: string; turn: boolean; agent?: string; phase?: string }
+  | { k: 'note'; key: number; text: string; turn: boolean; agent?: string; phase?: string; task?: string }
   | { k: 'prose'; key: number; text: string; turn: boolean };
 
 function trailNodes(blocks: Block[]): TrailNode[] {
@@ -322,7 +322,7 @@ function trailNodes(blocks: Block[]): TrailNode[] {
         // roster instead of a column of near-identical sentences. Persisted on the entry, so this
         // works in a polling tab and after a reload too.
         if (e.text.trim()) {
-          out.push({ k: 'note', key: e.seq, text: e.text, turn, agent: e.agent, phase: e.phase });
+          out.push({ k: 'note', key: e.seq, text: e.text, turn, agent: e.agent, phase: e.phase, task: e.task });
           turn = false;
         }
         continue;
@@ -697,6 +697,9 @@ type AgentRow = { agent: string; phase: string; text: string; task: string };
 
 /** The question out of an agent status line: "agent <name> started: <the question>". */
 function taskOf(n: Extract<TrailNode, { k: 'note' }>): string {
+  // The entry's own `task` field first: the agent's line is PATCHED in place while it works, so by
+  // the time anyone reloads the run its text says "finished" and the question is only here.
+  if (n.task) return n.task;
   if ((n.phase ?? '') !== 'start') return '';
   const m = /started:\s*([\s\S]+)$/.exec(n.text);
   return (m ? m[1]! : '').trim();
@@ -1678,7 +1681,12 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
           setStreamingId(ev.runId);
           break;
         case 'status':
-          push({ kind: 'status', text: ev.text });
+          // `agent` / `phase` / `task` MUST ride along. They were dropped here, so while a run was
+          // STREAMING the trail could never fold worker-agent lines into the roster (no "3 working"
+          // chip, no per-agent rows) — it appeared only after the run ended and the persisted
+          // transcript replaced this one. Reported, three times, as "I'm not seeing multiple agents
+          // working": they were working, and the one tab watching them live could not show it.
+          push({ kind: 'status', text: ev.text, agent: ev.agent, phase: ev.phase, task: ev.task });
           break;
         case 'step':
           push({ kind: 'step', step: ev.step });
@@ -1689,8 +1697,10 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
           if (!raf) raf = requestAnimationFrame(tick);
           break;
         case 'tool_call':
+          // ...and `laneId`, for the same reason: `groupTrail` brackets calls that share one, so
+          // without it the "N calls at the same time" block never formed during a live run.
           push({ kind: 'tool', id: ev.id, name: ev.name, args: ev.arguments, lane: ev.lane ?? 1,
-                 writes: writeToolsRef.current.has(ev.name) });
+                 laneId: ev.laneId, writes: writeToolsRef.current.has(ev.name) });
           break;
         case 'tool_result':
           // Match on the call id; fall back to the LAST unfinished call of the same name. The card's

@@ -197,7 +197,11 @@ interface Settings {
   theme:string;                                   // 'iris-dark' | 'graphite' | 'paper' | 'midnight-blue' | 'solar'
   compute:{ mode:'auto'|'cuda'|'cpu' };           // user preference
   ai:{ provider:'none'|'openai'; model:string /*default gpt-4o-mini*/; baseUrl:string /*optional; blank = https://api.openai.com/v1; any OpenAI-compatible endpoint works*/;
-       apiKey:string /*masked on read: '••••'+last4 or ''*/ ; agents:number /*1..4 parallel analysis agents*/ ;
+       apiKey:string /*masked on read: '••••'+last4 or ''*/ ; agents:number /*1..4: how many independent READS of one turn run together, and how many worker agents a delegation may run (2 is the floor)*/ ;
+       autoDelegate:boolean /*default true. Once a run has made a couple of tool turns alone, Iris plans a split of the
+                              remaining work itself (one small request, no tool schemas) and runs worker agents on it as an
+                              ordinary delegate_investigation turn - it does not wait for the model to ask. A question
+                              answered in a turn or two never triggers it; an empty plan is respected.*/ ;
        systemPromptId:string /*the saved instructions appended to the built-in prompt by default; '' = the built-in prompt alone*/ ;
        /* The investigator's RUN BUDGET, editable on Settings -> AI assistant. `enforceLimits:false`
           removes the step, wall-clock and write ceilings entirely, for a case that has to be worked
@@ -1226,9 +1230,11 @@ interface AiTranscriptEntry { seq:number; kind:'status'|'step'|'text'|'tool'|'wa
      "parallel" but never draw the group; cards sharing a `laneId` are rendered as one block. */
   lane?:number; laneId?:number;
   /* a `status` entry about a worker agent (delegate_investigation): which agent, and
-     start | call | end | tick (the rolled-up "agents working" line). Persisted, not live-only, so the
-     agent roster survives a reload and appears in a polling tab. */
-  agent?:string; phase?:string;
+     start | call | end. ONE entry per agent: it is appended on `start` and PATCHED IN PLACE while the
+     agent works ("working - 4 calls so far, on count_events") and when it finishes, with `updSeq`
+     moved so `?since=` resends it - a two-minute delegation costs three transcript lines, not sixty.
+     `task` is the QUESTION the agent was given; it has its own field because the text is rewritten. */
+  agent?:string; phase?:'start'|'call'|'end'; task?:string;
   /* when this entry was last patched, on the same counter as `seq`. A `tool` entry is updated in place
      when its result lands and keeps its `seq`, so `?since=` selects on BOTH — without it a polling
      client never received the result and the call rendered as still running. 0 = never patched. */
@@ -1255,7 +1261,9 @@ type AiRunEvent =
       recorded nothing in the case" one. All three are ordinary status lines. */
   | { type:'status'; text:string; parallel?:number; checkIn?:number; budgetNotice?:boolean; documentCheck?:boolean;
       recordNudge?:number; summaryCheck?:boolean;
-      agent?:string; phase?:'start'|'done'; agents?:true;     // a WORKER AGENT started or finished, or a roll-up of what they are all doing
+      agent?:string; phase?:'start'|'call'|'end'; task?:string; // a WORKER AGENT: started (with its question in `task`), its progress every ~3 s, finished
+      autoDelegate?:boolean;                                  // true: Iris planned a delegation itself; false: it tried and skipped (the text says why)
+      providerSerialised?:true;                               // said ONCE: the provider served the agents one at a time - see delegate_investigation's result
       parallelNudge?:number;                                  // N turns in a row asked for a single read - a reminder that independent reads go together
       toolsCompacted?:number }                                // the tool schemas were shortened to fit the window; that many tokens freed
   /** recordNudge = the "record as you go" nudge: N productive reads and nothing written to the case yet — record
@@ -1264,7 +1272,7 @@ type AiRunEvent =
       wrote something and no add_note / update_case landed). */
   | { type:'step'; step:number; elapsedSec:number }
   | { type:'delta'; text:string; step:number }                       // the model's prose, streamed
-  | { type:'tool_call'; id:string; name:string; arguments:object; step:number; lane:number }
+  | { type:'tool_call'; id:string; name:string; arguments:object; step:number; lane:number; laneId:number }
   | { type:'tool_result'; id:string; name:string; ok:boolean; tookMs:number; summary:string; data:unknown }
   /** LANES. The tool calls of ONE assistant message are dispatched in lanes: consecutive READS share a
       lane and run AT THE SAME TIME (up to settings.ai.agents, 1-4, the "Parallel tool calls" slider),

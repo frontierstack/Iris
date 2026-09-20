@@ -79,7 +79,7 @@ from typing import Any, AsyncIterator, Callable, Optional
 import orjson
 
 from ..config import get_settings
-from . import compaction, continuation, eventids, runs, subagents
+from . import autodelegate, compaction, continuation, eventids, readcache, runs, subagents
 from .argrepair import repair_arguments
 from .client import (AIError, BadToolArguments, ContextTooLong, LLMClient, ProviderUnavailable,
                      absorb_text_calls, has_tool_call_syntax, parse_text_tool_calls)
@@ -610,7 +610,7 @@ DEFAULT_PARALLEL = 3
 # it may roll the workers' individual calls into one line. The poll never delays a result — the wait
 # is still FIRST_COMPLETED, the timeout only gives it somewhere to come up for air.
 AGENT_POLL = 0.5
-AGENT_TICK = 6.0
+AGENT_TICK = 3.0
 
 
 def parallel_limit(settings_ai: Any = None) -> int:
@@ -709,6 +709,15 @@ async def _run_tool(name: str, args: dict[str, Any], ctx: RunContext) -> tuple[b
     # Per-tool budget. Almost every tool is one query and the factor is 1.0; `delegate_investigation`
     # is legitimately long (several agents, each with a tool loop of its own) and would otherwise be
     # abandoned mid-fan-out, losing every agent's report at once — see Tool.budget_factor.
+    # ...and a read ANOTHER run (or another agent of this one) already did against this exact pool is
+    # served from `readcache`. Not announced to the model: unlike a repeat inside the run, this is
+    # the first time THIS transcript has seen the answer, and it is byte-for-byte what running it
+    # would return - the key holds every counter the tool reads, so a changed pool is a miss.
+    if key:
+        remembered = readcache.get(name, args)
+        if remembered is not None:
+            ctx.cache[key] = remembered
+            return True, remembered
     budget = float(tool_budget_seconds()) * float(getattr(t, "budget_factor", 1.0) or 1.0)
     ctx.begin_call(name, budget)
     try:
@@ -717,6 +726,7 @@ async def _run_tool(name: str, args: dict[str, Any], ctx: RunContext) -> tuple[b
         result = await _watch(t, args, ctx, budget)
         if key:
             ctx.cache[key] = result
+            readcache.put(name, args, result)
         return True, result
     except ToolError as exc:
         return False, str(exc)
@@ -1068,6 +1078,13 @@ async def investigate(store: Any, objective: str, run_id: str,
     lane_no = 0              # per-run ordinal of the dispatch lane, so the panel can GROUP a lane
     record_nudges = 0        # "record as you go" nudges sent
     solo_turns = 0           # consecutive turns that asked for exactly ONE read
+    # AUTOMATIC DELEGATION (ai/autodelegate.py): how long the lead has worked alone, how many times
+    # a split has been PLANNED for it, and how many delegations actually ran (its own included).
+    turns_alone = 0
+    auto_attempts = 0
+    delegations = 0
+    serial_warned = False    # the provider served the agents one at a time - said once
+    auto_delegate_on = bool(getattr(settings.ai, "autoDelegate", True))
     parallel_nudges = 0      # ...and how many times that has been pointed out
     productive_since_write = 0   # reads that returned evidence since the last write (or the start)
     ceiling = lim["maxContextTokens"]   # lowered when the provider refuses the transcript (ContextTooLong)
@@ -1237,6 +1254,36 @@ async def investigate(store: Any, objective: str, run_id: str,
                         f"case yet — asked the assistant to write down what is solid before continuing")
                 HISTORY.append(run_id, {"kind": "status", "text": note})
                 yield {"type": "status", "text": note, "recordNudge": record_nudges}
+            # KEEP TWO THINGS WORKING WITHOUT WAITING TO BE ASKED. The lead has taken a couple of tool
+            # turns alone, so it has found the shape of the problem and there is something to split;
+            # asking it to delegate is what the parallel nudge does, and on the analyst's model that
+            # was ignored. So the split is PLANNED here, by one small request with no tool schemas in
+            # it, and dispatched below as an ordinary delegate_investigation turn - see
+            # ai/autodelegate.py for why it is a plain completion and not a forced tool_choice.
+            auto_msg: Optional[dict[str, Any]] = None
+            if (autodelegate.due(enabled=auto_delegate_on, turns_alone=turns_alone,
+                                 attempts=auto_attempts, delegations=delegations,
+                                 enforced=bool(lim.get("enforced", 1)))
+                    and not guard.tripped and not guard.needs_recovery()
+                    and not runs.stop_requested(run_id) and est() < ceiling * 0.8):
+                auto_attempts += 1
+                alone = turns_alone
+                turns_alone = 0
+                width = subagents.max_agents(max_parallel)
+                plan, why_not = await autodelegate.plan(
+                    client, objective, messages, build_context(store, fresh=False), width,
+                    lambda: runs.stop_requested(run_id))
+                if plan:
+                    auto_msg = autodelegate.assistant_turn(run_id, auto_attempts, plan)
+                    note = (f"the assistant had worked alone for {alone} tool turns — Iris split the "
+                            f"remaining work into {len(plan)} lines of enquiry and is running an "
+                            f"agent on each at the same time (automatic delegation)")
+                    HISTORY.append(run_id, {"kind": "status", "text": note})
+                    yield {"type": "status", "text": note, "autoDelegate": True}
+                elif why_not:
+                    note = f"automatic delegation skipped — {why_not}; the assistant carries on itself"
+                    HISTORY.append(run_id, {"kind": "status", "text": note})
+                    yield {"type": "status", "text": note, "autoDelegate": False}
             step += 1
             HISTORY.append(run_id, {"kind": "step", "step": step})
             yield {"type": "step", "step": step, "elapsedSec": round(elapsed(), 1)}
@@ -1248,6 +1295,12 @@ async def investigate(store: Any, objective: str, run_id: str,
             prov_tries = 0           # transient provider failures on THIS turn
             while True:
                 buf, final_msg, finish = [], {}, ""
+                if auto_msg is not None:
+                    # The planned delegation IS this turn. Everything below treats it exactly as a
+                    # turn the model wrote: its narration is back-filled into the transcript, the
+                    # call is laned, guarded, dispatched and answered like any other.
+                    final_msg, finish = auto_msg, "tool_calls"
+                    break
                 try:
                     async for item in client.stream_chat(messages, tools=tools, temperature=0.1):
                         # Checked INSIDE the token loop, not only between steps: a plain question
@@ -1454,6 +1507,7 @@ async def investigate(store: Any, objective: str, run_id: str,
                     yield {"type": "delta", "text": said, "step": step}
             if calls:
                 partial_answer = ""     # the prose before a call was narration, not the report
+                turns_alone += 1        # reset below when a delegation actually RUNS
             if not calls:
                 piece = final_msg.get("content") or "".join(buf)
                 # A REPLY CUT OFF AT THE OUTPUT LIMIT IS NOT THE REPORT. finish_reason 'length' with no
@@ -1690,7 +1744,15 @@ async def investigate(store: Any, objective: str, run_id: str,
                 # Start and finish are reported per agent as they happen; the calls in between are
                 # rolled into ONE line every few seconds, because thirty "agent A called
                 # count_events" rows is exactly the transcript noise this panel keeps deleting.
-                pending_calls: dict[str, int] = {}
+                # PER-AGENT PROGRESS, PATCHED IN PLACE. The calls in between used to be rolled into one combined
+                # "agents working: A (3 calls), B (2 calls)" line that the roster then DROPPED, so a row said
+                # "working" and nothing else for the whole delegation - which is most of what the analyst meant
+                # by not being able to see the agents work. Each agent's own line now says how many calls it has
+                # made and which tool it is on, refreshed every AGENT_TICK; `HISTORY.agent_progress` updates that
+                # ONE line rather than appending, so a two-minute delegation costs three transcript entries.
+                agent_calls: dict[str, int] = {}
+                agent_tool: dict[str, str] = {}
+                agent_dirty: set[str] = set()
                 said_at = time.monotonic()
                 while waiting:
                     done, waiting = await asyncio.wait(waiting, timeout=AGENT_POLL,
@@ -1699,26 +1761,33 @@ async def investigate(store: Any, objective: str, run_id: str,
                         phase = str(ev.get("phase") or "")
                         who = str(ev.get("agent") or "agent")
                         if phase == "call":
-                            pending_calls[who] = pending_calls.get(who, 0) + 1
+                            agent_calls[who] = agent_calls.get(who, 0) + 1
+                            agent_tool[who] = str(ev.get("tool") or "")
+                            agent_dirty.add(who)
                             continue
                         if phase == "start":
-                            line = f"agent {who} started: {_s(ev.get('objective'), 160)}"
-                        else:
-                            ended = _s(ev.get("stopped"), 120)
-                            line = (f"agent {who} finished — {int(ev.get('calls') or 0)} tool calls in "
-                                    f"{int(ev.get('tookMs') or 0) / 1000:.1f}s"
-                                    + (f" ({ended})" if ended else ""))
-                        HISTORY.append(run_id, {"kind": "status", "text": line, "agent": who,
-                                                "phase": phase})
-                        yield {"type": "status", "text": line, "agent": who, "phase": phase}
-                    if pending_calls and time.monotonic() - said_at >= AGENT_TICK:
+                            task = _s(ev.get("objective"), 400)
+                            line = f"agent {who} started: {_s(task, 160)}"
+                            HISTORY.append(run_id, {"kind": "status", "text": line, "agent": who,
+                                                    "phase": phase, "task": task})
+                            yield {"type": "status", "text": line, "agent": who, "phase": phase, "task": task}
+                            continue
+                        ended = _s(ev.get("stopped"), 120)
+                        line = (f"agent {who} finished — {int(ev.get('calls') or 0)} tool calls in "
+                                f"{int(ev.get('tookMs') or 0) / 1000:.1f}s"
+                                + (f" ({ended})" if ended else ""))
+                        agent_dirty.discard(who)
+                        HISTORY.agent_progress(run_id, who, line, phase="end")
+                        yield {"type": "status", "text": line, "agent": who, "phase": "end"}
+                    if agent_dirty and time.monotonic() - said_at >= AGENT_TICK:
                         said_at = time.monotonic()
-                        line = ("agents working: "
-                                + ", ".join(f"{a} ({n} call{'s' if n != 1 else ''})"
-                                            for a, n in sorted(pending_calls.items())))
-                        pending_calls = {}
-                        HISTORY.append(run_id, {"kind": "status", "text": line, "phase": "tick"})
-                        yield {"type": "status", "text": line, "agents": True, "phase": "tick"}
+                        for who in sorted(agent_dirty):
+                            n = agent_calls.get(who, 0)
+                            line = (f"agent {who} working — {n} call{'s' if n != 1 else ''} so far"
+                                    + (f", on {agent_tool[who]}" if agent_tool.get(who) else ""))
+                            HISTORY.agent_progress(run_id, who, line, phase="call")
+                            yield {"type": "status", "text": line, "agent": who, "phase": "call"}
+                        agent_dirty.clear()
                     for task in done:
                         entry = tasks[task]
                         try:
@@ -1743,6 +1812,30 @@ async def investigate(store: Any, objective: str, run_id: str,
                         productive_since_write = 0
                     elif productive and not entry["writes"]:
                         productive_since_write += 1
+                    if (entry["name"] == "delegate_investigation" and entry["ok"]
+                            and isinstance(entry["result"], dict)):
+                        # A delegation that RAN - the model's own or the planned one. A refused one
+                        # does not count: the lead is still alone and the split is still owed.
+                        delegations += 1
+                        turns_alone = 0
+                        solo_turns = 0
+                        if entry["result"].get("providerSerialised") and not serial_warned:
+                            # SAID ONCE, IN WORDS THE ANALYST CAN ACT ON. Three agents "working" on a
+                            # provider with one inference slot are three agents QUEUING, and nothing
+                            # on screen can show that - only the measured overlap can.
+                            serial_warned = True
+                            note = (f"the agents were dispatched together but your AI provider served "
+                                    f"them one at a time (two agents were receiving tokens at the same "
+                                    f"moment only {float(entry['result'].get('agentOverlap') or 0):.0%} "
+                                    f"of the time). To make agents genuinely "
+                                    f"parallel, give the provider more than one inference slot — "
+                                    f"llama.cpp: start the server with --parallel 3 (-np 3); vLLM, "
+                                    f"Ollama with OLLAMA_NUM_PARALLEL, and hosted APIs do this already. "
+                                    f"Until then delegation keeps the evidence out of the assistant's "
+                                    f"context but saves no time; Settings → AI assistant → "
+                                    f"Delegate automatically turns it off.")
+                            HISTORY.append(run_id, {"kind": "status", "text": note})
+                            yield {"type": "status", "text": note, "providerSerialised": True}
                     action = (entry["result"].get("action")
                               if (entry["ok"] and isinstance(entry["result"], dict)) else None)
                     if action:

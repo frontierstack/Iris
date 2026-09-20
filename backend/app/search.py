@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple, Optional
 
@@ -63,6 +64,13 @@ _ANCHORS = 3
 #     which bounds the wasted work to a few tens of milliseconds.
 _FIND_BYTES_PER_HIT = 160
 _FIND_PROBE = 50_000
+# The per-index atom-mask cache (`_Engine.contains`). A mask is ONE BYTE AN EVENT, so the bound is in
+# bytes and the entry count follows from the pool: ~850 masks at 150 k events, 11 at 11 M. Never
+# fewer than _MASK_CACHE_MIN, or a huge pool would cache nothing and every drill-down would re-scan
+# a multi-gigabyte buffer for an atom it scanned a second ago - which is the case that matters most.
+_MASK_CACHE_BYTES = int(os.environ.get("IRIS_MASK_CACHE_MB", "128")) << 20
+_MASK_CACHE_MIN = 8
+_MASK_CACHE_MAX = 512
 _FIND_MIN_CAP = 200_000
 # How far past the requested page the SCAN path — and the vector path's CONFIRM pass — keeps counting
 # before it reports a floor instead of a total. Enough that the hit count is useful ("10,000+") and
@@ -160,6 +168,14 @@ class SearchIndex:
     # every index anyone else ever sees. It is excluded from repr/compare because it is multi-GB
     # scratch, not part of what an index IS.
     host_arrays: Optional[dict] = field(default=None, repr=False, compare=False)
+    # ATOM MASKS ALREADY COMPUTED AGAINST THIS INDEX, keyed by the lowered needle. See
+    # `_Engine.contains`. It lives ON the index on purpose: an index is immutable for its whole
+    # life (a rebuild is a NEW object; `note_append` keeps this one precisely because [0, n) is
+    # unchanged), so the cache needs no invalidation of its own - it cannot outlive what it
+    # describes. Host (numpy) indexes only.
+    mask_cache: "OrderedDict[bytes, np.ndarray]" = field(default_factory=OrderedDict, repr=False,
+                                                        compare=False)
+    mask_lock: Any = field(default_factory=threading.Lock, repr=False, compare=False)
 
 
 _SEP_S = _SEP.decode("latin-1")
@@ -479,6 +495,44 @@ class _Engine:
         return self.ap.ones(self.idx.n, dtype=bool)
 
     def contains(self, needle: bytes) -> Any:
+        """`_contains`, remembered per index. The result is READ-ONLY - combine it, never edit it.
+
+        An investigation asks about the same thing over and over: every drill-down re-uses the
+        atom it is drilling into. One real `batch_query` from the analyst's own run carried twelve
+        queries and NINE of them began `log_subtype:Denied`, each re-scanning the packed buffer
+        from the first byte - profiled at 94 % of the call, 490,467 Python-level `bytes.find`
+        round trips. The Search screen does the same thing whenever a filter is added to a query
+        that was just run. A mask is a pure function of (index, needle) and the index never
+        changes, so the second ask is a dictionary lookup.
+
+        Two things keep that exact rather than merely fast:
+        * the array handed back is marked read-only. `search()` used to `mask &= ...` its filters
+          onto whatever `lower()` returned, and for a one-atom query that IS this array - so a
+          cache would have been silently narrowed by the first filtered search and every later
+          answer for that atom would have been missing events. Those sites no longer mutate, and
+          the flag means a future one fails loudly in a test instead of quietly losing evidence;
+        * bounded by BYTES (a mask is one byte an event), least-recently-used first, because at
+          eleven million events a handful of masks is already a hundred megabytes.
+        """
+        idx = self.idx
+        if idx.on_gpu or self.ap is not np:
+            return self._contains(needle)
+        with idx.mask_lock:
+            hit = idx.mask_cache.get(needle)
+            if hit is not None:
+                idx.mask_cache.move_to_end(needle)
+                return hit
+        mask = np.asarray(self._contains(needle))      # computed OUTSIDE the lock: a race costs a
+        mask.flags.writeable = False                   # duplicate scan, never a wrong answer
+        keep = max(_MASK_CACHE_MIN, _MASK_CACHE_BYTES // max(1, int(mask.nbytes)))
+        with idx.mask_lock:
+            idx.mask_cache[needle] = mask
+            idx.mask_cache.move_to_end(needle)
+            while len(idx.mask_cache) > min(keep, _MASK_CACHE_MAX):
+                idx.mask_cache.popitem(last=False)
+        return mask
+
+    def _contains(self, needle: bytes) -> Any:
         """Events whose document contains `needle` (case already lowered).
 
         Two things decide the cost, and both were learned the hard way on the analyst's 5.4 GB index:
@@ -889,15 +943,19 @@ def search(events: list[Event], ts: np.ndarray, version: int, q: str, lo: int, h
         eng = _Engine(idx)
         ap = eng.ap
         try:
+            # `mask = mask & x`, NEVER `mask &= x`: for a one-atom query `lower()` hands back the
+            # CACHED atom mask itself (`_Engine.contains`), and narrowing that in place would make
+            # every later answer for the same atom silently short. It is read-only, so the old
+            # spelling now raises rather than corrupts - but it must not be written back.
             mask = eng.lower(ast)
             if sev_set:
-                mask &= eng.sev_mask(sev_set)
+                mask = mask & eng.sev_mask(sev_set)
             if src_set:
-                mask &= eng.source_mask_exact(src_set)
+                mask = mask & eng.source_mask_exact(src_set)
             if lo > 0 or hi < m:
                 rng = ap.zeros(m, dtype=bool)
                 rng[lo:min(hi, m)] = True
-                mask &= rng
+                mask = mask & rng
             cand = ap.flatnonzero(mask)
             cand_idx = compute.asnumpy(cand) if idx.on_gpu else np.asarray(cand)
             engine = "cuda" if idx.on_gpu else "vector"

@@ -361,6 +361,29 @@ class HistoryStore:
             self._touch_locked(rec)
             self._save_locked()
 
+    def agent_progress(self, run_id: str, agent: str, text: str, phase: str = "call") -> None:
+        """PATCH a worker agent's own line instead of appending another one.
+
+        An agent reports as it works, and a delegation of three agents over two minutes would put
+        sixty near-identical status lines into a transcript capped at MAX_ENTRIES - spending the
+        run's record on "still working". One line per agent, updated in place, is what the roster
+        draws anyway. `updSeq` moves so a polling tab picks the change up, exactly as it does for a
+        tool result; the entry keeps its `seq`, its `agent` and its `task`.
+        """
+        with self.lock:
+            rec = self._runs.get(run_id)
+            if rec is None:
+                return
+            for e in reversed(rec["transcript"]):
+                if e.get("kind") == "status" and e.get("agent") == agent:
+                    rec["seq"] += 1
+                    e.update({"text": _clip(text, MAX_TEXT), "phase": phase, "updSeq": rec["seq"]})
+                    break
+            else:
+                self._append_locked(rec, {"kind": "status", "text": text, "agent": agent, "phase": phase})
+            self._touch_locked(rec)
+            self._save_locked(force=False)
+
     def note_action(self, run_id: str, action: dict[str, Any]) -> None:
         """A write landed. Recorded as it happens so a refresh mid-run still shows what changed."""
         with self.lock:

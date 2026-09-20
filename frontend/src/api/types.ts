@@ -285,6 +285,9 @@ export type AiProvider = 'none' | 'openai';
 /** `systemPromptId` names the saved system prompt the investigator uses by default; '' = the built-in prompt alone. */
 export interface AiSettings {
   provider: AiProvider; model: string; baseUrl: string; apiKey: string; agents: number;
+  /** Iris plans a split of the remaining work itself once a run has gone a couple of tool turns
+   *  alone, and runs worker agents on it — it does not wait for the model to ask. Default on. */
+  autoDelegate?: boolean;
   verifyTls: boolean; caBundle: string; systemPromptId: string;
   /**
    * The investigator's run budget. `enforceLimits: false` removes the step, wall-clock and write
@@ -515,6 +518,9 @@ export interface AiTranscriptEntry {
    */
   agent?: string;
   phase?: string;
+  /** The QUESTION a worker agent was given. Its own field, because the agent's line is PATCHED in
+   *  place as it works ("working — 4 calls, latest: count_events") and the text no longer holds it. */
+  task?: string;
   /**
    * When this entry was last CHANGED, on the same counter as `seq`. A tool entry is patched in place
    * when its result lands, so `?since=<lastSeq>` alone never resent it and the card kept spinning in
@@ -550,10 +556,12 @@ export type AiRunEvent =
      `budgetNotice` the "leave room to write it up" one and `documentCheck` the "you recorded nothing in
      the case" one. All three are ordinary status lines; the flags exist so the panel can tell a nudge
      from a step announcement. */
-  | { type: 'status'; text: string; compactions?: number; droppedMessages?: number; checkIn?: number; budgetNotice?: boolean; documentCheck?: boolean; recordNudge?: number; summaryCheck?: boolean; parallel?: number }
+  /** `agent` / `phase` / `task` ride on a worker-agent line (start | call | end) — the panel folds
+   *  those into ONE roster row per agent, so dropping them here means no roster while the run is live. */
+  | { type: 'status'; text: string; compactions?: number; droppedMessages?: number; checkIn?: number; budgetNotice?: boolean; documentCheck?: boolean; recordNudge?: number; summaryCheck?: boolean; parallel?: number; agent?: string; phase?: string; task?: string; autoDelegate?: boolean }
   | { type: 'step'; step: number; elapsedSec: number }
   | { type: 'delta'; text: string; step: number }
-  | { type: 'tool_call'; id: string; name: string; arguments: Record<string, unknown>; step: number; lane?: number }
+  | { type: 'tool_call'; id: string; name: string; arguments: Record<string, unknown>; step: number; lane?: number; laneId?: number }
   | { type: 'tool_result'; id: string; name: string; ok: boolean; tookMs: number; summary: string; data: unknown }
   | { type: 'write'; action: AiAction }
   /** contextCeiling: the provider refused the transcript for its size and Iris folded it — this run now

@@ -155,11 +155,32 @@ def worker_tools() -> dict[str, Any]:
     """
     from . import tools as T
     return {name: t for name, t in T.REGISTRY.items()
-            if not t.writes and name != "delegate_investigation"}
+            if not t.writes and name != "delegate_investigation" and name not in WORKER_EXCLUDED}
+
+
+# READS A WORKER HAS NO USE FOR. A worker answers ONE question about the EVIDENCE; the state of the
+# case (its notes, its indicators, its curated set, its drawn links), the detection catalogue and
+# its suppressions, and the chart list are the LEAD's business - the lead keeps the case and does
+# the detection engineering. They are left out for SPEED, not safety: every schema rides on every
+# request a worker makes, and on a local gateway that is prefill time per agent per turn. Measured:
+# 35 tools at full prose ~7,967 tokens -> 25 tools with compact prose ~4,460, i.e. ~44 % less to
+# read before each of an agent's replies can start, times every agent, times every turn. A smaller
+# menu also helps a small model choose: ten of these were never the right call for a worker.
+WORKER_EXCLUDED = frozenset({
+    "preview_detection_rule", "list_detection_rules", "list_exclusions", "list_charts",
+    "list_cases", "list_notes", "get_case_state", "get_case_set", "list_graph_links", "list_iocs",
+})
 
 
 def _schemas(reg: dict[str, Any]) -> list[dict[str, Any]]:
-    return [t.schema() for t in reg.values()]
+    """COMPACT schemas: names and parameters intact, descriptions trimmed to a sentence or two.
+
+    The lead only compacts when its window forces it, because the long descriptions are teaching.
+    A worker is a short loop on one question with WORKER_SYSTEM telling it how to work, so the
+    trade goes the other way: ~25 % less prefill on every request it makes.
+    """
+    from . import tools as T
+    return [T.compact_schema(t.schema()) for t in reg.values()]
 
 
 def _clip(text: str, limit: int) -> str:
@@ -259,7 +280,7 @@ async def run_worker(task: dict[str, Any], *, client: Any, ctx: Any, context_blo
     reg = worker_tools()
     schemas = _schemas(reg)
     started = time.perf_counter()
-    note(run_id, {"agent": name, "phase": "start", "objective": objective[:160]})
+    note(run_id, {"agent": name, "phase": "start", "objective": objective[:400]})
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": WORKER_SYSTEM},
@@ -269,6 +290,10 @@ async def run_worker(task: dict[str, Any], *, client: Any, ctx: Any, context_blo
             context=context_block)},
     ]
     report = ""
+    # WHEN each of this agent's replies was actually streaming (first token -> last). The delegation
+    # compares these ACROSS agents to tell a provider that really ran them together from one that
+    # queued them - see `stream_overlap`.
+    spans: list[tuple[float, float]] = []
     calls_made = 0
     steps = 0
     stopped = ""
@@ -283,6 +308,7 @@ async def run_worker(task: dict[str, Any], *, client: Any, ctx: Any, context_blo
         elided += _fit(messages)     # before the request, not after it is refused
         buf: list[str] = []
         msg: dict[str, Any] = {}
+        span: Optional[list[float]] = None
         try:
             async for item in client.stream_chat(messages, tools=schemas, temperature=0.1):
                 # A STOP HAS TO LAND INSIDE THE STREAM, not only between steps. A gateway reply
@@ -294,6 +320,10 @@ async def run_worker(task: dict[str, Any], *, client: Any, ctx: Any, context_blo
                 if ctx.stopping():
                     stopped = "the analyst stopped the run"
                     break
+                now = time.monotonic()
+                if span is None:
+                    span = [now, now]      # first token of this reply...
+                span[1] = now              # ...and the latest one
                 if item["type"] == "text":
                     buf.append(item["text"])
                 elif item["type"] == "message":
@@ -301,6 +331,8 @@ async def run_worker(task: dict[str, Any], *, client: Any, ctx: Any, context_blo
         except Exception as exc:  # noqa: BLE001 — one worker's provider failure is not the run's
             stopped = f"{type(exc).__name__}: {exc}"
             break
+        if span is not None:
+            spans.append((span[0], span[1]))
         if stopped:      # broke out of the stream above - do not dispatch a half-read turn
             break
         text = "".join(buf) or str(msg.get("content") or "")
@@ -355,6 +387,7 @@ async def run_worker(task: dict[str, Any], *, client: Any, ctx: Any, context_blo
     out: dict[str, Any] = {
         "agent": name, "objective": objective, "report": _clip(report.strip(), REPORT_CHARS),
         "eventIds": real, "toolCalls": calls_made, "steps": steps, "tookMs": took,
+        "spans": spans,        # popped by the delegation before anything reaches the lead
     }
     if elided:
         # SAID, never silent: a worker whose own older evidence was stubbed may have reported less
@@ -370,6 +403,48 @@ async def run_worker(task: dict[str, Any], *, client: Any, ctx: Any, context_blo
         out["report"] = ""
         out["note"] = "this agent produced no report" + (f" — {stopped}" if stopped else "") + "."
     return out
+
+
+def stream_overlap(per_agent: list[list[tuple[float, float]]]) -> tuple[Optional[float], float]:
+    """How much of the time ANY agent was receiving tokens were TWO OR MORE receiving them.
+
+    Returns (share, streamed_seconds); share is None when there is too little signal to judge.
+
+    Iris dispatches the agents together, but a local gateway with ONE inference slot serves the
+    requests one after another: three agents show as "working" and the wall clock is their SUM.
+    The obvious measure - the agents' durations over the delegation's wall clock - does not work,
+    and was tried: a queued agent's duration INCLUDES its time in the queue, so two fully
+    serialised agents still read 1.5x, and agents that legitimately take different numbers of
+    steps blur it further. What a single slot cannot fake is tokens arriving for two agents at
+    the same moment, so that is what is measured: a sweep over every reply's first-to-last-token
+    span. Share ~0 is a queue; anything substantial is real concurrency.
+    """
+    live = [s for s in per_agent if s]
+    if len(live) < 2:
+        return None, 0.0
+    edges: list[tuple[float, int]] = []
+    for spans in live:
+        for a, b in spans:
+            if b > a:
+                edges.append((a, 1))
+                edges.append((b, -1))
+    edges.sort()
+    depth, last, any_t, multi_t = 0, 0.0, 0.0, 0.0
+    for t, d in edges:
+        if depth >= 1:
+            any_t += t - last
+        if depth >= 2:
+            multi_t += t - last
+        depth += d
+        last = t
+    if any_t < MIN_STREAMED_SECONDS:
+        return None, any_t
+    return multi_t / any_t, any_t
+
+
+# Below this much streamed time there is no verdict: a fast provider answers in slivers, and
+# slivers that happen not to touch say nothing about how many slots it has.
+MIN_STREAMED_SECONDS = 1.5
 
 
 def max_agents(parallel: int) -> int:

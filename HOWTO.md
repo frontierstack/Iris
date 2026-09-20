@@ -409,6 +409,7 @@ into `.wslconfig` from the machine's real hardware; `setup.ps1` prints both side
 | `IRIS_POOL_CACHE` | `1` | `0` disables the parsed-pool cache (`cache/pool/`). With it on, a restart restores parsed, already-interpreted events instead of re-reading and re-enriching every staged file. Costs disk (roughly the size of the parsed events); `Clear all data` deletes it. |
 | `IRIS_GRAPH_TIMING` | unset | Log a per-phase breakdown of each graph build. |
 | `IRIS_GRAPH_SYNC_MAX` / `IRIS_ANALYSIS_SYNC_MAX` / `IRIS_ANOMALY_SYNC_MAX` | 20 000 | Event count above which these are built in the background instead of on the request. |
+| `IRIS_MASK_CACHE_MB` | `128` | Memory for remembered query-atom masks, per search index. A drill-down re-uses the atom it is drilling into (`log_subtype:Denied AND …`), and the Search screen re-runs a query whenever a filter is added; a remembered atom is a lookup instead of a scan of the packed buffer. A mask is one byte an event, so this is ~850 atoms at 150 k events and ~11 at 11 M (never fewer than 8). Exact by construction — the index is immutable and the masks are read-only. Host (numpy) indexes only. |
 | `IRIS_GPU_INDEX_MAX` | auto (≤ 50 % of free VRAM) | Bytes of search index allowed on the GPU. `0` keeps it on numpy. |
 | `IRIS_CUPY` / `IRIS_TORCH_INDEX` | auto per driver | Override the GPU wheels `setup.* local` picks. |
 
@@ -583,6 +584,8 @@ read the evidence it is citing while it works, instead of opening and closing a 
 **Dock** puts it back, and the choice and the window's geometry are both remembered. Detached it is not modal: the
 page underneath stays clickable and <kbd>Esc</kbd> no longer closes it (that would throw away a half-written
 objective); use the × on the title bar.
+
+**Worker agents, and automatic delegation.** The assistant can hand whole lines of enquiry to worker agents that research at the same time and report back; the panel shows them as a roster while they work — each agent's question, how many calls it has made and which tool it is on. Many models never choose to delegate, so with **Settings → AI assistant → Delegate automatically** on (the default) Iris does it for them: once a run has made a couple of tool turns on its own, it plans a split of what is left and runs an agent on each part. A question answered in a turn or two never triggers it, and a plan that says the remaining work is one dependent chain is respected. Agents only help if your AI provider can serve more than one request at a time: if it cannot, Iris measures that and says so once, with the fix (llama.cpp `--parallel 3`, Ollama `OLLAMA_NUM_PARALLEL`; vLLM and hosted APIs already do).
 
 **The loop guard.** A run that has stopped moving is stopped, whether or not the run limits are on — the limits
 are a budget, the guard is a detector, and it fires on what the calls were and what they returned, never on how

@@ -725,6 +725,12 @@ class AISettings(BaseModel):
     baseUrl: str = ""
     apiKey: str = ""
     agents: int = Field(default=3, ge=1, le=4)
+    # AUTOMATIC DELEGATION. On: once a run has made a couple of tool turns alone, Iris plans a split
+    # of the remaining work itself and runs worker agents on it (investigator._plan_delegation).
+    # It exists because ASKING the model to delegate did not work - on the analyst's own model a
+    # run took four independent drill-downs one ~30 s turn at a time, was reminded, and carried on
+    # alone. Default ON, on their instruction that two agents should always be working.
+    autoDelegate: bool = True
     verifyTls: bool = True      # False = skip certificate verification (corporate TLS-inspection proxies)
     caBundle: str = ""          # optional path to a PEM CA bundle; blank = auto ($IRIS_CA_BUNDLE, /data/ca.pem, certifi)
     # The saved system prompt the investigator uses by default (ai/system_prompts.py); '' = the
@@ -923,6 +929,9 @@ class AiTranscriptEntry(BaseModel):
     # because the polling path and every reload go through the transcript instead.
     agent: str = ""
     phase: str = ""
+    # The QUESTION a worker agent was given. Its own field because the agent's line is PATCHED in
+    # place while it works ("working - 4 calls, latest: count_events"), so the text stops holding it.
+    task: str = ""
     # When this entry was last CHANGED, on the same counter as `seq`. A tool entry is patched in place
     # when its result lands, which keeps its `seq` — so `?since=<lastSeq>` never resent it and a polling
     # client (any tab that is not the one streaming) kept the card's spinner turning for the rest of the

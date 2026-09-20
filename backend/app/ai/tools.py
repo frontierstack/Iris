@@ -987,6 +987,28 @@ def _distinct_values(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
 _BUCKETS = {"minute": 60, "hour": 3600, "day": 86400}
 
 
+def _row_epochs(rows: list[Any]) -> Any:
+    """`STORE.ts` gathered for these rows, or None when that cannot be PROVEN right.
+
+    A position is only used if the event AT that position is this very row (`is`, not `==`). The
+    pool is re-sorted by merges that can land between the search and this call, and an index that
+    points one row along is a histogram of the wrong evidence with nothing looking broken - so
+    any doubt at all means the caller parses the timestamps itself, which is always correct.
+    """
+    import numpy as np
+    from ..store import STORE
+    if len(rows) < 2000:                 # below this the parse is already cheap
+        return None
+    idx, ts, evs = STORE.event_index, STORE.ts, STORE.events
+    try:
+        pos = [idx[e.id] for e in rows]
+        if len(ts) != len(evs) or any(evs[p] is not e for p, e in zip(pos, rows)):
+            return None
+        return ts[np.asarray(pos, dtype=np.int64)]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
 def _histogram(rows: list[Any], want: str, limit: int) -> dict[str, Any]:
     """Timestamp histogram over already-matched events.
 
@@ -996,22 +1018,49 @@ def _histogram(rows: list[Any], want: str, limit: int) -> dict[str, Any]:
     """
     from math import isfinite
     from ..store import _iso_to_epoch
-    epochs = [ep for ep in (_iso_to_epoch(e.ts) for e in rows) if isfinite(ep)]
-    undated = len(rows) - len(epochs)
-    if not epochs:
-        return {"bucket": "", "buckets": [], "distinctBuckets": 0, "truncated": False,
-                "first": None, "last": None, "peak": None, "withoutTimestamp": undated}
-    lo, hi = min(epochs), max(epochs)
-    if want not in _BUCKETS:
-        span = max(1.0, hi - lo)
-        want = "minute" if span <= 3 * 3600 else ("hour" if span <= 5 * 86400 else "day")
-    size = _BUCKETS[want]
-    counts: dict[int, int] = {}
-    for ep in epochs:
-        b = int(ep // size) * size
-        counts[b] = counts.get(b, 0) + 1
-    keys = sorted(counts)
-    peak = max(counts.items(), key=lambda kv: kv[1])
+    # THE STORE ALREADY HOLDS EVERY EVENT'S EPOCH, in an array aligned with the pool. Re-parsing the
+    # ISO string of each matched row was ~5 us an event - 150,000 of them, a fifth of a
+    # `source_profile`, to recompute numbers sitting in `STORE.ts`. `_row_epochs` gathers them and
+    # answers None whenever it cannot PROVE a row is the event at that position (a re-sort landing
+    # mid-call, a row that is not in the pool), in which case the strings are parsed as before.
+    arr = _row_epochs(rows)
+    if arr is not None:
+        import numpy as np
+        ep = arr[np.isfinite(arr)]
+        undated = len(rows) - int(ep.shape[0])
+        if not ep.shape[0]:
+            return {"bucket": "", "buckets": [], "distinctBuckets": 0, "truncated": False,
+                    "first": None, "last": None, "peak": None, "withoutTimestamp": undated}
+        lo, hi = float(ep.min()), float(ep.max())
+        if want not in _BUCKETS:
+            span = max(1.0, hi - lo)
+            want = "minute" if span <= 3 * 3600 else ("hour" if span <= 5 * 86400 else "day")
+        size = _BUCKETS[want]
+        b = np.floor_divide(ep, size).astype(np.int64) * int(size)
+        uniq, first_at, cnt = np.unique(b, return_index=True, return_counts=True)
+        counts = {int(k): int(c) for k, c in zip(uniq.tolist(), cnt.tolist())}
+        keys = sorted(counts)
+        # the same tie-break as the loop below: among equally full buckets, the one met FIRST
+        top = cnt == cnt.max()
+        k = int(uniq[top][np.argmin(first_at[top])])
+        peak = (k, counts[k])
+    else:
+        epochs = [x for x in (_iso_to_epoch(e.ts) for e in rows) if isfinite(x)]
+        undated = len(rows) - len(epochs)
+        if not epochs:
+            return {"bucket": "", "buckets": [], "distinctBuckets": 0, "truncated": False,
+                    "first": None, "last": None, "peak": None, "withoutTimestamp": undated}
+        lo, hi = min(epochs), max(epochs)
+        if want not in _BUCKETS:
+            span = max(1.0, hi - lo)
+            want = "minute" if span <= 3 * 3600 else ("hour" if span <= 5 * 86400 else "day")
+        size = _BUCKETS[want]
+        counts = {}
+        for x in epochs:
+            bk = int(x // size) * size
+            counts[bk] = counts.get(bk, 0) + 1
+        keys = sorted(counts)
+        peak = max(counts.items(), key=lambda kv: kv[1])
 
     def iso(ep: float) -> str:
         return datetime.fromtimestamp(ep, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -2247,6 +2296,25 @@ def _delegate_investigation(args: dict[str, Any], ctx: RunContext) -> dict[str, 
                 "be cited). Re-read anything decisive with get_events before you write it to the case, "
                 "and say in your report what you delegated and what each agent found.",
     }
+    # DID THE PROVIDER ACTUALLY RUN THEM AT THE SAME TIME? Iris dispatches the agents together, but a
+    # local gateway with ONE inference slot (llama.cpp without `-np`, a single-GPU server) queues
+    # the requests and serves them one after another - the panel shows three agents "working" and
+    # the wall clock is the SUM of them, which is slower than not delegating at all. That is not
+    # visible from inside any one request, so it is measured: the agents' own durations against the
+    # delegation's wall clock. ~1.0 means serialised, ~N means N really overlapped.
+    # ...by whether tokens ever arrived for two agents at the same moment (`subagents.stream_overlap`
+    # says why the agents' durations cannot answer this). The spans are measurement, not findings:
+    # they are taken OFF the results here so they never reach the lead's context.
+    share, streamed = subagents.stream_overlap([r.pop("spans", None) or [] for r in results])
+    if share is not None:
+        out["agentOverlap"] = round(share, 2)
+        if share < 0.15:
+            out["providerSerialised"] = True
+            out["concurrencyNote"] = (
+                f"the {len(results)} agents were dispatched together but the provider served them "
+                f"ONE AT A TIME: over {streamed:.0f}s of replies, two agents were receiving tokens "
+                f"at the same moment only {share:.0%} of the time. Delegation still keeps their "
+                "evidence out of your context, but it bought no wall-clock time on this provider.")
     if early:
         out["incomplete"] = early
         out["incompleteNote"] = ("these agents did not finish their question (see `endedEarly` / "

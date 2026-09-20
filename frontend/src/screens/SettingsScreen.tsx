@@ -310,6 +310,7 @@ function AiAssistant({ settings }: { settings: Settings }) {
   const [baseUrl, setBaseUrl] = useState(settings.ai.baseUrl);
   const [apiKey, setApiKey] = useState('');
   const [agents, setAgents] = useState(settings.ai.agents || 1);
+  const [autoDelegate, setAutoDelegate] = useState(settings.ai.autoDelegate !== false);
   const [test, setTest] = useState<AiTestResult | null>(null);
   const [showKey, setShowKey] = useState(false);
   const [advanced, setAdvanced] = useState(!!settings.ai.baseUrl || settings.ai.verifyTls === false);
@@ -333,6 +334,7 @@ function AiAssistant({ settings }: { settings: Settings }) {
     setModel(settings.ai.model || DEFAULT_MODEL);
     setBaseUrl(settings.ai.baseUrl);
     setAgents(settings.ai.agents || 1);
+    setAutoDelegate(settings.ai.autoDelegate !== false);
     setApiKey('');
     setVerifyTls(settings.ai.verifyTls !== false);
     setCaBundle(settings.ai.caBundle ?? '');
@@ -346,6 +348,7 @@ function AiAssistant({ settings }: { settings: Settings }) {
   const provider = enabled ? 'openai' : 'none';
   const dirty = provider !== settings.ai.provider || model !== (settings.ai.model || DEFAULT_MODEL) || baseUrl !== settings.ai.baseUrl || agents !== settings.ai.agents || apiKey !== ''
     || verifyTls !== (settings.ai.verifyTls !== false) || caBundle !== (settings.ai.caBundle ?? '')
+    || autoDelegate !== (settings.ai.autoDelegate !== false)
     || enforceLimits !== (settings.ai.enforceLimits !== false) || maxSteps !== (settings.ai.maxSteps ?? 40)
     || maxSeconds !== (settings.ai.maxSeconds ?? 600) || maxWrites !== (settings.ai.maxWrites ?? 200);
 
@@ -358,7 +361,7 @@ function AiAssistant({ settings }: { settings: Settings }) {
   const onSave = () => {
     const patch: Partial<Settings['ai']> = {
       provider, model: model || DEFAULT_MODEL, baseUrl: baseUrl.trim(), agents, verifyTls, caBundle: caBundle.trim(),
-      enforceLimits,
+      enforceLimits, autoDelegate,
       maxSteps: Math.max(1, Math.round(maxSteps || 40)),
       maxSeconds: Math.max(5, Math.round(maxSeconds || 600)),
       maxWrites: Math.max(1, Math.round(maxWrites || 200)),
@@ -448,6 +451,14 @@ function AiAssistant({ settings }: { settings: Settings }) {
               minimum). A worker has read tools only: the assistant keeps the case and does every
               write itself, and it re-checks anything decisive before recording it.
             </span>
+            <div className="ai-toggle-row">
+              <Toggle on={autoDelegate} onChange={setAutoDelegate} label="Delegate automatically" />
+              <span className="field__hint">
+                {autoDelegate
+                  ? 'Once a run has made a couple of tool turns on its own, Iris splits the remaining work and runs worker agents on it at the same time — it does not wait for the model to ask. A question answered in a turn or two never triggers it.'
+                  : 'Worker agents run only when the assistant itself decides to delegate. Many models never do.'}
+              </span>
+            </div>
           </div>
           {/* Run limits. These were env-only, so a case that genuinely needed more just hit the wall
               and the analyst had no way to say "this one is worth it". Off is a real option, and the
