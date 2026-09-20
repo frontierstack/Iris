@@ -179,7 +179,13 @@ function argValue(v: unknown): string {
  */
 const PROSE_ARGS = new Set(['text', 'summary', 'why', 'description', 'note', 'notes', 'body', 'title']);
 function isProse(k: string, raw: unknown): boolean {
-  return PROSE_ARGS.has(k) && typeof raw === 'string' && (raw.length > 80 || /[\n#|*`\-]/.test(raw) || raw.includes('\\n'));
+  // A LONE HYPHEN IS NOT MARKDOWN. The old test put `-` in the character class, so any short title
+  // containing one — "Credential stuffing against svc-backup" — was promoted to the full prose
+  // treatment and drawn as a bordered, 280px-tall scrolling panel for thirty-seven characters. A
+  // dash only means a bullet at the START of a line, which is what this asks for instead.
+  if (!PROSE_ARGS.has(k) || typeof raw !== 'string') return false;
+  const md = /[\n#|`]/.test(raw) || /(^|\n)[ \t]*[-*+][ \t]/.test(raw);
+  return raw.length > 80 || md || raw.includes('\\n');
 }
 
 /** Tool arguments as key/value rows — a labelled list, not one run-on line. */

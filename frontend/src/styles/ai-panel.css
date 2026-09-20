@@ -463,30 +463,42 @@ a.aic__pill { display: inline-block; text-decoration: none; }
    `writes` is read in exactly one place in the TSX; this is the card it draws. */
 .tcall { display: flex; flex-direction: column; min-width: 0; gap: 6px; }
 .tcall__lead { padding: 2px 4px 4px; }
+/* THE TRAIL IS A RAIL, NOT A STACK OF BOXES.
+   `toBlocks` has described this since the card was written - "one row per call in order behind a
+   1px rule, and a model turn boundary becomes a BREAK in that rule" - but every call was drawn as
+   a fully bordered box holding an inset argument band and a bordered result band: three stacked
+   bands each, twenty-seven of them in a nine-call run, which is what made a long run read as
+   alternating noise. The left rule carries the order now, and a BORDER MEANS SOMETHING: a write
+   has one, a refusal has one, and an ordinary read is a quiet row on the thread's own ground.
+   This also hardens the rule that a write is never drawn as a read - it is now the only tinted
+   thing in the trail. */
 .tcall__card {
-  border: 1px solid var(--border-2);
-  background: var(--panel);
-  border-radius: 9px;
+  border: 0;
+  border-left: 2px solid var(--border-2);
+  background: transparent;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   overflow: hidden;
   min-width: 0;
 }
-.tcall--write .tcall__card { border-color: var(--accent-border); }
-.tcall--bad .tcall__card { border-color: color-mix(in srgb, var(--bad) 45%, var(--border-2)); }
-.tcall__head { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 7px 10px 7px 8px; }
+.tcall--write .tcall__card { border-left-color: var(--accent); background: var(--accent-bg); }
+.tcall--bad .tcall__card {
+  border-left-color: var(--bad);
+  background: color-mix(in srgb, var(--bad) 6%, transparent);
+}
+.tcall__head { display: flex; align-items: center; gap: 7px; min-width: 0; padding: 5px 10px 4px 9px; }
+/* A BORDERED 22px TILE PER CALL was the loudest thing on the card and carried no information the
+   mono name beside it did not already carry. Bare glyph, muted, sized to the type. */
 .tcall__glyph {
   flex: 0 0 auto;
-  width: 22px;
-  height: 22px;
-  border-radius: 6px;
+  width: 14px;
+  height: 14px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: var(--panel-inset);
-  color: var(--muted);
-  border: 1px solid var(--border-2);
+  color: var(--muted-2);
 }
-.tcall__glyph svg { width: 11px; height: 11px; }
-.tcall--write .tcall__glyph { background: var(--accent-bg); color: var(--accent); border-color: var(--accent-border); }
+.tcall__glyph svg { width: 13px; height: 13px; }
+.tcall--write .tcall__glyph { color: var(--accent); }
 .tcall--bad .tcall__glyph { color: var(--bad); }
 .tcall__name {
   font-family: var(--font-mono);
@@ -528,10 +540,10 @@ a.aic__pill { display: inline-block; text-decoration: none; }
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);
   column-gap: 12px;
-  row-gap: 3px;
-  padding: 7px 10px 8px 38px;
-  border-top: 1px solid var(--border-2);
-  background: var(--panel-inset);
+  row-gap: 2px;
+  /* aligned under the tool NAME, so key/value reads as a continuation of the head rather than as
+     a second panel; no band and no rule, because the left rail already bounds the call. */
+  padding: 0 10px 4px 30px;
   min-width: 0;
 }
 .tcall__arg { display: contents; }
@@ -575,8 +587,8 @@ a.aic__pill { display: inline-block; text-decoration: none; }
 .tcall__more {
   appearance: none;
   border: 0;
-  background: var(--panel-inset);
-  padding: 0 10px 7px 38px;
+  background: transparent;
+  padding: 1px 10px 4px 30px;
   cursor: pointer;
   text-align: left;
   font-family: var(--font-mono);
@@ -588,18 +600,20 @@ a.aic__pill { display: inline-block; text-decoration: none; }
 .tcall__more:hover { color: var(--text); }
 .tcall__more:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
 /* the outcome: its own row, sans, with a check or a warning */
+/* THE OUTCOME IS A LINE, NOT A BAND. A rule plus a full-width strip per call is the second half
+   of what made the trail heavy; the tick alone says the call came back. A REFUSAL keeps its
+   colour, because that is the one outcome worth interrupting a scan for. */
 .tcall__result {
   display: flex;
-  gap: 7px;
+  gap: 6px;
   align-items: flex-start;
-  padding: 7px 10px 8px 10px;
-  border-top: 1px solid var(--border-2);
+  padding: 0 10px 6px 30px;
   font-family: var(--font-ui);
   font-size: 12.5px;
   line-height: 1.5;
   color: var(--text-3);
 }
-.tcall__result svg { flex: 0 0 auto; width: 12px; height: 12px; margin-top: 3px; color: var(--ok); }
+.tcall__result svg { flex: 0 0 auto; width: 11px; height: 11px; margin-top: 4px; margin-left: -17px; color: var(--ok); }
 .tcall__result span { min-width: 0; overflow-wrap: anywhere; }
 .tcall__result--bad { color: var(--bad); }
 .tcall__result--bad svg { color: var(--bad); }

@@ -106,7 +106,12 @@ def _clip_args(args: Any) -> dict[str, Any]:
         elif isinstance(v, (str, int, float, bool)) or v is None:
             sv = _clip(v, 200) if isinstance(v, str) else v
         elif isinstance(v, list):
-            sv = [_clip(x, 80) for x in v[:20]]
+            # A LIST OF OBJECTS IS NOT A LIST OF STRINGS. `_clip` calls str(), so the delegation's
+            # `tasks` — {name, objective, focus} records — reached the panel as PYTHON REPRS,
+            # {'name': 'addr-38-160', 'objective': '…'}, single quotes and all, inside a
+            # transcript that is JSON everywhere else. Encode a non-scalar element instead.
+            sv = [_clip(x if isinstance(x, (str, int, float, bool)) or x is None
+                        else json.dumps(x, default=str), 120) for x in v[:20]]
         else:
             sv = _clip(json.dumps(v, default=str), 200)
         out[str(k)[:60]] = sv
