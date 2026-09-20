@@ -168,11 +168,27 @@ The AI panel follows a second design — a reading-first chat interface — and 
 
 - The **assistant's prose is set in a serif** (Newsreader, 15px/1.6 — brought down from 19px and then 16px on request, "seems large" both times; headings 18/16px, a long bold run is demoted to weight-inherit + `--text-bright` by `.md-strong--long`, because a model that bolds a whole paragraph has bolded nothing). The answer reads like a
   document; everything around it is mono or sans. This is the single most recognisable thing about it.
-- The thread is a **centred 792px column**, messages 34px apart, and the composer is `sticky` at its
-  bottom behind a gradient scrim.
+- The thread is a **centred 792px column**, and it is built out of TURNS, not messages. One turn is
+  one exchange (`.aic-turn`): its parts sit 18px apart, two turns sit 30px apart **with a hairline
+  between them**. That difference is the whole structure — on a single 34px rhythm a follow-up's
+  bubble was as far from the answer above it as that answer's own paragraphs were from each other,
+  and a three-exchange conversation had no visible seams. The composer is `sticky` at the bottom
+  behind a gradient scrim.
 - A **user message is a bubble** (`border-radius: 20px 20px 7px 20px`, right-aligned, max 80%); an
-  **assistant message is not** — it is a collapsible steps card, then prose, then optional code /
-  artifact cards, then a quiet actions row.
+  **assistant message is not** — it is a quiet signature row, then a collapsible steps card, then
+  prose, then optional code / artifact cards, then a row of actions. The **signature** (`.aic-sig`)
+  is the model on the left, a hairline taking the slack, and how the run went on the right (calls,
+  span, state) — it exists because an answer with no bubble had nothing to start it, and because
+  those figures were previously two separate rows of micro-text at the FOOT of the turn. Identity
+  and outcome are a header; `.aic-acts` keeps only what you can press.
+- **THE WORKING IS NOT THE REPORT, AND MUST NOT BE SET LIKE IT.** The serif column is the ANSWER.
+  The line the model writes before each call is commentary on it — UI face, 12.5px, `--text-3` —
+  and it rides the same 2px rail as the call it introduces (`.tcall__lead`, `.tcall { gap: 0 }`),
+  because that is what a lead is; a write's rail takes the accent so it does not change shade half
+  way down. Before this they were the same serif, so a long run was a wall of identical prose in
+  which the account of the work and the conclusion drawn from it looked the same. Live, the two
+  arrive on ONE stream: a prose block with a tool call still to come after it is narration, the
+  trailing one is the report being written.
 - Micro-labels are **mono, uppercase, ~10.5px at 0.07-0.08em**, and the small round-cornered controls
   there are the one place capsule buttons are correct.
 - It takes its COLOURS from the tokens above, so it belongs to the same app.

@@ -1191,11 +1191,27 @@ function Turn({ run, entries, live, undoing, onUndo, onRetry, onContinue, onStre
   // a call landed, and the reading column was broken into fragments by cards that are deliberately
   // secondary. Turn breaks are kept, so the sequence is still legible inside the card.
   const liveNodes = useMemo(() => trailNodes(blocks.filter((b) => b.kind !== 'prose')), [blocks]);
-  const liveProse = useMemo(
-    () => blocks.filter((b): b is Extract<Block, { kind: 'prose' }> => b.kind === 'prose'), [blocks]);
+  // LIVE, THE WORKING AND THE REPORT ARRIVE ON THE SAME STREAM, and they are not the same thing. A
+  // prose block with a tool call still to come after it is NARRATION — the line that introduces that
+  // call — and it reads as commentary; the trailing block, with nothing after it, is the report being
+  // written. Finished, the trail claims each narration line as its card's lead and this question does
+  // not arise, which is why the two views used to disagree: everything streamed in the reading serif.
+  const liveProse = useMemo(() => {
+    const lastAct = blocks.reduce((at, b, i) => (b.kind === 'activity' ? i : at), -1);
+    return blocks
+      .map((b, i) => ({ b, i }))
+      .filter((x): x is { b: Extract<Block, { kind: 'prose' }>; i: number } => x.b.kind === 'prose')
+      .map(({ b, i }) => ({ block: b, commentary: i < lastAct }));
+  }, [blocks]);
 
   return (
-    <>
+    /* A TURN IS ONE THING, and it has to look like one. The question and its answer used to be two
+       siblings of the thread column on the same 34px rhythm as everything else, so in a conversation
+       of three exchanges nothing said where one ended and the next began — a follow-up's bubble sat
+       below the previous answer's cards at exactly the gap that separated that answer's own parts.
+       The turn is an <article> now: its parts sit closer together than turns sit apart, and a turn
+       after the first opens on a hairline. */
+    <article className="aic-turn">
       {/* THE OBJECTIVE — the template's right-aligned bubble. */}
       <div className="aic-user">
         <div className="aic-user__bubble">{run.prompt}</div>
@@ -1208,6 +1224,33 @@ function Turn({ run, entries, live, undoing, onUndo, onRetry, onContinue, onStre
 
       {/* THE ASSISTANT — no bubble: steps card, prose, artifact card, actions. */}
       <div className="aic-asst" {...(live ? { 'aria-live': 'polite' as const, 'aria-busy': true } : {})}>
+        {/* WHO IS ANSWERING, AND HOW IT WENT — one quiet line, above the answer it belongs to.
+            A user message is a bubble and an assistant message is deliberately not one (§9), which
+            left the answer with nothing to start it: prose simply began, and what the run cost and
+            how it ended was two separate rows of micro-text at the FOOT of the turn — `aic-acts`
+            carrying the state and the clock, `aic-meta` carrying the calls, the span and the model.
+            Both of those are the turn's identity, not its actions, so they read better as a header
+            and leave `aic-acts` to hold only things you can press. */}
+        <div className="aic-sig">
+          <span className="aic-sig__who">{run.model || 'assistant'}</span>
+          <span className="aic-sig__rule" aria-hidden />
+          {live ? (
+            <span className="aic-sig__live">
+              <span className="spinner" style={{ width: 9, height: 9, borderWidth: 1.5 }} />working
+            </span>
+          ) : (
+            <>
+              {run.toolCalls > 0 && (
+                <span className="aic-sig__fig">{run.toolCalls} call{run.toolCalls === 1 ? '' : 's'}</span>
+              )}
+              {!!ranFor && <span className="aic-sig__fig">{ranFor}</span>}
+              {run.reason && run.reason !== 'complete' && (
+                <span className="aic-sig__fig" title="how the run ended">{run.reason.replace(/_/g, ' ')}</span>
+              )}
+              <span className={cx('aic-state', `aic-state--${run.state}`)}>{STATE_LABEL[run.state]}</span>
+            </>
+          )}
+        </div>
         {live ? (
           <>
             {warnings.map((w) => <Warning key={w.key} text={w.text} />)}
@@ -1216,9 +1259,13 @@ function Turn({ run, entries, live, undoing, onUndo, onRetry, onContinue, onStre
                 handed to `LiveTail` as its prefix rather than rendered here, so a sentence that
                 straddles a commit stays ONE paragraph — and so the only thing a frame re-renders is
                 that leaf. See the note on `liveTail`. */}
-            {liveProse.slice(0, -1).map((b) => <Markdown key={b.key} className="md aic-prose" text={b.text} />)}
-            <LiveTail className="md aic-prose" onPaint={onStreamPaint}
-                      prefix={liveProse.length ? liveProse[liveProse.length - 1]!.text : ''} />
+            {liveProse.slice(0, -1).map(({ block, commentary }) => (
+              <Markdown key={block.key} text={block.text}
+                        className={cx('md aic-prose', commentary && 'aic-prose--quiet')} />
+            ))}
+            <LiveTail onPaint={onStreamPaint}
+                      className={cx('md aic-prose', liveProse[liveProse.length - 1]?.commentary && 'aic-prose--quiet')}
+                      prefix={liveProse.length ? liveProse[liveProse.length - 1]!.block.text : ''} />
             {!blocks.length && (
               <div className="aic-busy"><span className="spinner" style={{ width: 12, height: 12 }} />Starting the investigation</div>
             )}
@@ -1259,24 +1306,15 @@ function Turn({ run, entries, live, undoing, onUndo, onRetry, onContinue, onStre
                   onClick={() => onContinue(run)} />
               )}
               <span className="aic-acts__spacer" />
-              <span className={cx('aic-state', `aic-state--${run.state}`)}>{STATE_LABEL[run.state]}</span>
               {run.endedAt && (
                 <span className="aic-acts__time" title={RELATIVE(run.endedAt)}>{UTC(run.endedAt)}</span>
               )}
             </div>
 
-            {(run.toolCalls > 0 || ranFor || !!run.model) && (
-              <div className="aic-meta">
-                {run.toolCalls > 0 && <span>{run.toolCalls} tool call{run.toolCalls === 1 ? '' : 's'}</span>}
-                {ranFor && <span>ran for {ranFor}</span>}
-                {run.model && <span>{run.model}</span>}
-                {run.reason && run.reason !== 'complete' && <span title="how the run ended">{run.reason.replace(/_/g, ' ')}</span>}
-              </div>
-            )}
           </>
         )}
       </div>
-    </>
+    </article>
   );
 }
 
@@ -1647,6 +1685,14 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
       .aiInvestigate(body, (ev: AiRunEvent) => {
         // A NON-DELTA EVENT NO LONGER DUMPS THE BUFFER — it QUEUES BEHIND IT. See `queue`.
         if (ev.type !== 'delta') { queue(ev); return; }
+        // ...and a delta that arrives while events are still queued belongs AFTER them. The queue
+        // holds things that came off the wire BEFORE this token, so appending it to the buffer would
+        // move it in front of them — and `commit` folds text into the last entry when that entry is
+        // text, so the next model turn's narration was being merged into the previous turn's line,
+        // jumping over the tool call that sits between them. Seen exactly once and it reads as a
+        // typo: "…which rules have fired on it.4,000 events in one syslog source…". The queue is
+        // cheap to release (the buffer is typed out, then the events apply in order), so release it.
+        if (queued.length) { flushText(); flushQueue(); }
         apply(ev);
       }, ac.signal)
       .then(() => endStream())
