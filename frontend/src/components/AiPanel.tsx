@@ -327,9 +327,17 @@ function trailNodes(blocks: Block[]): TrailNode[] {
       // above the thing it explains, so it is folded into the card as its lead line. Only the prose
       // directly ahead of the call, and only within the same turn, is claimed this way; a sentence
       // that follows a result stays where it is, because there it is the conclusion drawn from it.
-      const prev = out[out.length - 1];
+      // ...and a STATUS LINE IN BETWEEN MUST NOT ORPHAN IT. The lane announcement ("3 tools
+      // running in parallel: …") is emitted after the sentence that introduces those calls and
+      // before the calls themselves, so looking only at the node immediately behind meant every
+      // PARALLEL lane left its narration behind — and the more the assistant fanned out, the more
+      // stray paragraphs collected under the report. Look back PAST the notes; stop at anything
+      // else, so a sentence written after a result is still never claimed by a later call.
+      let back = out.length - 1;
+      while (back >= 0 && out[back]!.k === 'note') back -= 1;
+      const prev = back >= 0 ? out[back]! : undefined;
       let lead = '';
-      if (prev && prev.k === 'prose' && !turn) { lead = prev.text; out.pop(); }
+      if (prev && prev.k === 'prose' && !turn) { lead = prev.text; out.splice(back, 1); }
       out.push({ k: 'tool', key: e.seq, e, turn: lead ? prev!.turn : turn, lead });
       turn = false;
     }
@@ -630,7 +638,7 @@ function sameNode(a: TrailNode, b: TrailNode): boolean {
 type TrailGroup =
   | { g: 'one'; key: number; node: TrailNode }
   | { g: 'lane'; key: number; nodes: Array<Extract<TrailNode, { k: 'tool' }>>; turn: boolean }
-  | { g: 'agents'; key: number; rows: Array<{ agent: string; phase: string; text: string }>; turn: boolean };
+  | { g: 'agents'; key: number; rows: AgentRow[]; turn: boolean };
 
 function groupTrail(nodes: TrailNode[]): TrailGroup[] {
   const out: TrailGroup[] = [];
@@ -645,11 +653,15 @@ function groupTrail(nodes: TrailNode[]): TrailGroup[] {
       continue;
     }
     if (n.k === 'note' && n.agent) {
-      const row = { agent: n.agent, phase: n.phase ?? '', text: n.text };
+      const row: AgentRow = { agent: n.agent, phase: n.phase ?? '', text: n.text, task: taskOf(n) };
       if (last && last.g === 'agents') {
         // one row per agent: the latest line about it wins, so "started" is replaced by "finished"
+        // — but its QUESTION is carried across, because only the `start` line ever carries it and
+        // a roster of three agents that does not say what any of them was asked is three names.
+        // That is most of "I am not seeing multiple agents working".
         const at = last.rows.findIndex((r) => r.agent === row.agent);
-        if (at >= 0) last.rows[at] = row; else last.rows.push(row);
+        if (at >= 0) last.rows[at] = { ...row, task: row.task || last.rows[at]!.task };
+        else last.rows.push(row);
         continue;
       }
       out.push({ g: 'agents', key: n.key, rows: [row], turn: n.turn });
@@ -670,13 +682,24 @@ function sameGroup(a: TrailGroup, b: TrailGroup): boolean {
       && a.nodes.every((n, i) => sameNode(n, b.nodes[i]!));
   }
   return b.g === 'agents' && a.turn === b.turn && a.rows.length === b.rows.length
-    && a.rows.every((r, i) => r.agent === b.rows[i]!.agent && r.text === b.rows[i]!.text);
+    && a.rows.every((r, i) => r.agent === b.rows[i]!.agent && r.text === b.rows[i]!.text
+      && r.task === b.rows[i]!.task);
+}
+
+/** One worker agent in the roster. `task` is its question, which only the `start` line carries. */
+type AgentRow = { agent: string; phase: string; text: string; task: string };
+
+/** The question out of an agent status line: "agent <name> started: <the question>". */
+function taskOf(n: Extract<TrailNode, { k: 'note' }>): string {
+  if ((n.phase ?? '') !== 'start') return '';
+  const m = /started:\s*([\s\S]+)$/.exec(n.text);
+  return (m ? m[1]! : '').trim();
 }
 
 /** The state of one worker agent, for the roster's tag. */
 const AGENT_STATE: Record<string, string> = { start: 'working', call: 'working', end: 'finished' };
 
-function AgentRoster({ rows, live }: { rows: Array<{ agent: string; phase: string; text: string }>; live: boolean }) {
+function AgentRoster({ rows, live }: { rows: AgentRow[]; live: boolean }) {
   const working = rows.filter((r) => r.phase !== 'end').length;
   return (
     <div className="aroster">
@@ -695,10 +718,13 @@ function AgentRoster({ rows, live }: { rows: Array<{ agent: string; phase: strin
       <ul className="aroster__list">
         {rows.map((r) => (
           <li key={r.agent} className={cx('aroster__row', r.phase === 'end' && 'aroster__row--done')}>
-            <span className="aroster__who">{r.agent}</span>
-            <span className="aroster__state">{AGENT_STATE[r.phase] ?? r.phase ?? ''}</span>
-            {live && r.phase !== 'end' && <span className="spinner" style={{ width: 9, height: 9, borderWidth: 1.5 }} />}
-            <span className="aroster__what">{r.text.replace(/^agent \S+ /, '')}</span>
+            <span className="aroster__line">
+              <span className="aroster__who">{r.agent}</span>
+              <span className="aroster__state">{AGENT_STATE[r.phase] ?? r.phase ?? ''}</span>
+              {live && r.phase !== 'end' && <span className="spinner" style={{ width: 9, height: 9, borderWidth: 1.5 }} />}
+              <span className="aroster__what">{r.text.replace(/^agent \S+ /, '')}</span>
+            </span>
+            {!!r.task && <span className="aroster__task" title={r.task}>{r.task}</span>}
           </li>
         ))}
       </ul>
@@ -714,9 +740,16 @@ function countsOf(nodes: TrailNode[]): { bits: string[]; pending: boolean; tools
   // Cards still waiting for a result. More than one at a time is the whole visible difference the
   // parallel lanes make, and it is what the analyst asked to be able to SEE.
   const inflight = tools.filter((t) => t.e.ok === null).length;
+  // WORKER AGENTS COUNT AS WORK DONE. A delegation is one tool call on this card and three agents
+  // doing their own research underneath it — so a run that fanned out read "9 tool calls" and said
+  // nothing at all about the twenty-seven calls its agents made, which is the collapsed card the
+  // analyst sees by default. Distinct names, because a roster reports each agent several times.
+  const agents = new Set(nodes.filter((n): n is Extract<TrailNode, { k: 'note' }> => n.k === 'note')
+    .map((n) => n.agent ?? '').filter(Boolean)).size;
   const bits: string[] = [];
   if (tools.length) bits.push(`${tools.length} tool call${tools.length === 1 ? '' : 's'}`);
   else if (nodes.length) bits.push(`${nodes.length} note${nodes.length === 1 ? '' : 's'}`);
+  if (agents) bits.push(`${agents} agent${agents === 1 ? '' : 's'}`);
   if (writes) bits.push(`${writes} write${writes === 1 ? '' : 's'}`);
   if (failed) bits.push(`${failed} refused`);
   return { bits, pending: inflight > 0, tools: tools.length, inflight };
@@ -1136,8 +1169,13 @@ function Turn({ run, entries, live, undoing, onUndo, onRetry, onContinue, onStre
   // - one call gives me..."). Live, it is read in place. Finished, it used to survive only inside the
   // collapsed card, and the analyst who opened the panel after the run reported the commentary as
   // gone. It is its own quiet block now - the prose that is NOT part of the report, in order.
+  // ...and ONLY the prose no card has claimed. `trailNodes` folds the sentence that introduces a
+  // call into that call's own card as its lead line, so filtering `trailBlocks` here printed every
+  // one of those a SECOND time — as a run of context-free serif paragraphs directly under the
+  // report, reading like five non-sequiturs appended to the answer. What belongs here is what the
+  // trail did NOT take: a sentence written after a result, which is a conclusion and has no card.
   const commentary = useMemo(
-    () => trailBlocks.filter((b): b is Extract<Block, { kind: 'prose' }> => b.kind === 'prose'), [trailBlocks]);
+    () => nodes.filter((n): n is Extract<TrailNode, { k: 'prose' }> => n.k === 'prose'), [nodes]);
 
   // LIVE: the calls are ONE card, above the prose, not a card per model turn interleaved with it.
   // Threading tool cards through the answer meant the thing being read moved down the page every time

@@ -285,12 +285,23 @@ async def run_worker(task: dict[str, Any], *, client: Any, ctx: Any, context_blo
         msg: dict[str, Any] = {}
         try:
             async for item in client.stream_chat(messages, tools=schemas, temperature=0.1):
+                # A STOP HAS TO LAND INSIDE THE STREAM, not only between steps. A gateway reply
+                # takes as long as it takes, and reading one to the end after the analyst pressed
+                # Stop is most of what "the stop button does not stop things at all" actually was:
+                # the lead finalises the run in about a second while each worker quietly finishes
+                # the reply it is part-way through and then asks for another. Dropping out here
+                # costs a half-read reply, which is what was asked for.
+                if ctx.stopping():
+                    stopped = "the analyst stopped the run"
+                    break
                 if item["type"] == "text":
                     buf.append(item["text"])
                 elif item["type"] == "message":
                     msg = item["message"]
         except Exception as exc:  # noqa: BLE001 — one worker's provider failure is not the run's
             stopped = f"{type(exc).__name__}: {exc}"
+            break
+        if stopped:      # broke out of the stream above - do not dispatch a half-read turn
             break
         text = "".join(buf) or str(msg.get("content") or "")
         calls = list(msg.get("tool_calls") or [])

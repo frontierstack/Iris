@@ -49,6 +49,7 @@ import json
 import threading
 import time
 import uuid
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -59,6 +60,9 @@ UTC = timezone.utc
 
 # ------------------------------------------------------------------ retention
 MAX_RUNS = 50                 # conversations kept, oldest terminal ones dropped first
+# Stop requests REMEMBERED after their run was finalised, so work still in flight for it (a worker
+# agent mid-stream) still sees the flag. Ids only, so this is cheap; see `_stop` in __init__.
+STOP_MEMORY = 256
 MAX_FILE_BYTES = 8 * 1024 * 1024   # hard ceiling on history.json — transcripts must not grow forever
 MAX_ENTRIES = 400             # transcript lines per run; a 14-step run is ~60, a pathological one is not
 MAX_TEXT = 8000               # one prose entry
@@ -116,7 +120,15 @@ class HistoryStore:
     def __init__(self) -> None:
         self.lock = threading.RLock()
         self._runs: dict[str, dict[str, Any]] = {}
+        # A STOP OUTLIVES ITS RUN RECORD. `finish()` used to discard the id here, which races with
+        # the very work the flag exists to interrupt: the lead abandons a delegation and finalises
+        # the run in about a second, while three worker agents are still alive in their own tasks.
+        # At the top of its next step a worker asked `stop_requested()`, was told FALSE, and ran on
+        # to its own budget - measured on the analyst's instance as 18 further provider requests
+        # after the panel said "stopped", the last of them 34 s later. The id is kept until the run
+        # is started again, deleted, or pushed out by STOP_MEMORY newer stops.
         self._stop: set[str] = set()          # in memory only: a stop request cannot survive a restart
+        self._stop_order: deque[str] = deque()
         self._loaded_from: Optional[Path] = None
         self._dirty_since: float = 0.0
         # The background writer behind the THROTTLED save — see `_save_locked`. Lazy, daemon, one per
@@ -282,7 +294,7 @@ class HistoryStore:
         with self.lock:
             self._ensure_loaded()
             rec["ord"] = max([int(r.get("ord") or 0) for r in self._runs.values()] or [0]) + 1
-            self._stop.discard(run_id)
+            self._forget_stop_locked(run_id)
             self._runs[run_id] = rec
             self._save_locked()
         return dict(rec)
@@ -366,7 +378,8 @@ class HistoryStore:
                         "unverifiedCitations": [str(u) for u in unverified][:200],
                         "error": _clip(error, 4000), "endedAt": _now()})
             self._touch_locked(rec)
-            self._stop.discard(run_id)
+            # NOT `self._stop.discard(run_id)` - see `_stop` in __init__. Anything still in flight
+            # for this run (a worker agent mid-stream) has not looked at the flag yet.
             self._save_locked()
 
     def set_case(self, run_id: str, case_id: str, case_name: str) -> None:
@@ -397,7 +410,18 @@ class HistoryStore:
             if rec is None or rec["state"] != "running":
                 return False
             self._stop.add(run_id)
+            self._stop_order.append(run_id)
+            while len(self._stop_order) > STOP_MEMORY:
+                self._stop.discard(self._stop_order.popleft())
             return True
+
+    def _forget_stop_locked(self, run_id: str) -> None:
+        """Drop a remembered stop - the id is being reused by a new run, or the run is gone."""
+        self._stop.discard(run_id)
+        try:
+            self._stop_order.remove(run_id)
+        except ValueError:
+            pass
 
     def stop_requested(self, run_id: str) -> bool:
         with self.lock:
@@ -444,7 +468,7 @@ class HistoryStore:
             if run_id not in self._runs:
                 return False
             del self._runs[run_id]
-            self._stop.discard(run_id)
+            self._forget_stop_locked(run_id)
             self._save_locked()
             return True
 
@@ -460,6 +484,7 @@ class HistoryStore:
             n = len(self._runs)
             self._runs = {}
             self._stop.clear()
+            self._stop_order.clear()
             # A throttled save may already be in flight on the writer thread; without this it would
             # take the lock the moment this returns and write `{"runs": []}` straight back, leaving a
             # file behind that "clear all data" said it had removed.

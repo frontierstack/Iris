@@ -1697,6 +1697,13 @@ BATCH_MAX = 12          # queries one batch_query call may carry
 PROFILE_MAX = 10        # entities one profile_entities call may carry
 PIVOT_ENTITIES = 8      # entities find_related_events will pivot on
 MIN_AGENTS = 2          # delegate_investigation refuses fewer — see ai/subagents.py
+# The key a task's question arrives under. `objective` is what the schema declares, but a local
+# model writes `task` or `question` at least as often, and the old filter simply dropped anything
+# that was not `objective` — so a perfectly good three-agent delegation became "you sent 0 tasks"
+# and the lead gave up and did the work itself. The value is free text whatever it is called, so
+# accepting the obvious spellings costs nothing and is the difference between agents running and
+# never running at all. A bare string is a task too.
+TASK_KEYS = ("objective", "task", "question", "goal", "prompt", "description", "instruction")
 MAX_AGENT_TASKS = 6
 # `delegate_investigation` runs several agents, each with a tool loop of its own, so the 90 s that is
 # right for one query would abandon the call while they were still working and throw away every report
@@ -2130,6 +2137,19 @@ def _source_profile(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
 
 
 # ==================================================================== DELEGATION
+def _task_objective(t: Any) -> str:
+    """The question one delegated task carries, whatever key the model put it under."""
+    if isinstance(t, str):
+        return t.strip()
+    if not isinstance(t, dict):
+        return ""
+    for k in TASK_KEYS:
+        v = t.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
 @tool("delegate_investigation",
       "RUN SEVERAL ANALYST AGENTS AT THE SAME TIME, each on its own question, and get their findings "
       "back. You are the lead: you decide the questions, you keep the case and you do all the writing. "
@@ -2163,7 +2183,27 @@ def _delegate_investigation(args: dict[str, Any], ctx: RunContext) -> dict[str, 
     raw = args.get("tasks")
     if not isinstance(raw, list):
         raise ToolError("tasks must be an array of {name, objective, focus?} objects.")
-    tasks = [t for t in raw if isinstance(t, dict) and _s(t.get("objective"), 4000).strip()]
+    tasks = []
+    for i, t in enumerate(raw, 1):
+        objective = _s(_task_objective(t), 4000).strip()
+        if not objective:
+            continue
+        src = t if isinstance(t, dict) else {}
+        tasks.append({"name": _s(src.get("name"), 60).strip() or f"agent{i}",
+                      "objective": objective,
+                      "focus": _s(src.get("focus"), 400).strip()})
+    if raw and not tasks:
+        # NAME THE KEY. Everything below reports "you sent 0 tasks", which a model reads as "this
+        # tool is unavailable" rather than "you spelled the key wrong" - so it stops delegating and
+        # does the work itself, and the analyst never sees an agent run. Say what arrived instead.
+        seen = sorted({str(k) for t in raw if isinstance(t, dict) for k in t})[:8]
+        raise ToolError(
+            "every task you sent is missing the question to investigate. Each task is an object "
+            + '{"name": "short-label", "objective": "the question, in full", "focus": "context '
+            + 'this agent needs"} and the OBJECTIVE is what the agent works on. '
+            + (f"The keys you sent were: {', '.join(seen)}. " if seen else
+               "You sent entries that were not objects. ")
+            + "Send the same tasks again with `objective` on each.")
     if len(tasks) < MIN_AGENTS:
         # THE FLOOR IS THE FEATURE. One worker costs a whole provider round trip, returns second-hand
         # prose you then have to verify, and saves nothing — the lead could have made the calls itself
