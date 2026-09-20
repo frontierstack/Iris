@@ -2345,7 +2345,7 @@ def _remove_events_from_case(args: dict[str, Any], ctx: RunContext) -> dict[str,
       "Record an indicator of compromise on the case. Cite the event ids it came from: they become the "
       "indicator's timeline, which is how the analyst answers 'when did we first see this'. Unknown "
       "event ids abort the call.",
-      {"kind": {"type": "string", "description": "ipv4, domain, url, file-path, file-hash, email, user-agent, aws-access-key, dst-endpoint, other"},
+      {"kind": {"type": "string", "description": "ipv4, ipv6, domain, url, file-path, file-hash, email, user-agent, aws-access-key, dst-endpoint, other. Use ipv6 for a colon-form address - filing one as ipv4 makes the exported STIX pattern name a type the value cannot be."},
        "value": {"type": "string", "description": "the indicator itself, verbatim"},
        "note": {"type": "string", "description": "WHY it is an indicator — one specific sentence: what it was "
                 "seen doing, to what, when, in which log (e.g. 'Destination of 41 denied direct-IP requests "

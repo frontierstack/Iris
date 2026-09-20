@@ -104,7 +104,7 @@ function IocRow({ ioc }: { ioc: Ioc }) {
   );
 }
 
-const KINDS = ['ipv4', 'domain', 'url', 'file-path', 'file-hash', 'email', 'user-agent', 'aws-access-key', 'dst-endpoint', 'other'];
+const KINDS = ['ipv4', 'ipv6', 'domain', 'url', 'file-path', 'file-hash', 'email', 'user-agent', 'aws-access-key', 'dst-endpoint', 'other'];
 
 /** Add an indicator by hand — it is then looked up across the case so you see where it appears. */
 function AddIoc({ onDone }: { onDone: () => void }) {

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import ipaddress
 import json
 import re
 import uuid
@@ -18,6 +19,31 @@ UTC = timezone.utc
 
 def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _ip_kind(ip: str) -> str:
+    """'ipv4' or 'ipv6' for an address — the indicator KIND it should carry.
+
+    `is_public_ip` parses with `ipaddress`, so it has always accepted v6, and every address it
+    admitted was then filed as "ipv4". That is a wrong claim about the evidence in the indicator
+    list, and in the STIX export it becomes an invalid pattern: `[ipv4-addr:value = '2600:14e1::1']`
+    names a type the value cannot be. An unparsable string keeps the old label rather than
+    inventing a family for it.
+    """
+    try:
+        return f"ipv{ipaddress.ip_address(ip.strip()).version}"
+    except ValueError:
+        return "ipv4"
+
+
+def _endpoint(host: str, port: Any) -> str:
+    """"host:port" for a dst-endpoint indicator, BRACKETING v6 so the port is still findable.
+
+    `2600:14e1::1:443` cannot be split back into an address and a port by anything, including the
+    STIX exporter below, which took everything before the first colon and got `2600`.
+    """
+    h = str(host).strip()
+    return f"[{h}]:{port}" if _ip_kind(h) == "ipv6" else f"{h}:{port}"
 
 
 def _summary(store: Store, clusters: list[Cluster], events: list[Event]) -> str:
@@ -106,7 +132,7 @@ def _iocs(events: list[Event]) -> list[IOC]:
     for e in seeds:
         for x in e.entities:
             if is_public_ip(x):
-                add("ipv4", x, e)
+                add(_ip_kind(x), x, e)
         for k in AKIA_RE.findall(e.raw):
             add("aws-access-key", k, e)
         for fp in KEYFP_RE.findall(e.raw):
@@ -118,7 +144,7 @@ def _iocs(events: list[Event]) -> list[IOC]:
             add("user-agent", ua, e)
         dst = e.fields.get("dst", "")
         if dst and is_public_ip(dst) and e.fields.get("dst_port"):
-            add("dst-endpoint", f"{dst}:{e.fields['dst_port']}", e)
+            add("dst-endpoint", _endpoint(dst, e.fields["dst_port"]), e)
     # most-seen first, then alphabetical so the list is stable between refreshes
     return sorted(idx.values(), key=lambda i: (-i.count, i.kind, i.value))
 
@@ -177,13 +203,41 @@ def export_markdown(rep: Report) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _stix_endpoint(v: str) -> str:
+    """"1.2.3.4:443" or "[2600:14e1::1]:443" -> a network-traffic pattern of the right ADDRESS TYPE.
+
+    Split on the LAST colon: an unbracketed v6 address is all colons, and taking the first one gave
+    `[ipv4-addr:value = '2600']` — a pattern that parses, matches nothing, and says so to nobody.
+    """
+    host, _, port = v.rpartition(":")
+    host = host.strip("[]")
+    if not host or not port.isdigit():
+        return f"[network-traffic:dst_ref.value = '{v}']"
+    return f"[{_ip_kind(host)}-addr:value = '{host}' AND network-traffic:dst_port = {port}]"
+
+
+def _stix_hash(v: str) -> str:
+    """Name the algorithm from the digest length — a STIX hash pattern has to say which one it is."""
+    algo = {32: "MD5", 40: "SHA-1", 64: "SHA-256", 128: "SHA-512"}.get(len(v.strip()), "SHA-256")
+    return f"[file:hashes.'{algo}' = '{v}']"
+
+
+# EVERY kind `add_ioc` offers needs an entry. `export_stix` skips an indicator it has no pattern for,
+# so a domain, URL, hash or address the analyst added BY HAND used to vanish from the bundle with
+# nothing saying it had — the silent-omission bug, in the one artefact that leaves this machine.
+# Only "other" is legitimately absent: it names no STIX type, so there is nothing to assert about it.
 _STIX_PATTERN = {
     "ipv4": lambda v: f"[ipv4-addr:value = '{v}']",
+    "ipv6": lambda v: f"[ipv6-addr:value = '{v}']",
+    "domain": lambda v: f"[domain-name:value = '{v}']",
+    "url": lambda v: f"[url:value = '{v}']",
+    "email": lambda v: f"[email-addr:value = '{v}']",
+    "file-hash": _stix_hash,
     "aws-access-key": lambda v: f"[user-account:user_id = '{v}' AND user-account:account_type = 'aws-access-key']",
     "ssh-key-fingerprint": lambda v: f"[x-ssh-key:fingerprint = '{v}']",
     "file-path": lambda v: f"[file:name = '{v.split('/')[-1]}' AND directory:path = '{v.rsplit('/', 1)[0] or '/'}']",
     "user-agent": lambda v: f"[network-traffic:extensions.'http-request-ext'.request_header.'User-Agent' = '{v}']",
-    "dst-endpoint": lambda v: f"[ipv4-addr:value = '{v.split(':')[0]}' AND network-traffic:dst_port = {v.split(':')[1]}]",
+    "dst-endpoint": _stix_endpoint,
 }
 
 
