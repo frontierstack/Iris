@@ -1,6 +1,7 @@
 """Event search / detail endpoints."""
 from __future__ import annotations
 
+import heapq
 from collections import Counter, deque
 # `datetime.UTC` is 3.11+; the CUDA runtime image is Python 3.10, so the whole app failed to
 # import on it. `timezone.utc` is what every other module here uses and works on both.
@@ -246,6 +247,31 @@ def _facets(rows: list[Event]) -> tuple[dict[str, int], dict[str, dict[str, int]
     return counts, value_counts, samples
 
 
+def _top_values(vc: dict[str, int], k: int) -> list[tuple[str, int]]:
+    """`sorted(vc.items(), key=(-count, value))[:k]`, without sorting what is about to be thrown away.
+
+    A facet shows a handful of values per field, and the endpoint used to fully sort EVERY field's
+    distinct values - with a Python key function - to keep them. On the columns that repeat, that is
+    nothing. On a web-proxy export it is a 20,000-item keyed sort for the url, and again for each
+    port, each byte count and the log id: measured 133 ms at the scan cap, as much as counting the
+    values in the first place, to discard all but six of each.
+
+    The same answer comes from the k-th largest COUNT, which `heapq.nlargest` finds over the bare
+    ints in C: everything strictly above it is in (fewer than k items, sorted the old way), and the
+    places left over go to the smallest VALUES among those tied at it - `heapq.nsmallest` over bare
+    strings, again with no key function. For a column where every value is unique that tie is the
+    whole column, and it is still one C pass instead of a keyed sort.
+    """
+    if k <= 0:
+        return []
+    if len(vc) <= k:
+        return sorted(vc.items(), key=lambda kv: (-kv[1], kv[0]))
+    threshold = heapq.nlargest(k, vc.values())[-1]
+    above = sorted(((v, c) for v, c in vc.items() if c > threshold), key=lambda kv: (-kv[1], kv[0]))
+    tied = heapq.nsmallest(k - len(above), (v for v, c in vc.items() if c == threshold))
+    return above + [(v, threshold) for v in tied]
+
+
 @router.get("/fields")
 def list_fields(q: str = "", sources: str = "", sev: str = "", from_: Optional[str] = Query(None, alias="from"),
                 to: Optional[str] = None, scope: str = Query("all", pattern="^(all|case)$"),
@@ -279,7 +305,7 @@ def list_fields(q: str = "", sources: str = "", sev: str = "", from_: Optional[s
     fields = []
     for name, cnt in ordered[:limit]:
         vc = value_counts.get(name, {})
-        top = sorted(vc.items(), key=lambda kv: (-kv[1], kv[0]))[:values]
+        top = _top_values(vc, values)
         fields.append({
             "name": name,
             "count": cnt,

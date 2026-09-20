@@ -824,7 +824,7 @@ def _uninterpreted_sources() -> list[dict[str, Any]]:
     return sorted(out, key=lambda r: -r["events"])
 
 
-def _matching(args: dict[str, Any], *, cap: int = 0) -> dict[str, Any]:
+def _matching(args: dict[str, Any], *, cap: int = 0, positions: bool = False) -> dict[str, Any]:
     """Every event matching the query — the backend does the work, the model never counts rows itself.
 
     `search_engine.search` is the same code path the search screen uses (vector/CUDA index when the pool
@@ -835,7 +835,10 @@ def _matching(args: dict[str, Any], *, cap: int = 0) -> dict[str, Any]:
     events, ts, version, lo, hi, src_set, sev_set = _filters(args)
     limit = cap if cap else max(1, len(events))
     res = search_engine.search(events, ts, version, q, lo, hi, src_set, sev_set, 0, limit, desc=False,
-                               whole_pool=_s(args.get("scope"), 8) != "case")
+                               whole_pool=_s(args.get("scope"), 8) != "case", positions=positions)
+    if positions:
+        # The epoch array of the SAME snapshot the positions index - see `_epochs_of`.
+        res["ts"] = ts
     return res
 
 
@@ -874,6 +877,38 @@ def _aggregate(rows: list[Any], field: str) -> tuple[list[dict[str, Any]], int, 
                     g["last"] = e.ts
     ordered = sorted(counts.values(), key=lambda g: (-g["count"], g["value"]))
     return ordered, len(ordered), missing
+
+
+_COUNT_ATTRS = frozenset({"source", "sourceId", "file", "host", "user", "sev"})
+
+
+def _count_by(rows: list[Any], field: str) -> tuple[list[tuple[str, int]], int]:
+    """([(value, count)] in `_aggregate`'s order, distinct values) - for callers that want ONLY that.
+
+    `_aggregate` also keeps each group's first and last timestamp, which is two string comparisons
+    and a dict-of-dicts update per event, in Python. `source_profile` asks it four questions over
+    every event of a source (severity, detections, hosts, users) and reads nothing but the value and
+    the count - 306 ms at 150,000 rows, most of which was maintaining timestamps nobody looked at.
+    A `Counter` over an attribute is one C pass: the same four answers in ~25 ms.
+
+    The ORDER and the values are `_aggregate`'s exactly - groups keyed by the raw value, shown
+    clipped, empty values dropped, sorted by count descending then by the shown value, ties left in
+    first-seen order by a stable sort - and `tests/test_ai_source_profile_fast.py` holds the two
+    against each other. Anything that needs first/last keeps calling `_aggregate`.
+    """
+    from collections import Counter
+    from itertools import chain
+    from operator import attrgetter
+    if field in _COUNT_ATTRS:
+        c: Any = Counter(map(attrgetter(field), rows))
+    elif field == "detection":
+        c = Counter(map(attrgetter("id"), chain.from_iterable(map(attrgetter("detections"), rows))))
+    elif field == "entity":
+        c = Counter(chain.from_iterable(map(attrgetter("entities"), rows)))
+    else:
+        c = Counter(str(v) for v in (e.fields.get(field) for e in rows) if v not in (None, ""))
+    ordered = sorted(((_s(v, 200), n) for v, n in c.items() if v), key=lambda g: (-g[1], g[0]))
+    return ordered, len(ordered)
 
 
 def _cost(res: dict[str, Any]) -> dict[str, Any]:
@@ -987,6 +1022,26 @@ def _distinct_values(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
 _BUCKETS = {"minute": 60, "hour": 3600, "day": 86400}
 
 
+def _epochs_of(res: dict[str, Any], rows: list[Any]) -> Any:
+    """The matched rows' epochs straight from the search that matched them, or None.
+
+    `search(positions=True)` hands back the index of every match into the very `events` list it
+    searched, and `_matching` keeps the `ts` array of that same snapshot beside it - so
+    `ts[positions]` is each row's epoch with no lookup and nothing to re-verify: the pair cannot
+    disagree, because neither was read from the store a second time. `_row_epochs` recovers the
+    same thing AFTER the fact (150,000 dictionary lookups plus an identity check per row, ~60 ms)
+    and stays as the fallback for whenever this cannot vouch for itself: the positions were capped
+    (`positionsExact` false), or do not line up one-to-one with the rows the caller is holding.
+    """
+    pos, ts = res.get("positions"), res.get("ts")
+    if pos is None or ts is None or not res.get("positionsExact"):
+        return None
+    n = len(rows)
+    if int(pos.shape[0]) != n or (n and int(pos[-1]) >= int(ts.shape[0])):
+        return None
+    return ts[pos]
+
+
 def _row_epochs(rows: list[Any]) -> Any:
     """`STORE.ts` gathered for these rows, or None when that cannot be PROVEN right.
 
@@ -1009,7 +1064,7 @@ def _row_epochs(rows: list[Any]) -> Any:
         return None
 
 
-def _histogram(rows: list[Any], want: str, limit: int) -> dict[str, Any]:
+def _histogram(rows: list[Any], want: str, limit: int, epochs: Any = None) -> dict[str, Any]:
     """Timestamp histogram over already-matched events.
 
     ONE implementation, shared by events_over_time and entity_profile — the two must never be able to
@@ -1023,7 +1078,7 @@ def _histogram(rows: list[Any], want: str, limit: int) -> dict[str, Any]:
     # `source_profile`, to recompute numbers sitting in `STORE.ts`. `_row_epochs` gathers them and
     # answers None whenever it cannot PROVE a row is the event at that position (a re-sort landing
     # mid-call, a row that is not in the pool), in which case the strings are parsed as before.
-    arr = _row_epochs(rows)
+    arr = epochs if epochs is not None else _row_epochs(rows)
     if arr is not None:
         import numpy as np
         ep = arr[np.isfinite(arr)]
@@ -1081,13 +1136,14 @@ def _histogram(rows: list[Any], want: str, limit: int) -> dict[str, Any]:
        "scope": {"type": "string", "enum": ["all", "case"]}},
       ["query"])
 def _events_over_time(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
-    res = _matching(args)
+    res = _matching(args, positions=True)
     rows = res["rows"]
     if not rows:
         return {"total": 0, "buckets": [], "first": None, "last": None, **_cost(res)}
     want = _s(args.get("bucket"), 20).strip().lower() or "auto"
     return {"total": res["total"],
-            **_histogram(rows, want, _int(args, "limit", 60, 1, MAX_GROUPS)), **_cost(res)}
+            **_histogram(rows, want, _int(args, "limit", 60, 1, MAX_GROUPS), _epochs_of(res, rows)),
+            **_cost(res)}
 
 
 @tool("sample_events",
@@ -2144,12 +2200,14 @@ def _source_profile(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
         raise ToolError(f"no source with id {sid!r}. Call workspace_overview or list_sources for the "
                         f"real ids. Known ids include: {known}")
     facets = call_route(list_fields, q="", sources=sid, limit=_int(args, "fields", 18, 1, 40), values=6)
-    res = _matching({"query": "", "sources": sid})
+    res = _matching({"query": "", "sources": sid}, positions=True)
     rows = res["rows"]
-    sevs, _d, _m = _aggregate(rows, "sev")
-    dets, ndet, _m = _aggregate(rows, "detection")
-    hosts, nhost, _m = _aggregate(rows, "host")
-    users, nuser, _m = _aggregate(rows, "user")
+    # value + count is all this tool reads, so it counts in C rather than maintaining per-group
+    # first/last timestamps over every event of the source four times - see `_count_by`.
+    sevs, _d = _count_by(rows, "sev")
+    dets, ndet = _count_by(rows, "detection")
+    hosts, nhost = _count_by(rows, "host")
+    users, nuser = _count_by(rows, "user")
     n = _int(args, "samples", 4, 0, 10)
     picked: list[Any] = []
     if n and rows:
@@ -2166,12 +2224,12 @@ def _source_profile(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
         "fields": [{"name": f["name"], "count": f["count"], "topValues": f["topValues"][:6]}
                    for f in facets["fields"]],
         "fieldsSampled": facets["sampled"],
-        "severity": {g["value"]: g["count"] for g in sevs},
-        "hosts": [{"value": g["value"], "count": g["count"]} for g in hosts[:8]], "distinctHosts": nhost,
-        "users": [{"value": g["value"], "count": g["count"]} for g in users[:8]], "distinctUsers": nuser,
-        "detections": [{"ruleId": g["value"], "count": g["count"]} for g in dets[:8]],
+        "severity": {v: n for v, n in sevs},
+        "hosts": [{"value": v, "count": n} for v, n in hosts[:8]], "distinctHosts": nhost,
+        "users": [{"value": v, "count": n} for v, n in users[:8]], "distinctUsers": nuser,
+        "detections": [{"ruleId": v, "count": n} for v, n in dets[:8]],
         "detectionRules": ndet,
-        "timeline": _histogram(rows, "auto", 24) if rows else None,
+        "timeline": _histogram(rows, "auto", 24, _epochs_of(res, rows)) if rows else None,
         **_cost(res),
     }
     if enrich != "enriched":
