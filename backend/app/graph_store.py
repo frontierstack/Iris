@@ -37,7 +37,9 @@ from typing import Any, Optional
 
 from . import config, sealed
 
-GRAPH_FORMAT = 3          # bump when _NodeAgg/_EdgeAgg fields or extraction rules change
+GRAPH_FORMAT = 5          # bump when _NodeAgg/_EdgeAgg fields or extraction rules change
+                          # 4: domains/emails/urls read the percent-decoded line (no more `40gmail.com`)
+                          # 5: an IP with a TLD glued on (`25.15.6.129.in` out of in-addr.arpa) is not a domain
 _LOCK = threading.Lock()
 
 

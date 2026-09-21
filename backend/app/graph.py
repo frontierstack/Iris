@@ -133,6 +133,27 @@ def _may_hold_domain(head_lower: str) -> bool:
 
 
 URL_RE = re.compile(r"\b(https?://[^\s\"'<>()\]]{4,300})", re.I)
+
+_PCT_RE = re.compile(r"%[0-9A-Fa-f]{2}")
+
+
+def pct_decode(s: str) -> str:
+    """`s` with its %xx escapes decoded (UTF-8), twice when it was encoded twice (%2540 -> %40 -> @).
+
+    Reported from the analyst's proxy log: a login callback URL carried `email=name%40gmail.com` in
+    its query string. There is no literal '@' in that, so EMAIL_RE could not see an address, and
+    DOMAIN_RE — for which '%' is a word boundary — read the tail as the domain `40gmail.com`: a node
+    for a domain that does not exist, and no node for the email that does. The domain / email / URL
+    patterns read this decoded view instead; the raw line is never changed. A string with no valid
+    %xx escape is returned as it is, so the common case costs one substring test.
+    """
+    if "%" not in s or not _PCT_RE.search(s):
+        return s
+    from urllib.parse import unquote
+    d = unquote(s, errors="replace")
+    if "%" in d and _PCT_RE.search(d):
+        d = unquote(d, errors="replace")
+    return d
 EMAIL_RE = re.compile(r"\b([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\b")
 WIN_PATH_RE = re.compile(r"(?<![\w\\])([A-Za-z]:\\(?:[^\\/:*?\"<>|\r\n]+\\)*[^\\/:*?\"<>|\r\n]+)")
 NIX_PATH_RE = re.compile(r"(?<![\w/])(/(?:tmp|root|home|etc|var|opt|usr|dev|srv|mnt|data|bin|sbin|lib|proc|sys)/[\w./+-]+)")
@@ -237,6 +258,11 @@ def clean_domain(d: str) -> str:
     if any(not lab or len(lab) > 63 or not _DOM_LABEL_RE.fullmatch(lab) or lab[0] == "-" or lab[-1] == "-" for lab in labels):
         return ""
     if labels[0].isdigit() and len(labels[0]) > 8:  # 89966437766-... client ids are not hosts
+        return ""
+    # An address with a TLD on the end is a FRAGMENT: `25.15.6.129.in-addr.arpa` read by DOMAIN_RE stops
+    # at the `.in` TLD before the hyphen, and `25.15.6.129.in` became a domain node beside the real PTR
+    # name. Three or more all-numeric labels before the TLD is an IP, not a hostname (163.com is kept).
+    if len(labels) >= 4 and all(lab.isdigit() for lab in labels[:-1]):
         return ""
     return d
 
@@ -374,7 +400,7 @@ _TRAIL_PUNCT_RE = re.compile(r"[:;,]+$")
 
 def _clean_user(u: str) -> str:
     """'root(uid=0)' -> 'root'; 'DOMAIN\alice' -> 'DOMAIN\alice'; drops words that are not accounts."""
-    u = u.strip().strip("'\"")
+    u = pct_decode(u).strip().strip("'\"")          # a user taken out of a URL arrives as name%40domain
     if "(" in u:
         u = _UID_SUFFIX_RE.sub("", u)                   # root(uid=0)
     # an IAM ARN is the same principal as its bare user name - collapse so they are ONE node:
@@ -504,13 +530,18 @@ def extract(e: Event) -> _Ex:
     # `has_dot` is true of essentially every log line, so it gated nothing. `_may_hold_domain` is a
     # NECESSARY condition of a DOMAIN_RE match and ~20x cheaper — see `_TLD_GATE` for the measurements
     # and for the two ways this could be got subtly, silently wrong.
-    raw_domains = _all(b, "domain") + (DOMAIN_RE.findall(head2k) if _may_hold_domain(ltext[:2000]) else [])
-    urls = _all(b, "url_only") + (URL_RE.findall(head2k) if "http" in ltext else [])
+    # ...all three read the PERCENT-DECODED line (see `pct_decode`): in a URL's query string an address
+    # is `name%40gmail.com`, which read raw is no email at all and a domain called `40gmail.com`.
+    # The gate is taken on the same decoded slice the regex scans, as `_may_hold_domain` requires.
+    dhead = pct_decode(head2k)
+    dlow = dhead.lower() if dhead is not head2k else ltext[:2000]
+    raw_domains = _all(b, "domain") + (DOMAIN_RE.findall(dhead) if _may_hold_domain(dlow) else [])
+    urls = _all(b, "url_only") + (URL_RE.findall(dhead) if "http" in dlow else [])
     # a URL contributes its HOST as a domain node (and the URL as a fact) - 12k distinct URLs as nodes is a hairball
     raw_domains += [url_host(u) for u in urls]
     dom_n = [node("domain", cd) for cd in dict.fromkeys(clean_domain(d) for d in raw_domains) if cd]
     dom_n = [x for x in dom_n if x]
-    emails = _all(b, "email") + (EMAIL_RE.findall(head2k) if "@" in head2k else [])
+    emails = [pct_decode(m) for m in _all(b, "email")] + (EMAIL_RE.findall(dhead) if "@" in dhead else [])
     email_n = [node("email", m.lower()) for m in _uniq(emails) if EMAIL_RE.fullmatch(m)]
     email_n = [x for x in email_n if x]
 
