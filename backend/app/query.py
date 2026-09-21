@@ -11,6 +11,7 @@ phrase ("10.0.0.9:3001"). A doubled backslash is a literal backslash.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -198,6 +199,19 @@ def node_pred(n: Node) -> Predicate:
     return lambda e: any(p(e) for p in preds)
 
 
+def fold(s: str) -> str:
+    """How search compares text: lower-cased and, when it is not plain ASCII, Unicode NFC.
+
+    The same accented letter can be written two ways — `é` as one code point, or `e` plus a combining
+    accent (NFD, which macOS writes into every file name). They look identical and compared unequal,
+    so `renée` typed into the search box never found a log that wrote it decomposed. search._doc packs
+    the index through this same function, and every comparison below goes through it — the index and
+    the predicate that confirms it must agree, or confirmed matches are silently dropped.
+    """
+    s = s.lower()
+    return s if s.isascii() else unicodedata.normalize("NFC", s)
+
+
 def _atom_pred(t: _Tok) -> Predicate:
     text = t.text
     if not t.quoted:
@@ -207,24 +221,24 @@ def _atom_pred(t: _Tok) -> Predicate:
             field = FIELD_ALIASES.get(unescape(field).lower(), unescape(field))
             return _field_pred(field, unescape(value).strip('"'))
     # quoted text was already unescaped by the tokenizer; only bare words still carry escapes
-    needle = (text if t.quoted else unescape(text)).lower()
+    needle = fold(text if t.quoted else unescape(text))
 
     def free(e: Event) -> bool:
         # NOTE: keep in sync with search._doc() — the vectorized index treats free-text as exact over these parts
-        if needle in e.msg.lower() or needle in e.raw.lower():
+        if needle in fold(e.msg) or needle in fold(e.raw):
             return True
-        if needle in e.host.lower() or needle in e.user.lower() or needle in e.source.lower():
+        if needle in fold(e.host) or needle in fold(e.user) or needle in fold(e.source):
             return True
-        if needle in e.file.lower() or needle in e.id.lower():
+        if needle in fold(e.file) or needle in fold(e.id):
             return True
         for x in e.entities:
-            if needle in x.lower():
+            if needle in fold(x):
                 return True
         for d in e.detections:
-            if needle in d.name.lower() or needle in d.id.lower():
+            if needle in fold(d.name) or needle in fold(d.id):
                 return True
         for k, v in e.fields.items():
-            if needle in k.lower() or needle in v.lower():
+            if needle in fold(k) or needle in fold(v):
                 return True
         return False
 
@@ -232,12 +246,12 @@ def _atom_pred(t: _Tok) -> Predicate:
 
 
 def _field_pred(field: str, value: str) -> Predicate:
-    v = value.lower()
+    v = fold(value)
     wildcard = "*" in v
     rx = re.compile("^" + ".*".join(re.escape(p) for p in v.split("*")) + "$", re.I) if wildcard else None
 
     def match(s: str) -> bool:
-        s = s.lower()
+        s = fold(s)
         if rx:
             return bool(rx.match(s))
         return s == v or (len(v) >= 3 and v in s and field not in ("sev", "id"))
@@ -255,11 +269,11 @@ def _field_pred(field: str, value: str) -> Predicate:
     if f == "file":
         return lambda e: match(e.file)
     if f == "id":
-        return lambda e: e.id.lower() == v
+        return lambda e: fold(e.id) == v
     if f == "msg":
-        return lambda e: v in e.msg.lower()
+        return lambda e: v in fold(e.msg)
     if f == "raw":
-        return lambda e: v in e.raw.lower()
+        return lambda e: v in fold(e.raw)
     if f == "_ip":
         return lambda e: any(match(x) for x in e.entities) or any(match(e.fields.get(k, "")) for k in ("src_ip", "src", "dst", "sourceIPAddress", "IpAddress"))
     if f == "_entity":
@@ -270,11 +284,11 @@ def _field_pred(field: str, value: str) -> Predicate:
         # anyone who wants a loose match.
         if rx is not None:
             return lambda e: any(bool(rx.match(x)) for x in e.entities)
-        return lambda e: any(x.lower() == v for x in e.entities)
+        return lambda e: any(fold(x) == v for x in e.entities)
     if f in ("detection", "rule", "sigma"):
         return lambda e: any(match(d.id) or match(d.name) for d in e.detections)
     if f == "ts":
-        return lambda e: e.ts.lower().startswith(v)
+        return lambda e: fold(e.ts).startswith(v)
 
     def fld(e: Event) -> bool:
         val = e.fields.get(field)
@@ -307,5 +321,5 @@ def atom_parts(t: _Tok) -> tuple[Optional[str], str]:
         if parts:
             field, value = parts
             f = unescape(field).lower()
-            return FIELD_ALIASES.get(f, f).lower(), unescape(value).strip('"').lower()
-    return None, (text if t.quoted else unescape(text)).lower()
+            return FIELD_ALIASES.get(f, f).lower(), fold(unescape(value).strip('"'))
+    return None, fold(text if t.quoted else unescape(text))

@@ -361,6 +361,20 @@ def pct_decode(s: str) -> str:
     return d
 
 
+# Fields whose VALUE is a URL, a piece of one, or an address — the ones a log writes percent-encoded.
+# Decided per word of the field name (`http_referer`, `cs-uri-stem`, `userEmail`), never by substring:
+# "security" contains "uri".
+_KEY_WORD_RE = re.compile(r"[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])")
+_DECODED_WORDS = frozenset({"url", "urls", "uri", "uris", "referer", "referrer", "href", "link", "email",
+                            "emails", "mail", "query", "querystring", "qs", "stem", "request", "redirect"})
+
+
+@lru_cache(maxsize=8192)
+def decodes_field(key: str) -> bool:
+    """Is `key` a url / email field, whose value is searchable only once its %xx escapes are decoded?"""
+    return any(w.lower() in _DECODED_WORDS for w in _KEY_WORD_RE.findall(key or ""))
+
+
 def extract_entities(ev: ParsedEvent) -> list[str]:
     """Return an ordered, de-duplicated list of entity names for an event."""
     found: list[str] = []

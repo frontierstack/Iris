@@ -213,7 +213,7 @@ class Fingerprint:
 
 def sample_lines(data: bytes, n: int = 200) -> list[str]:
     head = data[: 256 * 1024]
-    text = head.decode("utf-8", errors="replace")
+    text = head.decode("utf-8-sig", errors="replace")   # a byte-order mark is not part of line 1
     lines = text.splitlines()
     if len(data) > len(head) and lines:
         lines = lines[:-1]  # drop possibly-truncated last line

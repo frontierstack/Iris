@@ -91,7 +91,8 @@ def _iter_lines(chunks: Iterable[bytes]) -> Iterable[str]:
         whether it was a whole line or the start of one; and a chunk ending in a bare CR is held back
         too, or a CRLF straddling the boundary would become two line breaks instead of one.
     """
-    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    # utf-8-sig: phase 1 drops a byte-order mark exactly as phase 2 does, so the raw text agrees
+    decoder = codecs.getincrementaldecoder("utf-8-sig")("replace")
     rest = ""
     for chunk in chunks:
         text = rest + decoder.decode(chunk)

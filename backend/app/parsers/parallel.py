@@ -50,7 +50,7 @@ from multiprocessing import get_context
 from typing import Callable, Iterable, Optional
 
 from ..models import Event
-from ..normalize import extract_entities, infer_severity, pct_decode, to_iso
+from ..normalize import decodes_field, extract_entities, infer_severity, pct_decode, to_iso
 from .base import BaseParser, ParsedEvent
 
 UTC = timezone.utc
@@ -283,6 +283,10 @@ def normalize_batch(parsed: list[ParsedEvent], sid: str, filename: str, family: 
         for k, v in pe.fields.items():
             if v is None or v == "":
                 continue
+            # a url / email value is searched by what it says: `email=a%40b.com` is `a@b.com`. The raw
+            # line keeps the encoding (normalize.decodes_field / pct_decode)
+            if "%" in v and decodes_field(k):
+                v = pct_decode(v)
             k = _shared(k, shared)
             n_v = len(v)
             if n_v <= _SHARE_MAX_LEN:
@@ -477,7 +481,8 @@ def prepare(parser: BaseParser, data: bytes) -> Optional[tuple[Plan, list[Parsed
     except Exception:
         return None
     _reset_parser(pristine)
-    head_text = data[:head_end].decode("utf-8", errors="replace")
+    # the head starts the file, so it is where a byte-order mark is dropped (chunks start after it)
+    head_text = data[:head_end].decode("utf-8-sig", errors="replace")
     head_parsed = list(parser.parse(head_text.splitlines()))
     plan = Plan(parser=pristine, head=head_text, head_records=len(head_parsed), ranges=ranges,
                 workers=min(workers, len(ranges)))

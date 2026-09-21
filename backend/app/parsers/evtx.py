@@ -76,7 +76,7 @@ class EvtxParser(BaseParser):
         if data.startswith(b"ElfFile"):
             yield from self._parse_binary(data)
         else:
-            yield from self.parse(data.decode("utf-8", errors="replace").splitlines())
+            yield from self.parse(data.decode("utf-8-sig", errors="replace").splitlines())
 
     def _parse_binary(self, data: bytes) -> Iterator[ParsedEvent]:
         try:

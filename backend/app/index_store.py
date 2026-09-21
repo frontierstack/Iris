@@ -83,11 +83,12 @@ def _code_digest() -> str:
     """
     import inspect
 
-    from . import pool_store, search
+    from . import pool_store, query, search
 
     h = hashlib.sha256()
     try:
-        for fn in (search._doc, search.build_index):
+        # `query.fold` too: `_doc` packs every document through it (lower + NFC), so it decides the bytes
+        for fn in (search._doc, search.build_index, query.fold):
             h.update(inspect.getsource(fn).encode("utf-8"))
         h.update(str(search._SEP + search._FSEP + search._END).encode("utf-8"))
     except (OSError, TypeError, AttributeError) as exc:

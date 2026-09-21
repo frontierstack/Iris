@@ -31,6 +31,9 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Optional
 
+from . import textcodec
+
+
 def _cap(name: str, default: int) -> int:
     """An expansion cap from the environment. 0 means NO LIMIT."""
     import os
@@ -173,6 +176,9 @@ class Expanded:
     # viewer) must re-apply the transcode, or it reads the raw UTF-16 as UTF-8 and every line comes
     # back full of NULs while the source still reports `enriched`. See `TRANSCODE_MEMBER`.
     transcoded: bool = False
+    # ...and FROM WHAT: 'utf-16', 'utf-16-le', 'utf-16-be' or 'cp1252' (see parsers/textcodec.py).
+    # Recorded as the `#<codec>` member so a re-read applies the same transcode.
+    codec: str = ""
 
     @property
     def ok(self) -> bool:
@@ -181,7 +187,13 @@ class Expanded:
 
 # The pseudo member name `read_member` accepts for "the whole file, transcoded from UTF-16". Recorded
 # as `<file>!<marker>` in `Store.source_member` so the re-read path is the same as for an archive member.
+# Generalised to `#<codec>` for every transcode textcodec.sniff can ask for; `#utf-16` (what sources
+# already on disk carry) is the same rule with codec 'utf-16'.
 TRANSCODE_MEMBER = "#utf-16"
+
+
+def transcode_member(codec: str) -> str:
+    return "#" + (codec or "utf-16")
 
 
 class _Budget:
@@ -334,7 +346,7 @@ def expand_path(filename: str, path) -> Expanded:
     # bounded by MAX_MEMBER_BYTES once expanded; none of them is the multi-gigabyte case.
     if (head.startswith((GZIP_MAGIC, BZIP2_MAGIC, XZ_MAGIC, ZSTD_MAGIC, SEVENZ_MAGIC, RAR_MAGIC))
             or lower.endswith((".gz", ".bz2", ".xz", ".lzma", ".zst", ".7z", ".rar"))
-            or (head[:2] in (b"\xff\xfe", b"\xfe\xff") and lower.endswith(_TEXT_EXTENSIONS))):
+            or textcodec.sniff(head)):
         try:
             return expand(filename, _read_all(path))
         except OSError as exc:
@@ -380,10 +392,11 @@ def read_member(path, member: str) -> bytes:
     parts = member.split("!")
     if len(parts) < 2:
         raise ValueError(f"{member!r} does not name a member inside a container")
-    if parts[-1] == TRANSCODE_MEMBER:
-        # a UTF-16 text export, transcoded at ingest: hand back the SAME bytes the parsers first saw
+    if parts[-1].startswith("#"):
+        # a text file transcoded at ingest (UTF-16, Windows-1252): hand back the SAME bytes the
+        # parsers first saw
         with open(path, "rb") as fh:
-            return fh.read().decode("utf-16").encode("utf-8")
+            return textcodec.transcode(fh.read(), parts[-1][1:])
     blob: Optional[bytes] = None
     for i, want in enumerate(parts[1:]):
         if i == 0:
@@ -513,13 +526,15 @@ def _expand_into(out: Expanded, budget: _Budget, filename: str, data: bytes, dep
         _expand_zstd(out, budget, filename, data, depth)
         return
 
-    if depth == 0 and data[:2] in (b"\xff\xfe", b"\xfe\xff") and lower.endswith(_TEXT_EXTENSIONS):
-        try:  # UTF-16 text export (PowerShell Out-File default): transcode so text parsers can read it
-            out.members.append((filename, data.decode("utf-16").encode("utf-8")))
+    if depth == 0:
+        # A text log that is not UTF-8 (UTF-16 with or without a BOM — PowerShell's Out-File default —
+        # or Windows-1252): transcode it once, here, so every parser reads UTF-8. See textcodec.
+        codec = textcodec.sniff(data)
+        if codec:
+            out.members.append((filename, textcodec.transcode(data, codec)))
             out.transcoded = True
+            out.codec = codec
             return
-        except UnicodeDecodeError:
-            pass
 
     out.members.append((filename, data))
 

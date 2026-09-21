@@ -310,7 +310,7 @@ def _mapping_inputs(sid: str) -> tuple:
             # CONTAINER, and suggesting a field mapping from a zip's own bytes is worse than suggesting
             # nothing. Bounded either way — this only ever needs the first few lines.
             head = STORE.source_head(sid, 256 * 1024)
-            lines = [l for l in head.decode("utf-8", errors="replace").splitlines() if l.strip()][:40]
+            lines = [l for l in head.decode("utf-8-sig", errors="replace").splitlines() if l.strip()][:40]
         except (OSError, KeyError, ValueError):
             lines = []
     if not lines and src.sample:
@@ -408,13 +408,13 @@ def _looks_binary(path: Path, name: str) -> bool:
 
 def _lines_of(blob: bytes):
     """`_read_lines` over bytes already in hand — the archive-member form of the same walk."""
-    for n, line in enumerate(blob.decode("utf-8", "replace").splitlines(), 1):
+    for n, line in enumerate(blob.decode("utf-8-sig", "replace").splitlines(), 1):
         yield n, line
 
 
 def _read_lines(path: Path):
     """Yield (n, text) for every line — universal newlines, utf-8 with replacement, no trailing newline."""
-    with open(path, "r", encoding="utf-8", errors="replace", newline=None) as fh:
+    with open(path, "r", encoding="utf-8-sig", errors="replace", newline=None) as fh:
         for n, line in enumerate(fh, 1):
             if line.endswith("\n"):
                 line = line[:-1]

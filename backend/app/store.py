@@ -1171,7 +1171,7 @@ class Store:
             # payload `auth.log` with no `!`, and `read_member` needs the `<container>!<payload>` shape.
             is_self = len(members) == 1 and member_name == own
             if is_self:
-                member = f"{own}!{archives.TRANSCODE_MEMBER}" if expanded.transcoded else ""
+                member = f"{own}!{archives.transcode_member(expanded.codec)}" if expanded.transcoded else ""
             elif "!" in member_name:
                 member = member_name
             else:

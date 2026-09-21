@@ -37,7 +37,7 @@ import numpy as np
 
 from . import compute, index_store
 from .models import Event
-from .query import Node, atom_parts, node_pred, parse_query
+from .query import Node, atom_parts, fold, node_pred, parse_query
 
 # The three names an event's source answers to, packed into one label per code. Kept as a named
 # constant because the mask that splits it and the build that joins it must never drift apart.
@@ -231,7 +231,10 @@ def _doc(e: Event) -> bytes:
         parts.insert(0, e._msg)
     f = e.fields
     fields = _FSEP_S.join([f"{k}={v}" for k, v in f.items()]) if f else ""
-    return (_SEP_S + _SEP_S.join(parts) + _SEP_S + _FSEP_S + fields + _FSEP_S + _END_S).lower().encode("utf-8", "replace")
+    # `fold` = lower + NFC for non-ASCII text, the comparison query.py's predicate makes (see query.fold).
+    # NFC of the joined document equals the parts' NFC joined: the separators are control characters,
+    # which no combining mark composes with.
+    return fold(_SEP_S + _SEP_S.join(parts) + _SEP_S + _FSEP_S + fields + _FSEP_S + _END_S).encode("utf-8", "replace")
 
 
 def _note_gpu_skip(reason: str) -> None:

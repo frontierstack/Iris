@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import heapq
+import io
 from collections import Counter, deque
 # `datetime.UTC` is 3.11+; the CUDA runtime image is Python 3.10, so the whole app failed to
 # import on it. `timezone.utc` is what every other module here uses and works on both.
@@ -386,8 +387,16 @@ def event_location(eid: str, context: int = Query(3, ge=0, le=20)) -> dict:
     exact_hit: Optional[_Excerpt] = None
     loose_hit: Optional[_Excerpt] = None
     total = 0
+    # A source recorded with a MEMBER is not the file at `path`: it is one entry of an archive, or a text
+    # file transcoded at ingest (UTF-16, Windows-1252 — parsers/textcodec). Reading `path` itself
+    # compared the event against the container's bytes or the untranscoded ones, and found nothing.
+    # `source_bytes` hands back what the parser read; a member is bounded, so reading it whole is fine.
+    # utf-8-sig for the plain file too: its byte-order mark was never part of line 1's raw text.
+    member = STORE.source_member.get(e.sourceId, "")
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        opened = (io.StringIO(STORE.source_bytes(e.sourceId).decode("utf-8-sig", "replace")) if member
+                  else open(path, "r", encoding="utf-8-sig", errors="replace"))
+        with opened as fh:
             for n, text in enumerate(fh, 1):
                 total = n
                 line = text.rstrip("\r\n")
@@ -410,6 +419,9 @@ def event_location(eid: str, context: int = Query(3, ge=0, le=20)) -> dict:
     except OSError as exc:
         return {"file": e.file, "line": None, "totalLines": None, "exact": False,
                 "reason": f"could not read the file ({config.safe_os_error(exc)})", "context": []}
+    except (KeyError, ValueError) as exc:          # a member that is no longer in its container
+        return {"file": e.file, "line": None, "totalLines": None, "exact": False,
+                "reason": f"could not read the file ({exc})", "context": []}
 
     hit = exact_hit or loose_hit
     if hit is None:

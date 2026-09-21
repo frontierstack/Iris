@@ -67,7 +67,8 @@ class BaseParser:
         return iter(())
 
     def parse_bytes(self, data: bytes) -> Iterator[ParsedEvent]:
-        text = data.decode("utf-8", errors="replace")
+        # utf-8-sig: a leading byte-order mark is dropped, not glued to the first header (textcodec)
+        text = data.decode("utf-8-sig", errors="replace")
         return self.parse(text.splitlines())
 
 
