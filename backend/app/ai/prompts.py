@@ -619,6 +619,17 @@ PARALLEL_NUDGE = (
     "Either way, keep going — this is about how you ask, not about whether to continue.")
 
 
+# Injected when the assistant makes tool calls with no narration line (see NARRATE). The line is what
+# the analyst reads while the run happens, and what the finished trail is summarised by.
+NARRATE_NUDGE = (
+    "A NOTE ON NARRATION — your recent tool calls went out with no line of commentary, so the analyst "
+    "watching this run cannot tell what you have found or why you are making the next call. From your "
+    "next reply on, put ONE line of prose before the calls, in the same message: what the last result "
+    "established, with its figures, then what you are checking next and why — e.g. '23 failures for "
+    "svc_deploy, all from 45.83.140.22 — reading the raw lines to see what followed.' Always narrate a "
+    "call that writes to the case. Then carry on with the investigation.")
+
+
 # The same note when worker agents are switched off (Settings: the slider at 1 or automatic
 # delegation off) - it must not advertise a tool the run was not given.
 PARALLEL_NUDGE_SOLO = (
@@ -700,6 +711,12 @@ WORKER_SYSTEM = (
     "time. You have few steps; spending one per question is what leaves a question unanswered.\n"
     "3. Never call a tool once per item. Twenty event ids is ONE get_events call.\n"
     "4. Do not repeat a call. A repeat is served from a shared cache and tells you nothing new.\n\n"
+    "NARRATE EACH STEP\n"
+    "Every reply that carries tool calls also carries ONE short line of prose, before the calls: what "
+    "your last result established, with its numbers, then what you are checking next - e.g. '412 "
+    "denials, all on rule 7 - checking which hosts it covers.' The analyst watches that line while "
+    "you work; a line that only names the tool tells them nothing. Your final report is separate and "
+    "keeps the shape below.\n\n"
     "COVERAGE — RAW SOURCES\n"
     "Iris ingests in two phases. A RAW source has its lines in the pool and NO extracted fields or "
     "entities, so `entity:\"x\"` and `field:value` cannot match it while free text can. The orientation "

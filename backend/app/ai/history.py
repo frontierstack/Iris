@@ -361,7 +361,7 @@ class HistoryStore:
             self._touch_locked(rec)
             self._save_locked()
 
-    def agent_progress(self, run_id: str, agent: str, text: str, phase: str = "call") -> None:
+    def agent_progress(self, run_id: str, agent: str, text: str, phase: str = "call", said: str = "") -> None:
         """PATCH a worker agent's own line instead of appending another one.
 
         An agent reports as it works, and a delegation of three agents over two minutes would put
@@ -378,6 +378,8 @@ class HistoryStore:
                 if e.get("kind") == "status" and e.get("agent") == agent:
                     rec["seq"] += 1
                     e.update({"text": _clip(text, MAX_TEXT), "phase": phase, "updSeq": rec["seq"]})
+                    if said:
+                        e["said"] = _clip(said, MAX_TEXT)
                     break
             else:
                 self._append_locked(rec, {"kind": "status", "text": text, "agent": agent, "phase": phase})

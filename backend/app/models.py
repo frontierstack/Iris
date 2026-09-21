@@ -932,6 +932,9 @@ class AiTranscriptEntry(BaseModel):
     # The QUESTION a worker agent was given. Its own field because the agent's line is PATCHED in
     # place while it works ("working - 4 calls, latest: count_events"), so the text stops holding it.
     task: str = ""
+    # A worker agent's own latest narration line ("412 denials, all one rule - checking its hosts").
+    # Kept apart from `text`, which is Iris's line about the agent (state, call count).
+    said: str = ""
     # When this entry was last CHANGED, on the same counter as `seq`. A tool entry is patched in place
     # when its result lands, which keeps its `seq` — so `?since=<lastSeq>` never resent it and a polling
     # client (any tab that is not the one streaming) kept the card's spinner turning for the rest of the

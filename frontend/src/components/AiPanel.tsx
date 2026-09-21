@@ -302,7 +302,7 @@ function toBlocks(entries: AiTranscriptEntry[]): Block[] {
  */
 type TrailNode =
   | { k: 'tool'; key: number; e: AiTranscriptEntry; turn: boolean; lead: string }
-  | { k: 'note'; key: number; text: string; turn: boolean; agent?: string; phase?: string; task?: string }
+  | { k: 'note'; key: number; text: string; turn: boolean; agent?: string; phase?: string; task?: string; said?: string }
   | { k: 'prose'; key: number; text: string; turn: boolean };
 
 function trailNodes(blocks: Block[]): TrailNode[] {
@@ -322,7 +322,7 @@ function trailNodes(blocks: Block[]): TrailNode[] {
         // roster instead of a column of near-identical sentences. Persisted on the entry, so this
         // works in a polling tab and after a reload too.
         if (e.text.trim()) {
-          out.push({ k: 'note', key: e.seq, text: e.text, turn, agent: e.agent, phase: e.phase, task: e.task });
+          out.push({ k: 'note', key: e.seq, text: e.text, turn, agent: e.agent, phase: e.phase, task: e.task, said: e.said });
           turn = false;
         }
         continue;
@@ -555,6 +555,61 @@ function CopyMicro({ text, what }: { text: string; what: string }) {
  * long run read as alternating noise; the arguments are a labelled list and the outcome is a row of
  * its own with a glyph, so "what was asked" and "what came back" are readable at a glance.
  */
+/**
+ * A NARRATION LINE HAS A SHAPE, and the screen shows it.
+ *
+ * NARRATE in the system prompt asks for "what the last result established, with its numbers — then
+ * what you are doing next". Drawn as one muted paragraph, the finding and the intention read the same
+ * and a long run was a column of sentences to parse. Split on the dash (or semicolon) the prompt asks
+ * for, the finding is the line that carries weight and the next step is a quieter line under it.
+ * A line with no separator is ONE of the two, judged by how it opens — never invented into both.
+ * A hyphen between digits is a range ("02:14 - 02:19"), not the separator.
+ */
+const NARR_SEP = /\s+[\u2014\u2013]\s+|(?<!\d)\s+-\s+(?!\d)|;\s+/;
+const NARR_INTENT = /^(?:now|next|then|first|before|let me|i'll|i will|i'm|going to|to see|to check)\b|^[a-z]+ing\b/i;
+
+export function splitNarration(text: string): { found: string; next: string } {
+  const t = text.replace(/\s+/g, ' ').trim();
+  const m = NARR_SEP.exec(t);
+  if (m && m.index >= 8 && t.length - (m.index + m[0].length) >= 8) {
+    const head = t.slice(0, m.index).trim();
+    // "Profiling X first - one call gives me..." is an intention with its reason, not a finding:
+    // labelling its first half "Found" would claim a result the run has not had yet.
+    if (NARR_INTENT.test(head)) return { found: '', next: t };
+    const rest = t.slice(m.index + m[0].length).trim();
+    return { found: head, next: rest.charAt(0).toUpperCase() + rest.slice(1) };
+  }
+  return NARR_INTENT.test(t) ? { found: '', next: t } : { found: t, next: '' };
+}
+
+const Narration = memo(function Narration({ text, className }: { text: string; className?: string }) {
+  const { found, next } = splitNarration(text);
+  if (!found && !next) return null;
+  return (
+    <div className={cx('tnarr', className)}>
+      {!!found && (
+        <div className="tnarr__row tnarr__row--found">
+          <span className="tnarr__k">Found</span>
+          <Markdown className="md tnarr__v" text={found} />
+        </div>
+      )}
+      {!!next && (
+        <div className="tnarr__row tnarr__row--next">
+          <span className="tnarr__k">Next</span>
+          <Markdown className="md tnarr__v" text={next} />
+        </div>
+      )}
+    </div>
+  );
+});
+
+/** The narration lines of a trail, in order — each card's lead, once. */
+function leadsOf(nodes: TrailNode[]): string[] {
+  return nodes.flatMap((n) => (n.k === 'tool' && n.lead.trim() ? [n.lead] : []));
+}
+
+const OUTLINE_MAX = 8;
+
 const ToolCall = memo(function ToolCall({ e, live, lead = '' }: { e: AiTranscriptEntry; live: boolean; lead?: string }) {
   const [open, setOpen] = useState(false);
   const rows = argRows(e.args ?? {});
@@ -564,7 +619,7 @@ const ToolCall = memo(function ToolCall({ e, live, lead = '' }: { e: AiTranscrip
   const bad = e.ok === false;
   return (
     <div className={cx('tcall', e.writes && 'tcall--write', bad && !e.writes && 'tcall--bad')}>
-      {!!lead.trim() && <Markdown className="md tcall__lead" text={lead} />}
+      {!!lead.trim() && <Narration className="tcall__lead" text={lead} />}
       {/* There is ONE card and ONE head, so `e.writes` is read here and nowhere else — the rule that
           stops one layout drawing a write as a read. Keep it that way if a variant is ever added. */}
       <div className="tcall__card">
@@ -625,6 +680,7 @@ const ToolCall = memo(function ToolCall({ e, live, lead = '' }: { e: AiTranscrip
 function sameNode(a: TrailNode, b: TrailNode): boolean {
   if (a.k !== b.k || a.key !== b.key || a.turn !== b.turn) return false;
   if (a.k === 'tool') return b.k === 'tool' && a.e === b.e && a.lead === b.lead;
+  if (a.k === 'note') return b.k === 'note' && a.text === b.text && a.said === b.said;
   return a.text === (b as { text: string }).text;
 }
 
@@ -646,10 +702,19 @@ type TrailGroup =
   | { g: 'lane'; key: number; nodes: Array<Extract<TrailNode, { k: 'tool' }>>; turn: boolean }
   | { g: 'agents'; key: number; rows: AgentRow[]; turn: boolean };
 
+// The status line the loop writes before a parallel lane ("3 tools running in parallel: …").
+const LANE_NOTE = /^[0-9]+ tools running in parallel:/;
+
 function groupTrail(nodes: TrailNode[]): TrailGroup[] {
   const out: TrailGroup[] = [];
-  for (const n of nodes) {
+  for (const [i, n] of nodes.entries()) {
     const last = out[out.length - 1];
+    // The lane's own head already says "N calls at the same time", and the announcement sat BETWEEN
+    // the narration and the group it introduces. Dropped only when the lane is actually drawn next.
+    if (n.k === 'note' && !n.agent && LANE_NOTE.test(n.text)) {
+      const nx = nodes[i + 1];
+      if (nx && nx.k === 'tool' && (nx.e.lane ?? 1) > 1 && (nx.e.laneId ?? 0) > 0) continue;
+    }
     if (n.k === 'tool' && (n.e.lane ?? 1) > 1 && (n.e.laneId ?? 0) > 0) {
       if (last && last.g === 'lane' && (last.nodes[0]!.e.laneId ?? -1) === n.e.laneId) {
         last.nodes.push(n);
@@ -659,14 +724,14 @@ function groupTrail(nodes: TrailNode[]): TrailGroup[] {
       continue;
     }
     if (n.k === 'note' && n.agent) {
-      const row: AgentRow = { agent: n.agent, phase: n.phase ?? '', text: n.text, task: taskOf(n) };
+      const row: AgentRow = { agent: n.agent, phase: n.phase ?? '', text: n.text, task: taskOf(n), said: n.said ?? '' };
       if (last && last.g === 'agents') {
         // one row per agent: the latest line about it wins, so "started" is replaced by "finished"
         // — but its QUESTION is carried across, because only the `start` line ever carries it and
         // a roster of three agents that does not say what any of them was asked is three names.
         // That is most of "I am not seeing multiple agents working".
         const at = last.rows.findIndex((r) => r.agent === row.agent);
-        if (at >= 0) last.rows[at] = { ...row, task: row.task || last.rows[at]!.task };
+        if (at >= 0) last.rows[at] = { ...row, task: row.task || last.rows[at]!.task, said: row.said || last.rows[at]!.said };
         else last.rows.push(row);
         continue;
       }
@@ -689,11 +754,11 @@ function sameGroup(a: TrailGroup, b: TrailGroup): boolean {
   }
   return b.g === 'agents' && a.turn === b.turn && a.rows.length === b.rows.length
     && a.rows.every((r, i) => r.agent === b.rows[i]!.agent && r.text === b.rows[i]!.text
-      && r.task === b.rows[i]!.task);
+      && r.task === b.rows[i]!.task && r.said === b.rows[i]!.said);
 }
 
 /** One worker agent in the roster. `task` is its question, which only the `start` line carries. */
-type AgentRow = { agent: string; phase: string; text: string; task: string };
+type AgentRow = { agent: string; phase: string; text: string; task: string; said: string };
 
 /** The question out of an agent status line: "agent <name> started: <the question>". */
 function taskOf(n: Extract<TrailNode, { k: 'note' }>): string {
@@ -731,9 +796,12 @@ function AgentRoster({ rows, live }: { rows: AgentRow[]; live: boolean }) {
               <span className="aroster__who">{r.agent}</span>
               <span className="aroster__state">{AGENT_STATE[r.phase] ?? r.phase ?? ''}</span>
               {live && r.phase !== 'end' && <span className="spinner" style={{ width: 9, height: 9, borderWidth: 1.5 }} />}
-              <span className="aroster__what">{r.text.replace(/^agent \S+ /, '')}</span>
+              {/* the start line only restates the question, which has its own line below */}
+              {r.phase !== 'start' && <span className="aroster__what">{r.text.replace(/^agent \S+ /, '')}</span>}
             </span>
             {!!r.task && <span className="aroster__task" title={r.task}>{r.task}</span>}
+            {/* the agent's OWN account of its latest step — what a call count cannot say */}
+            {!!r.said && <Narration className="aroster__said" text={r.said} />}
           </li>
         ))}
       </ul>
@@ -796,6 +864,14 @@ const StepsCard = memo(function StepsCard({ nodes, live, title, startOpen }: {
 
   const { bits, pending, inflight } = countsOf(nodes);
   const groups = groupTrail(nodes);
+  // THE STORY OF THE RUN, from its own narration. Live, the latest line says what is happening NOW
+  // on the card's head, so the analyst does not have to find the newest card to know. Finished and
+  // collapsed, the card lists what each step ESTABLISHED — the account of how the answer was reached
+  // without opening thirty cards to read it.
+  const leads = leadsOf(nodes);
+  const latest = leads.length ? splitNarration(leads[leads.length - 1]!) : null;
+  const now = latest ? (latest.next || latest.found) : '';
+  const outline = leads.map((l) => { const s = splitNarration(l); return s.found || s.next; }).filter(Boolean);
 
   return (
     <section className={cx('aic-disc', 'aic-steps', open && 'aic-disc--open')}>
@@ -814,17 +890,36 @@ const StepsCard = memo(function StepsCard({ nodes, live, title, startOpen }: {
               </span>
             )}
             {!!bits.length && <span className="aic-disc__meta">{bits.join(' · ')}</span>}
+            {live && !!now && <span className="aic-disc__now" title={now}><b>Now</b>{now}</span>}
           </span>
           <span className="aic-disc__state" aria-hidden>{open ? <><Icon.Minus /> Collapse</> : <><Icon.Plus /> Expand</>}</span>
         </button>
       </div>
+      {!open && !live && outline.length > 0 && (
+        <ol className="aic-outline" aria-label="what each step established">
+          {outline.slice(0, OUTLINE_MAX).map((s, i) => (
+            <li key={i} className="aic-outline__item"><Markdown className="md aic-outline__md" text={s} /></li>
+          ))}
+          {outline.length > OUTLINE_MAX && (
+            <li className="aic-outline__more">
+              <button type="button" onClick={() => setOpen(true)}>
+                {outline.length - OUTLINE_MAX} more step{outline.length - OUTLINE_MAX === 1 ? '' : 's'} — expand to read them all
+              </button>
+            </li>
+          )}
+        </ol>
+      )}
       {open && (
         <div className="aic-steps__body">
           {groups.map((g) => {
             if (g.g === 'lane') {
               const done = g.nodes.filter((n) => n.e.ok !== null).length;
+              // The line that introduces a PARALLEL group belongs to the group, not to its first card:
+              // it explains why these calls went out together.
+              const laneLead = g.nodes.map((n) => n.lead).find((l) => l.trim()) ?? '';
               return (
                 <div key={g.key} className={cx('aic-step', g.turn && 'aic-step--turn')}>
+                  {!!laneLead && <Narration className="tlane__lead" text={laneLead} />}
                   <div className={cx('tlane', done < g.nodes.length && live && 'tlane--live')}>
                     <div className="tlane__head">
                       <span className="tlane__bars" aria-hidden><i /><i /><i /></span>
@@ -836,7 +931,7 @@ const StepsCard = memo(function StepsCard({ nodes, live, title, startOpen }: {
                       </span>
                     </div>
                     <div className="tlane__body">
-                      {g.nodes.map((n) => <ToolCall key={n.key} e={n.e} live={live} lead={n.lead} />)}
+                      {g.nodes.map((n) => <ToolCall key={n.key} e={n.e} live={live} lead={n.lead === laneLead ? '' : n.lead} />)}
                     </div>
                   </div>
                 </div>
@@ -1190,19 +1285,14 @@ function Turn({ run, entries, live, undoing, onUndo, onRetry, onContinue, onStre
   // Threading tool cards through the answer meant the thing being read moved down the page every time
   // a call landed, and the reading column was broken into fragments by cards that are deliberately
   // secondary. Turn breaks are kept, so the sequence is still legible inside the card.
-  const liveNodes = useMemo(() => trailNodes(blocks.filter((b) => b.kind !== 'prose')), [blocks]);
-  // LIVE, THE WORKING AND THE REPORT ARRIVE ON THE SAME STREAM, and they are not the same thing. A
-  // prose block with a tool call still to come after it is NARRATION — the line that introduces that
-  // call — and it reads as commentary; the trailing block, with nothing after it, is the report being
-  // written. Finished, the trail claims each narration line as its card's lead and this question does
-  // not arise, which is why the two views used to disagree: everything streamed in the reading serif.
-  const liveProse = useMemo(() => {
-    const lastAct = blocks.reduce((at, b, i) => (b.kind === 'activity' ? i : at), -1);
-    return blocks
-      .map((b, i) => ({ b, i }))
-      .filter((x): x is { b: Extract<Block, { kind: 'prose' }>; i: number } => x.b.kind === 'prose')
-      .map(({ b, i }) => ({ block: b, commentary: i < lastAct }));
-  }, [blocks]);
+  // ...and the NARRATION RIDES WITH ITS CALLS while the run is live too. It used to be filtered out
+  // of the card and printed underneath as a separate column of quiet paragraphs, so the account of
+  // the work and the work itself were two lists the analyst had to line up by eye — and only once
+  // the run finished did each line move onto its card. Only the TRAILING prose stays outside: until a
+  // call arrives after it, it may be the report being written.
+  const trailing = blocks.length && blocks[blocks.length - 1]!.kind === 'prose'
+    ? blocks[blocks.length - 1] as Extract<Block, { kind: 'prose' }> : null;
+  const liveNodes = useMemo(() => trailNodes(trailing ? blocks.slice(0, -1) : blocks), [blocks, trailing]);
 
   return (
     /* A TURN IS ONE THING, and it has to look like one. The question and its answer used to be two
@@ -1259,13 +1349,7 @@ function Turn({ run, entries, live, undoing, onUndo, onRetry, onContinue, onStre
                 handed to `LiveTail` as its prefix rather than rendered here, so a sentence that
                 straddles a commit stays ONE paragraph — and so the only thing a frame re-renders is
                 that leaf. See the note on `liveTail`. */}
-            {liveProse.slice(0, -1).map(({ block, commentary }) => (
-              <Markdown key={block.key} text={block.text}
-                        className={cx('md aic-prose', commentary && 'aic-prose--quiet')} />
-            ))}
-            <LiveTail onPaint={onStreamPaint}
-                      className={cx('md aic-prose', liveProse[liveProse.length - 1]?.commentary && 'aic-prose--quiet')}
-                      prefix={liveProse.length ? liveProse[liveProse.length - 1]!.block.text : ''} />
+            <LiveTail onPaint={onStreamPaint} className="md aic-prose" prefix={trailing ? trailing.text : ''} />
             {!blocks.length && (
               <div className="aic-busy"><span className="spinner" style={{ width: 12, height: 12 }} />Starting the investigation</div>
             )}
@@ -1732,7 +1816,7 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
           // chip, no per-agent rows) — it appeared only after the run ended and the persisted
           // transcript replaced this one. Reported, three times, as "I'm not seeing multiple agents
           // working": they were working, and the one tab watching them live could not show it.
-          push({ kind: 'status', text: ev.text, agent: ev.agent, phase: ev.phase, task: ev.task });
+          push({ kind: 'status', text: ev.text, agent: ev.agent, phase: ev.phase, task: ev.task, said: ev.said });
           break;
         case 'step':
           push({ kind: 'step', step: ev.step });

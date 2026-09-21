@@ -517,6 +517,79 @@ a.aic__pill { display: inline-block; text-decoration: none; }
   padding: 1px 4px 7px 9px;
 }
 .aic .tcall__lead .md-p { margin: 0 0 5px; }
+
+/* ───────── A NARRATION LINE, SPLIT INTO WHAT IT SAYS ─────────
+   "What the last result established — what I am doing next" (NARRATE in prompts.py). The finding
+   is the line that carries weight, so it is the brighter row; the next step is quieter under it.
+   The key column is a fixed width so a run of steps reads as one aligned column of findings. */
+.tnarr { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.tnarr__row { display: grid; grid-template-columns: 38px minmax(0, 1fr); column-gap: 8px; align-items: baseline; }
+.tnarr__k {
+  font-family: var(--font-ui);
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--muted-2);
+  white-space: nowrap;
+}
+.tnarr__row--found .tnarr__k { color: var(--accent); }
+.tnarr__v { min-width: 0; font-family: var(--font-ui); font-size: 12.5px; line-height: 1.5; }
+.tnarr__v .md-p { margin: 0; }
+.tnarr__row--found .tnarr__v { color: var(--text-2); }
+.tnarr__row--next .tnarr__v { color: var(--text-3); }
+.aic .tcall__lead .tnarr__v .md-p { margin: 0; }
+/* a parallel group's line sits above its bracket, on the same rail language as a card's lead */
+.tlane__lead { border-left: 2px solid var(--border-2); padding: 1px 4px 7px 9px; }
+/* the NOW line on the steps card's head: the latest step, one line */
+.aic-disc__now {
+  display: block;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 2px;
+}
+.aic-disc__now b { font-weight: 500; color: var(--accent); margin-right: 7px; }
+/* THE OUTLINE of a finished, collapsed trail: what each step established, in order */
+.aic-outline {
+  list-style: none;
+  margin: 0;
+  padding: 2px 14px 12px 14px;
+  counter-reset: aicstep;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.aic-outline__item {
+  counter-increment: aicstep;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  column-gap: 6px;
+  align-items: baseline;
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+.aic-outline__item::before {
+  content: counter(aicstep);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--muted-2);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.aic-outline__md .md-p { margin: 0; }
+.aic-outline__more { padding-left: 28px; }
+.aic-outline__more button {
+  appearance: none; border: 0; background: none; padding: 0; cursor: pointer;
+  font: inherit; font-size: 11.5px; color: var(--muted); text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.aic-outline__more button:hover { color: var(--text-2); }
+.aic-outline__more button:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
 /* the rail is ONE rail: a write's lead takes the accent, a refusal's takes the bad colour, so
    it does not change shade half way down the call it belongs to */
 .tcall--write .tcall__lead { border-left-color: var(--accent); }
@@ -1501,6 +1574,9 @@ a.aic__pill { display: inline-block; text-decoration: none; }
 }
 .aroster__row:not(.aroster__row--done) .aroster__state { border-color: var(--accent-border); color: var(--accent); }
 .aroster__what { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* the agent's own account of its latest step, under its question */
+.aroster__said { padding-inline-start: 9px; margin-top: 2px; }
+.aroster__said .tnarr__v { font-size: 11.5px; }
 /* THE QUESTION THE AGENT WAS ASKED. Two lines, then clipped: the point is to be able to tell the
    three agents apart at a glance, not to re-read the objective in full. */
 .aroster__task {

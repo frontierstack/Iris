@@ -521,6 +521,8 @@ export interface AiTranscriptEntry {
   /** The QUESTION a worker agent was given. Its own field, because the agent's line is PATCHED in
    *  place as it works ("working — 4 calls, latest: count_events") and the text no longer holds it. */
   task?: string;
+  /** A worker agent's own latest narration line — what it has found and is checking next. */
+  said?: string;
   /**
    * When this entry was last CHANGED, on the same counter as `seq`. A tool entry is patched in place
    * when its result lands, so `?since=<lastSeq>` alone never resent it and the card kept spinning in
@@ -558,7 +560,7 @@ export type AiRunEvent =
      from a step announcement. */
   /** `agent` / `phase` / `task` ride on a worker-agent line (start | call | end) — the panel folds
    *  those into ONE roster row per agent, so dropping them here means no roster while the run is live. */
-  | { type: 'status'; text: string; compactions?: number; droppedMessages?: number; checkIn?: number; budgetNotice?: boolean; documentCheck?: boolean; recordNudge?: number; summaryCheck?: boolean; parallel?: number; agent?: string; phase?: string; task?: string; autoDelegate?: boolean }
+  | { type: 'status'; text: string; compactions?: number; droppedMessages?: number; checkIn?: number; budgetNotice?: boolean; documentCheck?: boolean; recordNudge?: number; summaryCheck?: boolean; parallel?: number; agent?: string; phase?: string; task?: string; said?: string; autoDelegate?: boolean; narrateNudge?: number }
   | { type: 'step'; step: number; elapsedSec: number }
   | { type: 'delta'; text: string; step: number }
   | { type: 'tool_call'; id: string; name: string; arguments: Record<string, unknown>; step: number; lane?: number; laneId?: number }

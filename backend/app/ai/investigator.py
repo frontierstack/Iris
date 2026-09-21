@@ -89,7 +89,7 @@ from .loopguard import (LoopGuard, MAX_RECOVERIES as MAX_LOOP_RECOVERIES, call_k
 from .system_prompts import PROMPTS
 from .prompts import (CONTINUE_OUTPUT, RESET_NOTE, ARG_TOO_BIG, BUDGET_NOTICE, CHECK_IN, COMPACTED_CONTINUE, CONTINUE_WORK,
                       DOCUMENT_CHECK, LOOP_RECOVERY, LOOP_STOP, NO_CASE_LINE, run_budget, RECORD_NUDGE, REPORT_NOW,
-                      PARALLEL_NUDGE, PARALLEL_NUDGE_SOLO, SUMMARY_CHECK, WRAP_UP, delegation_block,
+                      NARRATE_NUDGE, PARALLEL_NUDGE, PARALLEL_NUDGE_SOLO, SUMMARY_CHECK, WRAP_UP, delegation_block,
                       investigator_user_prompt)
 from .tools import (REGISTRY, RunContext, ToolError, _s, tool_budget_seconds, tool_schemas,
                     unverified_citations)
@@ -241,6 +241,9 @@ MAX_RECORD_NUDGES = 3
 # cannot form would be the check-in's old mistake in a new place.
 PARALLEL_STREAK = 4
 MAX_PARALLEL_NUDGES = 2
+# A tool turn with no narration line is a card nobody can follow (see NARRATE in the system prompt).
+NARRATE_STREAK = 2
+MAX_NARRATE_NUDGES = 3
 # What counts as "the summary is written", so the end-of-run SUMMARY_CHECK is skipped: a note of
 # kind='summary', or update_case setting the case summary. A FINDING note does not count — those are
 # written as findings are found, and the summary is the one that ties them together.
@@ -1105,6 +1108,8 @@ async def investigate(store: Any, objective: str, run_id: str,
     serial_warned = False    # the provider served the agents one at a time - said once
     auto_delegate_on = multi_agent
     parallel_nudges = 0      # ...and how many times that has been pointed out
+    silent_turns = 0         # tool turns in a row with no narration line (a write counts as a full streak)
+    narrate_nudges = 0       # ...and how many times the assistant has been asked to narrate
     productive_since_write = 0   # reads that returned evidence since the last write (or the start)
     ceiling = lim["maxContextTokens"]   # lowered when the provider refuses the transcript (ContextTooLong)
     result_chars = TOOL_RESULT_CHARS
@@ -1513,6 +1518,9 @@ async def investigate(store: Any, objective: str, run_id: str,
             messages.append(final_msg)
 
             calls = final_msg.get("tool_calls") or []
+            # Did this turn say anything alongside its calls? Read before the back-fill below, which
+            # only moves the same text into the transcript.
+            turn_said = bool(("".join(buf) or str(final_msg.get("content") or "")).strip())
             # NARRATION THAT NEVER STREAMED. The transcript's prose comes only from `text` deltas, and a
             # provider is perfectly entitled to return the turn's content in the assembled message and
             # stream no deltas at all — the wrap-up turn below already guards exactly that case, with
@@ -1773,6 +1781,7 @@ async def investigate(store: Any, objective: str, run_id: str,
                 # ONE line rather than appending, so a two-minute delegation costs three transcript entries.
                 agent_calls: dict[str, int] = {}
                 agent_tool: dict[str, str] = {}
+                agent_said: dict[str, str] = {}     # the agent's own latest narration line
                 agent_dirty: set[str] = set()
                 said_at = time.monotonic()
                 while waiting:
@@ -1784,6 +1793,12 @@ async def investigate(store: Any, objective: str, run_id: str,
                         if phase == "call":
                             agent_calls[who] = agent_calls.get(who, 0) + 1
                             agent_tool[who] = str(ev.get("tool") or "")
+                            agent_dirty.add(who)
+                            continue
+                        if phase == "say":
+                            # WHAT THE AGENT IS DOING, in its own words. A count of calls says an agent
+                            # is busy; this says what it has found and what it is checking next.
+                            agent_said[who] = _s(ev.get("text"), 300)
                             agent_dirty.add(who)
                             continue
                         if phase == "start":
@@ -1798,16 +1813,18 @@ async def investigate(store: Any, objective: str, run_id: str,
                                 f"{int(ev.get('tookMs') or 0) / 1000:.1f}s"
                                 + (f" ({ended})" if ended else ""))
                         agent_dirty.discard(who)
-                        HISTORY.agent_progress(run_id, who, line, phase="end")
-                        yield {"type": "status", "text": line, "agent": who, "phase": "end"}
+                        HISTORY.agent_progress(run_id, who, line, phase="end", said=agent_said.get(who, ""))
+                        yield {"type": "status", "text": line, "agent": who, "phase": "end",
+                               "said": agent_said.get(who, "")}
                     if agent_dirty and time.monotonic() - said_at >= AGENT_TICK:
                         said_at = time.monotonic()
                         for who in sorted(agent_dirty):
                             n = agent_calls.get(who, 0)
                             line = (f"agent {who} working — {n} call{'s' if n != 1 else ''} so far"
                                     + (f", on {agent_tool[who]}" if agent_tool.get(who) else ""))
-                            HISTORY.agent_progress(run_id, who, line, phase="call")
-                            yield {"type": "status", "text": line, "agent": who, "phase": "call"}
+                            said = agent_said.get(who, "")
+                            HISTORY.agent_progress(run_id, who, line, phase="call", said=said)
+                            yield {"type": "status", "text": line, "agent": who, "phase": "call", "said": said}
                         agent_dirty.clear()
                     for task in done:
                         entry = tasks[task]
@@ -1896,6 +1913,25 @@ async def investigate(store: Any, objective: str, run_id: str,
                         + (" and that it can delegate" if multi_agent else ""))
                 HISTORY.append(run_id, {"kind": "status", "text": note})
                 yield {"type": "status", "text": note, "parallelNudge": parallel_nudges}
+
+            # SILENT WORK IS WORK NOBODY CAN FOLLOW. The narration line is the commentary the analyst
+            # reads while the run happens and the outline the finished trail is summarised by; a run
+            # of tool turns with no line is a column of cards with nothing saying what was found or
+            # why the next call was made. A silent WRITE counts at once (it changed the case); reads
+            # after NARRATE_STREAK in a row. Bounded, and never while the guard is recovering a loop.
+            if calls:
+                wrote = any(bool(getattr(REGISTRY.get(str((c.get("function") or {}).get("name") or "")),
+                                         "writes", False)) for c in calls)
+                silent_turns = 0 if turn_said else silent_turns + (NARRATE_STREAK if wrote else 1)
+                if (silent_turns >= NARRATE_STREAK and narrate_nudges < MAX_NARRATE_NUDGES
+                        and not guard.tripped and not guard.needs_recovery()
+                        and not runs.stop_requested(run_id) and est() < ceiling):
+                    narrate_nudges += 1
+                    silent_turns = 0
+                    messages.append({"role": "user", "content": NARRATE_NUDGE})
+                    note = "tool calls went out with no commentary — asked the assistant to narrate its steps"
+                    HISTORY.append(run_id, {"kind": "status", "text": note})
+                    yield {"type": "status", "text": note, "narrateNudge": narrate_nudges}
 
             # RECOVERY BEFORE ENDING. The guard has seen enough to know this run is looping, and the
             # analyst's instruction was not "stop it sooner" but *"have the model be able to recover

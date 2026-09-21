@@ -341,6 +341,9 @@ async def run_worker(task: dict[str, Any], *, client: Any, ctx: Any, context_blo
             report = text            # the LATEST prose is the report; earlier turns are narration
         if not calls:
             break
+        if text.strip():
+            # the agent's narration of this step, for the roster - see NARRATE EACH STEP in WORKER_SYSTEM
+            note(run_id, {"agent": name, "phase": "say", "text": _clip(text.strip(), 300)})
         messages.append(msg)
         prepared = await _dispatch(calls, reg, ctx, name, run_id, worker_parallel_reads())
         calls_made += len(prepared)
