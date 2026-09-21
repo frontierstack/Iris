@@ -480,7 +480,12 @@ a.aic__pill { display: inline-block; text-decoration: none; }
 
 /* ───────── the steps body ───────── */
 .aic-steps__body { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 8px; }
-.aic-step { animation: aicStepIn 260ms ease both; min-width: 0; }
+.aic-step { min-width: 0; }
+/* A new step fades in — but NOT its narration line. That line was already on screen, typed at the
+   foot of the card, and it becomes this step's lead the moment its call lands; fading the whole step
+   in from opacity 0 made the sentence being read blink out and come back. Only what is NEW appears. */
+.aic-step > :not(.tnarr):not(.tcall),
+.aic-step > .tcall > .tcall__card { animation: aicStepIn 260ms ease both; }
 /* a model-turn boundary is a little more air, nothing drawn */
 .aic-step--turn { margin-top: 8px; }
 /* the assistant's own commentary between calls: sans, quiet, indented a touch off the cards */

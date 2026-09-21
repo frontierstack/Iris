@@ -443,8 +443,27 @@ const liveTail = {
   subscribe(f: () => void) { this.subs.add(f); return () => { this.subs.delete(f); }; },
 };
 
-const LiveTail = memo(function LiveTail({ prefix, className, onPaint }: {
+/**
+ * IS THE TEXT BEING TYPED THE REPORT, OR THE LINE BEFORE A CALL?
+ *
+ * Live, both arrive on one stream and only a LATER event says which: a tool call after it makes it
+ * narration. Waiting for that meant every narration line was typed below the card in the report's
+ * serif and then jumped into the card when its call landed. The shape decides it instead: NARRATE
+ * asks for one or two plain sentences, and a report opens with a heading, a list or a table, breaks
+ * lines, or simply runs long. Every one of those only becomes MORE true as the text grows, so the
+ * answer flips at most once, from narration to report — never back.
+ */
+const NARRATION_MAX = 320;
+function reportLike(text: string): boolean {
+  const s = text.trim();
+  return s.length > NARRATION_MAX || s.includes('\n') || /^(?:#|\||>|[-*+] |\d+[.)] )/.test(s);
+}
+
+const LiveTail = memo(function LiveTail({ prefix, className, onPaint, where = 'below', cardHasWork = false }: {
   prefix: string; className: string; onPaint?: () => void;
+  /** 'card' draws only narration-shaped text, at the foot of the steps card; 'below' draws the
+   *  report — and narration too when there is no card with work in it to hold the line yet. */
+  where?: 'card' | 'below'; cardHasWork?: boolean;
 }) {
   const tail = useSyncExternalStore(
     useCallback((f: () => void) => liveTail.subscribe(f), []),
@@ -456,9 +475,21 @@ const LiveTail = memo(function LiveTail({ prefix, className, onPaint }: {
   // rather than in the panel because the panel no longer re-renders while the text grows.
   useLayoutEffect(() => { onPaint?.(); }, [tail, prefix, onPaint]);
   if (!prefix && !tail) return null;
+  const text = prefix + tail;
+  if (!reportLike(text)) {
+    // narration: in the card when there is one to hold it, otherwise below it — in the SAME style
+    // either way, which is the style it keeps as its card's lead
+    if (where === 'below' && cardHasWork) return null;
+    return (
+      <div className={cx('tnarr-live', where === 'card' && 'aic-step--turn')}>
+        <Narration className="tcall__lead" text={text} />
+      </div>
+    );
+  }
+  if (where === 'card') return null;
   return (
     <>
-      <LiveMarkdown className={className} text={prefix + tail} />
+      <LiveMarkdown className={className} text={text} />
       <span className="aic-caret" aria-hidden />
     </>
   );
@@ -838,8 +869,11 @@ function countsOf(nodes: TrailNode[]): { bits: string[]; pending: boolean; tools
  * reached. Unnumbered: the rule down its left edge carries the order, and a break in that rule is
  * where one model turn ended.
  */
-const StepsCard = memo(function StepsCard({ nodes, live, title, startOpen }: {
+const StepsCard = memo(function StepsCard({ nodes, live, title, startOpen, tailPrefix, onPaint }: {
   nodes: TrailNode[]; live: boolean; title: string; startOpen: boolean;
+  /** Live only: the committed trailing prose, so a narration line still being typed is drawn at
+   *  the foot of the card — where it will stay once its call arrives — rather than below it. */
+  tailPrefix?: string; onPaint?: () => void;
 }) {
   const [open, setOpen] = useState(startOpen);
   if (!nodes.length) return null;
@@ -953,12 +987,16 @@ const StepsCard = memo(function StepsCard({ nodes, live, title, startOpen }: {
               </div>
             );
           })}
+          {live && tailPrefix !== undefined && (
+            <LiveTail where="card" prefix={tailPrefix} onPaint={onPaint} className="" />
+          )}
         </div>
       )}
     </section>
   );
 }, (a, b) => (
   a.live === b.live && a.title === b.title && a.startOpen === b.startOpen &&
+  a.tailPrefix === b.tailPrefix && a.onPaint === b.onPaint &&
   a.nodes.length === b.nodes.length && a.nodes.every((n, i) => sameNode(n, b.nodes[i]!))
 ));
 // `sameGroup` is exported-in-module for the grouping above; keeping it next to `sameNode` is what
@@ -1344,12 +1382,14 @@ function Turn({ run, entries, live, undoing, onUndo, onRetry, onContinue, onStre
         {live ? (
           <>
             {warnings.map((w) => <Warning key={w.key} text={w.text} />)}
-            <StepsCard nodes={liveNodes} live title="Working" startOpen />
+            <StepsCard nodes={liveNodes} live title="Working" startOpen
+                       tailPrefix={trailing ? trailing.text : ''} onPaint={onStreamPaint} />
             {/* Every SETTLED prose block, then the one still being written. The last settled block is
                 handed to `LiveTail` as its prefix rather than rendered here, so a sentence that
                 straddles a commit stays ONE paragraph — and so the only thing a frame re-renders is
                 that leaf. See the note on `liveTail`. */}
-            <LiveTail onPaint={onStreamPaint} className="md aic-prose" prefix={trailing ? trailing.text : ''} />
+            <LiveTail onPaint={onStreamPaint} className="md aic-prose" prefix={trailing ? trailing.text : ''}
+                      cardHasWork={liveNodes.some((n) => n.k === 'tool')} />
             {!blocks.length && (
               <div className="aic-busy"><span className="spinner" style={{ width: 12, height: 12 }} />Starting the investigation</div>
             )}
