@@ -478,30 +478,6 @@ a.aic__pill { display: inline-block; text-decoration: none; }
 .aic-disc__act:disabled { opacity: 0.5; cursor: not-allowed; }
 .aic-disc__act:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
 
-/* ───────── the steps body ───────── */
-.aic-steps__body { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 8px; }
-.aic-step { min-width: 0; }
-/* A new step fades in — but NOT its narration line. That line was already on screen, typed at the
-   foot of the card, and it becomes this step's lead the moment its call lands; fading the whole step
-   in from opacity 0 made the sentence being read blink out and come back. Only what is NEW appears. */
-.aic-step > :not(.tnarr):not(.tcall),
-.aic-step > .tcall > .tcall__card { animation: aicStepIn 260ms ease both; }
-/* a model-turn boundary is a little more air, nothing drawn */
-.aic-step--turn { margin-top: 8px; }
-/* the assistant's own commentary between calls: sans, quiet, indented a touch off the cards */
-.aic-steps__body .aic-prose--quiet { font-family: var(--font-ui); font-size: 13px; line-height: 1.55; color: var(--text-3); padding: 2px 4px; }
-.aic-steps__body .aic-prose--quiet .md-p { margin: 0 0 6px; }
-/* a status note (compaction, a nudge, the opening line): the run talking about itself */
-.aic-steps__body .aic-bare__note {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.5;
-  color: var(--muted-2);
-  padding: 6px 10px;
-  border: 1px dashed var(--border-strong);
-  border-radius: 8px;
-}
-
 /* ───────── one tool CALL and its RESULT in ONE card ─────────
    `writes` is read in exactly one place in the TSX; this is the card it draws. */
 .tcall { display: flex; flex-direction: column; min-width: 0; gap: 0; }
@@ -1421,92 +1397,6 @@ a.aic__pill { display: inline-block; text-decoration: none; }
 .tcall__kind--par { color: var(--muted); border-color: var(--line); background: transparent; }
 
 /* ───────────────────────────────────────────────────────────────────────────
-   A LANE: the calls of one dispatch group, drawn as a group.
-
-   Reported as *"needs to be more clear if two agents are working and doing
-   work together"*. A per-card `parallel` tag could say that a call had
-   company; it could not show WHICH company, because `lane` is the width of
-   the group and not its identity. With `laneId` persisted on the entry the
-   panel can bracket them: one head, one rule down the side, the cards inside.
-   Quiet by default and accented only while the group still has a call in
-   flight — the group is structure, not an alert.
-   ─────────────────────────────────────────────────────────────────────────── */
-.tlane {
-  border: 1px solid var(--border);
-  border-left: 2px solid var(--border-strong, var(--border));
-  border-radius: var(--radius-md, 6px);
-  background: var(--panel-sunken, transparent);
-}
-.tlane--live { border-left-color: var(--accent-border); }
-.tlane__head {
-  display: flex; align-items: center; gap: 8px;
-  padding: 5px 9px;
-  border-bottom: 1px solid var(--border);
-  font-size: 11.5px; color: var(--muted);
-}
-.tlane__what { color: var(--text-dim); font-weight: 500; }
-.tlane__prog { margin-left: auto; font-variant-numeric: tabular-nums; }
-/* three short bars: the same mark the "N running in parallel" chip uses, so one idea has one glyph */
-.tlane__bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 9px; }
-.tlane__bars i { width: 2px; background: var(--muted); border-radius: 1px; }
-.tlane__bars i:nth-child(1) { height: 5px; }
-.tlane__bars i:nth-child(2) { height: 9px; }
-.tlane__bars i:nth-child(3) { height: 7px; }
-.tlane--live .tlane__bars i { background: var(--accent); }
-.tlane__body { display: flex; flex-direction: column; gap: 6px; padding: 7px; }
-.tlane__body .tcall { margin: 0; }
-
-/* ───────────────────────────────────────────────────────────────────────────
-   THE AGENT ROSTER (delegate_investigation).
-
-   A delegation reported itself as three or more status lines per agent —
-   started, working, finished — which is the transcript noise this panel keeps
-   deleting. One row per agent, its latest state, nothing repeated: the roster
-   answers "how many are working and on what" at a glance, which is the
-   question a fan-out raises.
-   ─────────────────────────────────────────────────────────────────────────── */
-.aroster {
-  border: 1px solid var(--border); border-radius: var(--radius-md, 6px);
-  background: var(--panel-sunken, transparent);
-}
-.aroster__head {
-  display: flex; align-items: center; gap: 8px;
-  padding: 5px 9px; border-bottom: 1px solid var(--border);
-  font-size: 11.5px;
-}
-.aroster__tile {
-  min-width: 17px; height: 17px; padding: 0 4px;
-  display: inline-flex; align-items: center; justify-content: center;
-  border: 1px solid var(--accent-border); border-radius: 3px;
-  color: var(--accent); font-variant-numeric: tabular-nums; font-size: 10.5px;
-}
-.aroster__title { color: var(--text-dim); font-weight: 500; }
-.aroster__list { list-style: none; margin: 0; padding: 5px 7px; display: flex; flex-direction: column; gap: 3px; }
-.aroster__row { display: flex; flex-direction: column; gap: 2px; font-size: 11.5px; color: var(--text-dim); }
-.aroster__line { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
-.aroster__row--done { color: var(--muted); }
-.aroster__who { font-family: var(--font-mono); font-size: 11px; color: var(--text); }
-.aroster__state {
-  font-size: 10px; padding: 0 5px; border-radius: 3px;
-  border: 1px solid var(--border); color: var(--muted);
-}
-.aroster__row:not(.aroster__row--done) .aroster__state { border-color: var(--accent-border); color: var(--accent); }
-.aroster__what { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* THE QUESTION THE AGENT WAS ASKED. Two lines, then clipped: the point is to be able to tell the
-   three agents apart at a glance, not to re-read the objective in full. */
-.aroster__task {
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.45;
-  border-left: 1px solid var(--border-2);
-  padding-inline-start: 8px;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-/* ───────────────────────────────────────────────────────────────────────────
    THE CHANGE LEDGER, grouped by what changed.
 
    "Did it write any indicators?" was a scan of every row. A family header with
@@ -1531,29 +1421,19 @@ a.aic__pill { display: inline-block; text-decoration: none; }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   THE WORK: the narration log beside the tool calls.
+   THE WORK: one collapsible section — every step, what it found and did, and its tool calls.
 
-   *"have narration be on the left side of the assistant page, so it details everything that it's
-   working on and doing ... there should be a very noticeable area for narration"*. The turn is
-   wide now; the READING parts (the question, the report, notes) keep the 792px measure and the
-   work spreads across the full width. Two columns where the turn has room — decided by the turn's
-   own width (a container query), because the panel is a slide-over in one shell and a window the
-   analyst sizes in the other — and stacked, log first, where it does not.
+   *"have narration be on the left side ... a very noticeable area for narration"*, then *"Combine
+   'What it did' and 'Tool calls' into one. organize it better ... able to be collapsed"*. The
+   narration is the loud part of each step; its tool cards open under it on request. The READING
+   parts of a turn (the question, the report, notes) keep the 792px measure; the work section
+   takes the turn's full width.
    ═══════════════════════════════════════════════════════════════════════════ */
 .aic-asst { container-type: inline-size; container-name: asst; }
 .aic-asst > .aic-prose,
 .aic-asst > .aic-note,
 .aic-asst > .aic-warn,
 .aic-asst > .aic-acts { max-width: var(--aic-col); }
-.aic-work { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; min-width: 0; }
-@container asst (min-width: 760px) {
-  .aic-work { grid-template-columns: minmax(300px, 5fr) minmax(0, 6fr); align-items: start; }
-  .aic-work--solo { grid-template-columns: minmax(0, 1fr); }
-  /* the log stays in view beside a long column of cards, and scrolls itself */
-  .aic-work .nlog { position: sticky; top: 10px; }
-  .aic-work .nlog__scroll { max-height: calc(var(--aic-h, 80vh) - 240px); }
-}
-
 /* the log: the loudest thing in the work area on purpose — accent rail, its own ground */
 .nlog {
   border: 1px solid var(--accent-border);
@@ -1565,16 +1445,64 @@ a.aic__pill { display: inline-block; text-decoration: none; }
   flex-direction: column;
 }
 .nlog__head {
+  appearance: none;
+  width: 100%;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 14px 9px;
+  gap: 12px;
+  padding: 11px 14px 10px;
+  border: 0;
   border-bottom: 1px solid var(--border);
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
 }
+.nlog--closed .nlog__head { border-bottom-color: transparent; }
+.nlog__head:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
+.nlog__headtext { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
 .nlog__title { font-family: var(--font-ui); font-size: 14px; font-weight: 600; color: var(--text-bright); }
 .nlog__meta { font-family: var(--font-ui); font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.nlog__head .spinner { margin-left: auto; }
-.nlog__scroll { overflow-y: auto; overscroll-behavior: contain; min-height: 0; }
+.nlog__toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 24px;
+  min-width: 92px;
+  padding: 0 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  color: var(--text-4);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  transition: color var(--t-fast), border-color var(--t-fast);
+}
+.nlog__toggle svg { width: 11px; height: 11px; }
+.nlog__head:hover .nlog__toggle { color: var(--text-2); border-color: var(--accent-border); }
+/* collapsed: where the work got to, in one line */
+.nlog__peek {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 0 14px 11px;
+  min-width: 0;
+}
+.nlog__peekk { flex: 0 0 auto; font-family: var(--font-ui); font-size: 10.5px; font-weight: 500; color: var(--accent); }
+.nlog__peekv {
+  min-width: 0;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .nlog__list { list-style: none; margin: 0; padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 4px; }
 
 /* one step: its number on a thread that runs down the log, then what it found and did */
@@ -1668,21 +1596,27 @@ a.aic__pill { display: inline-block; text-decoration: none; }
 .nlog__note .md-p { margin: 0; }
 .nlog__say { padding: 4px 0 6px 32px; }
 
-/* the step number on a tool card or parallel group, matching the log */
-.aic-stepno {
-  flex: 0 0 auto;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 4px;
-  border-radius: 9px;
-  border: 1px solid var(--border-strong);
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-variant-numeric: tabular-nums;
+
+/* a step's own tool calls, opened from its call line */
+.nlog__more {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--muted-2);
+  padding-left: 8px;
+  white-space: nowrap;
 }
-/* a step shown from the log: marked for a moment so the eye lands on it */
-.aic-step--flash { outline: 1px solid var(--accent); outline-offset: 3px; border-radius: 4px; transition: outline-color 1.2s ease; }
+.nlog__calls[aria-expanded="true"] .nlog__more,
+.nlog__calls:hover .nlog__more { color: var(--accent); }
+.nlog__calls { width: 100%; }
+.nlog__detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  animation: aicStepIn 200ms ease both;
+}
+.nlog__agentmeta { font-size: 11px; color: var(--muted); }

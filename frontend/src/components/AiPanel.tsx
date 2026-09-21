@@ -89,7 +89,7 @@ const POLL_MS = 900;
  * on that wire before shipping: 29 empty frames per 2.4 s down to 3.
  *
  * A frame is only affordable because the transcript around the growing paragraph does not re-render:
- * `Markdown`, `ToolCall` and `StepsCard` are all memoised, and the growing block itself is split by
+ * `Markdown`, `ToolCall` and `WorkLog` are all memoised, and the growing block itself is split by
  * `LiveMarkdown` so that only its unfinished tail is re-parsed. Take those away and this rate becomes a
  * stutter of a different kind.
  */
@@ -419,7 +419,7 @@ const LiveMarkdown = memo(function LiveMarkdown({ text, className }: { text: str
  * The jitter buffer above decides WHEN a character should appear. It cannot decide what that costs,
  * and the cost was the whole panel: each frame called `setEntries`, so `AiPanel` re-rendered, and
  * with it `toBlocks` over every entry, `trailNodes` twice, an `answer.includes` pass per prose block,
- * a fresh `nodes` array (so `StepsCard` reconciled every tool card it holds), the composer, the
+ * a fresh `nodes` array (so the work section reconciled every tool card it holds), the composer, the
  * header and the history rail. At sixty frames a second on a transcript holding thirty calls, the
  * frame budget went on rebuilding the conversation around the sentence being written — so frames were
  * dropped in clumps and the text arrived in the lumps the buffer had just smoothed out. Memoising the
@@ -642,9 +642,8 @@ function stepNumbers(groups: TrailGroup[]): Map<number, number> {
   }
   return m;
 }
-const stepAnchor = (runId: string, n: number) => `aic-step-${runId}-${n}`;
 
-const ToolCall = memo(function ToolCall({ e, live, step }: { e: AiTranscriptEntry; live: boolean; step?: number }) {
+const ToolCall = memo(function ToolCall({ e, live }: { e: AiTranscriptEntry; live: boolean }) {
   const [open, setOpen] = useState(false);
   const rows = argRows(e.args ?? {});
   const shown = open ? rows : rows.slice(0, ARGS_SHOWN);
@@ -657,7 +656,6 @@ const ToolCall = memo(function ToolCall({ e, live, step }: { e: AiTranscriptEntr
           stops one layout drawing a write as a read. Keep it that way if a variant is ever added. */}
       <div className="tcall__card">
       <div className="tcall__head">
-        {step !== undefined && <span className="aic-stepno" title={`step ${step} in the narration`}>{step}</span>}
         <span className="tcall__glyph" aria-hidden><Glyph /></span>
         <span className="tcall__name">{e.name}</span>
         {e.writes && <span className="tcall__kind" title="this tool changed the case">write</span>}
@@ -779,18 +777,6 @@ function groupTrail(nodes: TrailNode[]): TrailGroup[] {
   return out;
 }
 
-function sameGroup(a: TrailGroup, b: TrailGroup): boolean {
-  if (a.g !== b.g || a.key !== b.key) return false;
-  if (a.g === 'one') return b.g === 'one' && sameNode(a.node, b.node);
-  if (a.g === 'lane') {
-    return b.g === 'lane' && a.turn === b.turn && a.nodes.length === b.nodes.length
-      && a.nodes.every((n, i) => sameNode(n, b.nodes[i]!));
-  }
-  return b.g === 'agents' && a.turn === b.turn && a.rows.length === b.rows.length
-    && a.rows.every((r, i) => r.agent === b.rows[i]!.agent && r.text === b.rows[i]!.text
-      && r.task === b.rows[i]!.task && r.said === b.rows[i]!.said);
-}
-
 /** One worker agent in the roster. `task` is its question, which only the `start` line carries. */
 type AgentRow = { agent: string; phase: string; text: string; task: string; said: string };
 
@@ -802,43 +788,6 @@ function taskOf(n: Extract<TrailNode, { k: 'note' }>): string {
   if ((n.phase ?? '') !== 'start') return '';
   const m = /started:\s*([\s\S]+)$/.exec(n.text);
   return (m ? m[1]! : '').trim();
-}
-
-/** The state of one worker agent, for the roster's tag. */
-const AGENT_STATE: Record<string, string> = { start: 'working', call: 'working', end: 'finished' };
-
-function AgentRoster({ rows, live }: { rows: AgentRow[]; live: boolean }) {
-  const working = rows.filter((r) => r.phase !== 'end').length;
-  return (
-    <div className="aroster">
-      <div className="aroster__head">
-        <span className="aroster__tile" aria-hidden>{rows.length}</span>
-        <span className="aroster__title">
-          {rows.length} agent{rows.length === 1 ? '' : 's'} on separate questions
-        </span>
-        {live && working > 0 && (
-          <span className="aic-par" title="each agent is a read-only tool loop of its own, running now">
-            <span className="aic-par__dots" aria-hidden><i /><i /><i /></span>
-            {working} working
-          </span>
-        )}
-      </div>
-      <ul className="aroster__list">
-        {rows.map((r) => (
-          <li key={r.agent} className={cx('aroster__row', r.phase === 'end' && 'aroster__row--done')}>
-            <span className="aroster__line">
-              <span className="aroster__who">{r.agent}</span>
-              <span className="aroster__state">{AGENT_STATE[r.phase] ?? r.phase ?? ''}</span>
-              {live && r.phase !== 'end' && <span className="spinner" style={{ width: 9, height: 9, borderWidth: 1.5 }} />}
-              {/* the start line only restates the question, which has its own line below */}
-              {r.phase !== 'start' && <span className="aroster__what">{r.text.replace(/^agent \S+ /, '')}</span>}
-            </span>
-            {!!r.task && <span className="aroster__task" title={r.task}>{r.task}</span>}
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
 }
 
 /** The counts that head the steps card — one sentence, computed in one place. */
@@ -865,134 +814,19 @@ function countsOf(nodes: TrailNode[]): { bits: string[]; pending: boolean; tools
 }
 
 /**
- * THE STEPS CARD — the template's collapsible activity block, and the audit trail of the run.
- * Deliberately secondary once the answer exists, but never hidden, because it is how the answer was
- * reached. Unnumbered: the rule down its left edge carries the order, and a break in that rule is
- * where one model turn ended.
- */
-const StepsCard = memo(function StepsCard({ nodes, live, title, startOpen, runId, openSignal = 0, bare = true }: {
-  nodes: TrailNode[]; live: boolean; title: string; startOpen: boolean;
-  /** For the step anchors the narration log jumps to. */
-  runId: string;
-  /** Bumped by the narration log when a step is clicked: the card opens so the step can be shown. */
-  openSignal?: number;
-  /** false inside the work grid: with no calls yet there is nothing for this card to add to the log. */
-  bare?: boolean;
-}) {
-  const [open, setOpen] = useState(startOpen);
-  useEffect(() => { if (openSignal) setOpen(true); }, [openSignal]);
-  if (!nodes.length) return null;
-
-  const tools = nodes.filter((n): n is Extract<TrailNode, { k: 'tool' }> => n.k === 'tool');
-  // Nothing was CALLED — this is just the agent saying something (the opening line, a compaction
-  // notice). Wrapping one sentence in a collapsible card labelled "0 tool calls" is chrome, not
-  // structure, so it is rendered plainly.
-  if (!tools.length) {
-    if (!bare) return null;
-    return (
-      <div className="aic-bare">
-        {nodes.map((n) => (n.k === 'prose'
-          ? <Markdown key={n.key} className="md aic-prose aic-prose--quiet" text={n.text} />
-          // A note is a NOTE BODY: markdown, written by the agent, and often a table. Rendering it
-          // raw made HTML collapse the newlines, so `| a | b |` rows ran together into one line of
-          // pipes — the same class of bug CLAUDE.md records for NoteRow. Every surface that shows a
-          // note body goes through renderMarkdown.
-          : <Markdown key={n.key} className="md aic-bare__note" text={n.k === 'note' ? n.text : ''} />))}
-      </div>
-    );
-  }
-
-  const { bits, pending, inflight } = countsOf(nodes);
-  const groups = groupTrail(nodes);
-  const steps = stepNumbers(groups);
-
-  // THE CARDS ARE THE EVIDENCE OF THE WORK, NOT ITS ACCOUNT. What the assistant found and is doing
-  // lives in the narration log beside this card; each card and parallel group carries the STEP
-  // NUMBER that log uses, so one can be read against the other. Notes and prose are the log's too.
-  return (
-    <section className={cx('aic-disc', 'aic-steps', open && 'aic-disc--open')}>
-      <div className="aic-disc__head">
-        <button type="button" className="aic-disc__toggle" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
-          <span className={cx('aic-disc__tile', !live && 'aic-disc__tile--idle')} aria-hidden>
-            <Icon.Timeline />
-            {pending && live && <span className="aic-disc__live" />}
-          </span>
-          <span className="aic-disc__ident">
-            <span className="aic-disc__title">{title}</span>
-            {live && inflight > 1 && (
-              <span className="aic-par" title="independent reads of one turn are dispatched together; writes are not">
-                <span className="aic-par__dots" aria-hidden><i /><i /><i /></span>
-                {inflight} running in parallel
-              </span>
-            )}
-            {!!bits.length && <span className="aic-disc__meta">{bits.join(' · ')}</span>}
-          </span>
-          <span className="aic-disc__state" aria-hidden>{open ? <><Icon.Minus /> Collapse</> : <><Icon.Plus /> Expand</>}</span>
-        </button>
-      </div>
-      {open && (
-        <div className="aic-steps__body">
-          {groups.map((g) => {
-            const n = steps.get(g.key);
-            const anchor = n !== undefined ? stepAnchor(runId, n) : undefined;
-            if (g.g === 'lane') {
-              const done = g.nodes.filter((x) => x.e.ok !== null).length;
-              return (
-                <div key={g.key} id={anchor} className={cx('aic-step', g.turn && 'aic-step--turn')}>
-                  <div className={cx('tlane', done < g.nodes.length && live && 'tlane--live')}>
-                    <div className="tlane__head">
-                      {n !== undefined && <span className="aic-stepno" title={`step ${n} in the narration`}>{n}</span>}
-                      <span className="tlane__bars" aria-hidden><i /><i /><i /></span>
-                      <span className="tlane__what">{g.nodes.length} calls at the same time</span>
-                      <span className="tlane__prog">
-                        {done < g.nodes.length && live
-                          ? `${g.nodes.length - done} still running`
-                          : `${done} of ${g.nodes.length} answered`}
-                      </span>
-                    </div>
-                    <div className="tlane__body">
-                      {g.nodes.map((x) => <ToolCall key={x.key} e={x.e} live={live} />)}
-                    </div>
-                  </div>
-                </div>
-              );
-            }
-            if (g.g === 'agents') {
-              return (
-                <div key={g.key} className={cx('aic-step', g.turn && 'aic-step--turn')}>
-                  <AgentRoster rows={g.rows} live={live} />
-                </div>
-              );
-            }
-            const node = g.node;
-            if (node.k !== 'tool') return null;          // notes and prose are told in the narration log
-            return (
-              <div key={g.key} id={anchor} className={cx('aic-step', node.turn && 'aic-step--turn')}>
-                <ToolCall e={node.e} live={live} step={n} />
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </section>
-  );
-}, (a, b) => (
-  a.live === b.live && a.title === b.title && a.startOpen === b.startOpen &&
-  a.runId === b.runId && a.openSignal === b.openSignal && a.bare === b.bare &&
-  a.nodes.length === b.nodes.length && a.nodes.every((n, i) => sameNode(n, b.nodes[i]!))
-));
-
-/**
- * THE NARRATION LOG — what the assistant is doing, as its own column.
+ * THE WORK — what the assistant is doing and what it called, as ONE collapsible section.
  *
- * *"have narration be on the left side of the assistant page, so it details everything that it's
- * working on and doing ... there should be a very noticeable area for narration"*. Folded into the
- * tool cards, the account of the work was one muted line above each card and had to be dug out of
- * the evidence. Here it is the primary column: every step numbered, what it FOUND and what it does
- * NEXT, what it called and — for a single call — what came back, the worker agents under the step
- * that started them with their own latest line, and the milestones (a delegation planned, a nudge,
- * a compaction). Live, the line being typed is at its foot and the current step is marked. Clicking
- * a step opens the tool card beside it at that step.
+ * There were two: a narration log ("What it did") beside a separate "Tool calls" card, which put
+ * every step on screen twice and made the analyst line the two lists up by their numbers. Asked
+ * for as *"Combine 'What it did' and 'Tool calls' into one. organize it better ... make sure the new
+ * combine is able to be collapsed"*. One list of numbered steps now, and each step is:
+ *   - what the assistant FOUND and what it does NEXT (its narration, the loud part);
+ *   - a line naming the calls and — for one call — what came back, which is also the toggle for the
+ *     step's full tool cards (arguments and results), so the evidence is one click away, in place;
+ *   - the worker agents it started, each with its own latest line.
+ * Milestones (a delegation planned, a nudge, a compaction) sit between the steps. The whole section
+ * collapses to its head, which still says how much work there was and what the latest step found.
+ * It is open for the turn being read and closed for the earlier turns of a conversation.
  */
 type LogItem =
   | { t: 'step'; key: number; n: number; lead: string; calls: AiTranscriptEntry[]; agents: AgentRow[];
@@ -1034,57 +868,92 @@ function callNames(calls: AiTranscriptEntry[]): string {
   return [...counts].map(([k, v]) => (v > 1 ? `${k} ×${v}` : k)).join(' · ');
 }
 
-const NarrationLog = memo(function NarrationLog({ nodes, live, tailPrefix, onPaint, onStep }: {
-  nodes: TrailNode[]; live: boolean;
+const WorkLog = memo(function WorkLog({ nodes, live, startOpen, tailPrefix, onPaint }: {
+  nodes: TrailNode[]; live: boolean; startOpen: boolean;
+  /** Live only: the committed trailing prose, so the narration line being typed is the log's newest line. */
   tailPrefix?: string; onPaint?: () => void;
-  onStep: (n: number) => void;
 }) {
-  const items = logItems(groupTrail(nodes));
+  const [open, setOpen] = useState(startOpen);
+  // which steps have their tool cards showing — per step, so reading one call's arguments does not
+  // unfold forty others
+  const [detail, setDetail] = useState<Set<number>>(() => new Set());
+  const toggleDetail = useCallback((n: number) => setDetail((s) => {
+    const next = new Set(s);
+    if (next.has(n)) next.delete(n); else next.add(n);
+    return next;
+  }), []);
+
+  const tools = nodes.filter((n) => n.k === 'tool').length;
+  // No calls in a finished turn: nothing to organise. The run talking about itself (an opening line,
+  // a note) is shown plainly rather than inside a section labelled "0 steps".
+  if (!tools && !live) {
+    if (!nodes.length) return null;
+    return (
+      <div className="aic-bare">
+        {nodes.map((n) => (n.k === 'prose'
+          ? <Markdown key={n.key} className="md aic-prose aic-prose--quiet" text={n.text} />
+          // A note is a NOTE BODY: markdown, often a table — every surface that shows one goes
+          // through renderMarkdown, or the rows of a table run together into one line of pipes.
+          : <Markdown key={n.key} className="md aic-bare__note" text={n.k === 'note' ? n.text : ''} />))}
+      </div>
+    );
+  }
+
+  const groups = groupTrail(nodes);
+  const items = logItems(groups);
+  const byStep = new Map<number, TrailGroup>();
+  const nums = stepNumbers(groups);
+  for (const g of groups) { const n = nums.get(g.key); if (n !== undefined) byStep.set(n, g); }
   const steps = items.filter((i): i is Extract<LogItem, { t: 'step' }> => i.t === 'step');
-  const agents = new Set(steps.flatMap((s) => s.agents.map((a) => a.agent))).size;
-  const listRef = useRef<HTMLDivElement>(null);
-  const follow = useRef(true);
-  // The log scrolls on its own when it is taller than the space it has; while the run is live it
-  // follows the newest line, until the analyst scrolls it up to read something.
-  const pin = useCallback(() => {
-    const el = listRef.current;
-    if (el && follow.current) el.scrollTop = el.scrollHeight;
-    onPaint?.();
-  }, [onPaint]);
-  useLayoutEffect(() => { if (live) pin(); }, [items.length, live, pin]);
+  const { bits, inflight } = countsOf(nodes);
+  const lastLead = [...steps].reverse().find((s) => s.lead.trim());
+  const latest = lastLead ? splitNarration(lastLead.lead) : null;
 
   return (
-    <section className={cx('nlog', live && 'nlog--live')} aria-label="Narration">
-      <div className="nlog__head">
-        <span className="nlog__title">{live ? 'What it is doing' : 'What it did'}</span>
-        <span className="nlog__meta">
-          {steps.length} step{steps.length === 1 ? '' : 's'}
-          {agents > 0 && ` · ${agents} agent${agents === 1 ? '' : 's'}`}
+    <section className={cx('nlog', live && 'nlog--live', !open && 'nlog--closed')} aria-label="The assistant's work">
+      <button type="button" className="nlog__head" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+        <span className="nlog__headtext">
+          <span className="nlog__title">{live ? 'What it is doing' : 'What it did'}</span>
+          <span className="nlog__meta">
+            {[`${steps.length} step${steps.length === 1 ? '' : 's'}`, ...bits].join(' · ')}
+          </span>
+          {live && inflight > 1 && (
+            <span className="aic-par" title="independent reads of one turn are dispatched together; writes are not">
+              <span className="aic-par__dots" aria-hidden><i /><i /><i /></span>
+              {inflight} running in parallel
+            </span>
+          )}
         </span>
         {live && <span className="spinner" style={{ width: 10, height: 10, borderWidth: 1.5 }} aria-hidden />}
-      </div>
-      <div className="nlog__scroll" ref={listRef}
-           onScroll={(e) => {
-             const el = e.currentTarget;
-             follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-           }}>
+        <span className="nlog__toggle" aria-hidden>{open ? <><Icon.Minus /> Collapse</> : <><Icon.Plus /> Expand</>}</span>
+      </button>
+
+      {/* Collapsed, the head still says where the work got to — the latest thing it found (or, if it
+          has found nothing yet, what it is doing). */}
+      {!open && latest && (
+        <div className="nlog__peek">
+          <span className="nlog__peekk">{latest.found ? 'Latest' : 'Now'}</span>
+          <span className="nlog__peekv">{latest.found || latest.next}</span>
+        </div>
+      )}
+
+      {open && (
         <ol className="nlog__list">
           {items.map((it, i) => {
             if (it.t === 'note') {
               return <li key={it.key} className="nlog__note"><Markdown className="md" text={it.text} /></li>;
             }
             if (it.t === 'say') {
-              return (
-                <li key={it.key} className="nlog__say">
-                  <Narration text={it.text} />
-                </li>
-              );
+              return <li key={it.key} className="nlog__say"><Narration text={it.text} /></li>;
             }
             const running = it.calls.filter((c) => c.ok === null).length;
             const refused = it.calls.filter((c) => c.ok === false).length;
             const writes = it.calls.some((c) => c.writes);
             const now = live && i === items.length - 1 && !tailPrefix;
             const one = it.calls.length === 1 ? it.calls[0]! : null;
+            const shown = detail.has(it.n);
+            const g = byStep.get(it.n);
+            const cards = g && g.g === 'lane' ? g.nodes : g && g.g === 'one' && g.node.k === 'tool' ? [g.node] : [];
             return (
               <li key={it.key} className={cx('nlog__step', now && 'nlog__step--now', writes && 'nlog__step--write',
                                               refused > 0 && 'nlog__step--bad')}>
@@ -1095,8 +964,8 @@ const NarrationLog = memo(function NarrationLog({ nodes, live, tailPrefix, onPai
                     : it.sameTurnAs !== undefined
                       ? <div className="nlog__silent">Part of the same move as step {it.sameTurnAs}.</div>
                       : <div className="nlog__silent">No commentary for this step.</div>}
-                  <button type="button" className="nlog__calls" onClick={() => onStep(it.n)}
-                          title={`show step ${it.n} in the tool calls`}>
+                  <button type="button" className="nlog__calls" aria-expanded={shown} onClick={() => toggleDetail(it.n)}
+                          title={shown ? 'hide the tool calls of this step' : 'show the tool calls of this step'}>
                     {running > 0 && live
                       ? <span className="spinner" style={{ width: 9, height: 9, borderWidth: 1.5 }} aria-hidden />
                       : refused ? <Icon.Warn /> : <Icon.Check />}
@@ -1107,7 +976,13 @@ const NarrationLog = memo(function NarrationLog({ nodes, live, tailPrefix, onPai
                       <span className="nlog__got">{one.ok ? '→ ' : 'refused — '}{one.summary}</span>
                     )}
                     {!one && refused > 0 && <span className="nlog__got">{refused} refused</span>}
+                    <span className="nlog__more">{shown ? 'hide details' : 'details'}</span>
                   </button>
+                  {shown && (
+                    <div className="nlog__detail">
+                      {cards.map((c) => <ToolCall key={c.key} e={c.e} live={live} />)}
+                    </div>
+                  )}
                   {it.agents.length > 0 && (
                     <ul className="nlog__agents">
                       {it.agents.map((a) => (
@@ -1115,9 +990,9 @@ const NarrationLog = memo(function NarrationLog({ nodes, live, tailPrefix, onPai
                           <span className="nlog__who">{a.agent}</span>
                           <span className="nlog__state">{a.phase === 'end' ? 'finished' : 'working'}</span>
                           {live && a.phase !== 'end' && <span className="spinner" style={{ width: 8, height: 8, borderWidth: 1.5 }} aria-hidden />}
-                          {a.said
-                            ? <Narration className="nlog__agentsaid" text={a.said} />
-                            : !!a.task && <div className="nlog__agenttask">{a.task}</div>}
+                          {a.phase === 'end' && <span className="nlog__agentmeta">{a.text.replace(/^agent \S+ finished\s*[—-]\s*/, '')}</span>}
+                          {!!a.task && <div className="nlog__agenttask">{a.task}</div>}
+                          {!!a.said && <Narration className="nlog__agentsaid" text={a.said} />}
                         </li>
                       ))}
                     </ul>
@@ -1127,20 +1002,19 @@ const NarrationLog = memo(function NarrationLog({ nodes, live, tailPrefix, onPai
             );
           })}
           {live && tailPrefix !== undefined && (
-            <LiveTail where="log" prefix={tailPrefix} onPaint={pin} className="" />
+            <LiveTail where="log" prefix={tailPrefix} onPaint={onPaint} className="" />
           )}
           {live && !items.length && !tailPrefix && (
             <li className="nlog__note">Starting the investigation…</li>
           )}
         </ol>
-      </div>
+      )}
     </section>
   );
-});
-
-// `sameGroup` is exported-in-module for the grouping above; keeping it next to `sameNode` is what
-// stops the two drifting if the group shapes ever gain a field.
-void sameGroup;
+}, (a, b) => (
+  a.live === b.live && a.startOpen === b.startOpen && a.tailPrefix === b.tailPrefix && a.onPaint === b.onPaint &&
+  a.nodes.length === b.nodes.length && a.nodes.every((n, i) => sameNode(n, b.nodes[i]!))
+));
 
 /** An evidence-integrity signal. Never folded, never subdued — see the panel's header comment. */
 function Warning({ text }: { text: string }) {
@@ -1421,7 +1295,9 @@ function canContinue(run: AiRun): boolean {
   return !!run.reason && run.reason !== 'complete';
 }
 
-function Turn({ run, entries, live, undoing, onUndo, onRetry, onContinue, onStreamPaint }: {
+function Turn({ run, entries, live, latest = true, undoing, onUndo, onRetry, onContinue, onStreamPaint }: {
+  /** false for the earlier turns of a conversation: their work section starts collapsed */
+  latest?: boolean;
   run: AiRun; entries: AiTranscriptEntry[]; live: boolean; undoing: boolean;
   onUndo: (id: string) => void; onRetry: (run: AiRun) => void; onContinue: (run: AiRun) => void;
   /** Called after each frame of the live tail paints — the panel pins the scroller with it,
@@ -1446,23 +1322,6 @@ function Turn({ run, entries, live, undoing, onUndo, onRetry, onContinue, onStre
   const ranFor = run.endedAt ? spanOf(run.startedAt, run.endedAt) : '';
 
   const nodes = useMemo(() => trailNodes(trailBlocks), [trailBlocks]);
-  const hasWork = useMemo(() => nodes.some((n) => n.k === 'tool'), [nodes]);
-
-  // A step clicked in the narration log: open the tool card, then bring that step into view and mark
-  // it for a moment so the eye lands on it.
-  const [openSig, setOpenSig] = useState(0);
-  const showStep = useCallback((n: number) => {
-    setOpenSig((v) => v + 1);
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      const el = document.getElementById(stepAnchor(run.id, n));
-      if (!el) return;
-      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      el.classList.remove('aic-step--flash');
-      void el.offsetWidth;
-      el.classList.add('aic-step--flash');
-      window.setTimeout(() => el.classList.remove('aic-step--flash'), 1400);
-    }));
-  }, [run.id]);
 
   // LIVE: the calls are ONE card, above the prose, not a card per model turn interleaved with it.
   // Threading tool cards through the answer meant the thing being read moved down the page every time
@@ -1527,14 +1386,9 @@ function Turn({ run, entries, live, undoing, onUndo, onRetry, onContinue, onStre
         {live ? (
           <>
             {warnings.map((w) => <Warning key={w.key} text={w.text} />)}
-            {/* THE WORK: the narration log (what it is doing) beside the tool cards (what it called).
-                Two columns where there is room, the log first when stacked. */}
-            <div className={cx('aic-work', !liveNodes.some((n) => n.k === 'tool') && 'aic-work--solo')}>
-              <NarrationLog nodes={liveNodes} live tailPrefix={trailing ? trailing.text : ''}
-                            onPaint={onStreamPaint} onStep={showStep} />
-              <StepsCard nodes={liveNodes} live title="Tool calls" startOpen runId={run.id}
-                         openSignal={openSig} bare={false} />
-            </div>
+            {/* THE WORK: every step, what it found and did, with its tool calls one click away. */}
+            <WorkLog nodes={liveNodes} live startOpen tailPrefix={trailing ? trailing.text : ''}
+                     onPaint={onStreamPaint} />
             {/* The report, once the text being written is shaped like one (see `reportLike`); a
                 narration line is typed into the log instead. The last settled block is the prefix so
                 a sentence that straddles a commit stays ONE paragraph. See the note on `liveTail`. */}
@@ -1558,15 +1412,7 @@ function Turn({ run, entries, live, undoing, onUndo, onRetry, onContinue, onStre
               )}
 
             <Changes actions={run.actions} busy={undoing} onUndo={() => onUndo(run.id)} />
-            {hasWork ? (
-              <div className="aic-work">
-                <NarrationLog nodes={nodes} live={false} onStep={showStep} />
-                <StepsCard nodes={nodes} live={false} title="Tool calls" startOpen={!answer} runId={run.id}
-                           openSignal={openSig} bare={false} />
-              </div>
-            ) : (
-              <StepsCard nodes={nodes} live={false} title="How it got there" startOpen={!answer} runId={run.id} />
-            )}
+            <WorkLog nodes={nodes} live={false} startOpen={latest || !answer} />
 
             {run.transcriptTruncated && (
               <div className="aic-note">This transcript was long and its earliest lines were dropped; the report and the change list are complete.</div>
@@ -2349,7 +2195,7 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
           {provider && provider !== 'none' && run && (
             <>
               {thread.map((t) => (
-                <Turn key={t.id} run={t} entries={t.transcript} live={false}
+                <Turn key={t.id} run={t} entries={t.transcript} live={false} latest={false}
                       undoing={undoingId === t.id} onUndo={undoRun} onRetry={retry} onContinue={continueRun} />
               ))}
               <Turn run={run} entries={entries} live={live} undoing={undoingId === run.id}
