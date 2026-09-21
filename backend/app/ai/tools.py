@@ -2285,8 +2285,14 @@ def _delegate_investigation(args: dict[str, Any], ctx: RunContext) -> dict[str, 
     from ..config import get_settings
     from .client import LLMClient
     from . import subagents
-    from .investigator import build_context, parallel_limit
+    from .investigator import agents_enabled, build_context, parallel_limit
 
+    # The run is not offered this tool when agents are off, but a model can still NAME it (from an
+    # earlier turn, or from memory). Off is off: refuse rather than run agents the analyst disabled.
+    if not agents_enabled(get_settings().ai):
+        raise ToolError("worker agents are switched off in Settings (single-agent mode), so "
+                        "delegate_investigation is unavailable. Do the work yourself — several "
+                        "independent read calls in one reply still run together.")
     raw = args.get("tasks")
     if not isinstance(raw, list):
         raise ToolError("tasks must be an array of {name, objective, focus?} objects.")

@@ -619,6 +619,17 @@ PARALLEL_NUDGE = (
     "Either way, keep going — this is about how you ask, not about whether to continue.")
 
 
+# The same note when worker agents are switched off (Settings: the slider at 1 or automatic
+# delegation off) - it must not advertise a tool the run was not given.
+PARALLEL_NUDGE_SOLO = (
+    "A NOTE ON PACE — your last {n} turns each asked for a single tool call. If that is because "
+    "each read DEPENDED on the one before it, carry on exactly as you are." + NL +
+    "But if any of the questions still ahead of you are independent of each other, send them in ONE "
+    "reply — several read calls in one message are dispatched at the SAME TIME, so four counts cost "
+    "one wait instead of four." + NL +
+    "Either way, keep going — this is about how you ask, not about whether to continue.")
+
+
 # ===================================================================== AUTOMATIC DELEGATION
 # The planner behind `investigator._plan_delegation`. Asking the lead to delegate did not work: on
 # the analyst's own model a run made six tool turns, four of them INDEPENDENT drill-downs taken one

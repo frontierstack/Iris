@@ -434,7 +434,7 @@ function AiAssistant({ settings }: { settings: Settings }) {
               <span className="slider-row__val">{agents}</span>
               <span className="field__hint">
                 {agents === 1
-                  ? 'one call at a time — but a delegation still runs two agents, which is its minimum'
+                  ? 'one call at a time, one agent — no worker agents run at this setting'
                   : `up to ${agents} independent reads of one turn run at the same time`}
               </span>
             </div>
@@ -442,21 +442,23 @@ function AiAssistant({ settings }: { settings: Settings }) {
               Only reads share a lane. A tool that changes the case runs on its own, in the order the
               assistant asked for it, so two writes can never race and the undo list stays in order.
             </span>
-            {/* The same number is the DELEGATION fan-out: the lead assistant can hand whole lines of
-                enquiry to worker agents that research in parallel and report back. Two is the floor
-                whatever this says — one agent is a slower way of making the call yourself. */}
+            {/* The same number is the DELEGATION fan-out. At 1 there is no delegation at all: a
+                delegation's floor is two agents, so allowing one here silently ran two. */}
             <span className="field__hint">
               It is also how many <strong>worker agents</strong> the assistant may run at once when it
-              delegates parts of an investigation ({Math.max(2, agents)} here — two is always the
-              minimum). A worker has read tools only: the assistant keeps the case and does every
-              write itself, and it re-checks anything decisive before recording it.
+              delegates parts of an investigation
+              {agents === 1 || !autoDelegate ? ' — none at the current settings.' : ` (${agents} here).`}{' '}
+              A worker has read tools only: the assistant keeps the case and does every write itself,
+              and it re-checks anything decisive before recording it.
             </span>
             <div className="ai-toggle-row">
-              <Toggle on={autoDelegate} onChange={setAutoDelegate} label="Delegate automatically" />
+              <Toggle on={autoDelegate} onChange={setAutoDelegate} label="Worker agents" />
               <span className="field__hint">
                 {autoDelegate
-                  ? 'Once a run has made a couple of tool turns on its own, Iris splits the remaining work and runs worker agents on it at the same time — it does not wait for the model to ask. A question answered in a turn or two never triggers it.'
-                  : 'Worker agents run only when the assistant itself decides to delegate. Many models never do.'}
+                  ? (agents === 1
+                    ? 'On, but the slider is at 1 — raise it to 2 or more for worker agents to run.'
+                    : 'The assistant may delegate, and once a run has made a couple of tool turns on its own Iris splits the remaining work and runs worker agents on it at the same time. A question answered in a turn or two never triggers it.')
+                  : 'Off — single agent. The assistant does all the work itself and is not offered delegation at all.'}
               </span>
             </div>
           </div>

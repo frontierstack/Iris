@@ -89,7 +89,7 @@ from .loopguard import (LoopGuard, MAX_RECOVERIES as MAX_LOOP_RECOVERIES, call_k
 from .system_prompts import PROMPTS
 from .prompts import (CONTINUE_OUTPUT, RESET_NOTE, ARG_TOO_BIG, BUDGET_NOTICE, CHECK_IN, COMPACTED_CONTINUE, CONTINUE_WORK,
                       DOCUMENT_CHECK, LOOP_RECOVERY, LOOP_STOP, NO_CASE_LINE, run_budget, RECORD_NUDGE, REPORT_NOW,
-                      PARALLEL_NUDGE, SUMMARY_CHECK, WRAP_UP, delegation_block,
+                      PARALLEL_NUDGE, PARALLEL_NUDGE_SOLO, SUMMARY_CHECK, WRAP_UP, delegation_block,
                       investigator_user_prompt)
 from .tools import (REGISTRY, RunContext, ToolError, _s, tool_budget_seconds, tool_schemas,
                     unverified_citations)
@@ -623,6 +623,23 @@ def parallel_limit(settings_ai: Any = None) -> int:
     return max(1, min(MAX_PARALLEL_CAP, n))
 
 
+def agents_enabled(settings_ai: Any = None) -> bool:
+    """May this run use worker agents at all? Both switches must say yes.
+
+    `autoDelegate` off means ONE agent - not "only when the model asks": a model that is offered
+    `delegate_investigation` and told to use it will, so off has to take the tool away. The slider at
+    1 means one as well; `subagents.max_agents` floors a delegation at two, so leaving the tool on
+    there silently ran twice what the analyst had set.
+    """
+    if settings_ai is None:
+        return True
+    return bool(getattr(settings_ai, "autoDelegate", True)) and parallel_limit(settings_ai) >= 2
+
+
+def _without_delegation(schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [s for s in schemas if (s.get("function") or {}).get("name") != "delegate_investigation"]
+
+
 def _lanes(calls: list[dict[str, Any]], max_parallel: int) -> list[list[dict[str, Any]]]:
     """Split one turn's tool calls into lanes that may run together, preserving emitted order.
 
@@ -1021,7 +1038,8 @@ async def investigate(store: Any, objective: str, run_id: str,
         yield {"type": "error", "message": DISABLED_MESSAGE}
         return
 
-    tools = tool_schemas()
+    multi_agent = agents_enabled(settings.ai)
+    tools = tool_schemas() if multi_agent else _without_delegation(tool_schemas())
     # The system prompt: the built-in one, plus the analyst's saved instructions (ai/system_prompts.py) —
     # `system_prompt_id` None = the settings default, '' = built-in, an id = that prompt. A missing id
     # is REPORTED and the built-in prompt runs; it is never swapped for some other saved prompt.
@@ -1050,7 +1068,8 @@ async def investigate(store: Any, objective: str, run_id: str,
         # ...plus the DELEGATION block, for the same reason the budget block is appended rather than
         # baked in: it states how many agents THIS workspace will run (the analyst's setting), and the
         # analyst may have edited the built-in prompt — a run must still be told what it actually has.
-        {"role": "system", "content": system_text + delegation_block(subagents.max_agents(max_parallel))
+        {"role": "system", "content": system_text
+                                      + (delegation_block(subagents.max_agents(max_parallel)) if multi_agent else "")
                                       + run_budget(lim)},
         {"role": "user", "content": investigator_user_prompt(asked, build_context(store, fresh=not continue_from),
                                                               prior_brief)},
@@ -1084,7 +1103,7 @@ async def investigate(store: Any, objective: str, run_id: str,
     auto_attempts = 0
     delegations = 0
     serial_warned = False    # the provider served the agents one at a time - said once
-    auto_delegate_on = bool(getattr(settings.ai, "autoDelegate", True))
+    auto_delegate_on = multi_agent
     parallel_nudges = 0      # ...and how many times that has been pointed out
     productive_since_write = 0   # reads that returned evidence since the last write (or the start)
     ceiling = lim["maxContextTokens"]   # lowered when the provider refuses the transcript (ContextTooLong)
@@ -1375,6 +1394,8 @@ async def investigate(store: Any, objective: str, run_id: str,
                     # to call it. Once, and only when it actually helps.
                     if not tools_compact and tools_tokens > ceiling * TOOLS_SHARE_COMPACT:
                         small = tool_schemas(compact=True)
+                        if not multi_agent:
+                            small = _without_delegation(small)
                         saved = tools_tokens - len(orjson.dumps(small)) // 4
                         if saved > 0:
                             tools, tools_compact = small, True
@@ -1859,15 +1880,20 @@ async def investigate(store: Any, objective: str, run_id: str,
             # handed a recovery plan, and "you could have run those reads in parallel" is advice about
             # the SHAPE of work that is not happening — two user messages in one turn, one of them
             # irrelevant, competing for the attention of the model least able to spare it.
+            # With one call at a time and no agents there is nothing to point out: the nudge would
+            # advertise machinery the analyst switched off.
             if (solo_turns >= PARALLEL_STREAK and parallel_nudges < MAX_PARALLEL_NUDGES
+                    and (multi_agent or max_parallel > 1)
                     and not guard.tripped and not guard.needs_recovery() and not guard.repeat_streak
                     and not runs.stop_requested(run_id) and est() < ceiling):
                 parallel_nudges += 1
                 solo_turns = 0
-                messages.append({"role": "user", "content": PARALLEL_NUDGE.format(
-                    n=PARALLEL_STREAK, agents=subagents.max_agents(max_parallel))})
+                messages.append({"role": "user", "content": (
+                    PARALLEL_NUDGE.format(n=PARALLEL_STREAK, agents=subagents.max_agents(max_parallel))
+                    if multi_agent else PARALLEL_NUDGE_SOLO.format(n=PARALLEL_STREAK))})
                 note = (f"{PARALLEL_STREAK} turns in a row with a single read — reminded the assistant "
-                        f"that independent reads run together and that it can delegate")
+                        f"that independent reads run together"
+                        + (" and that it can delegate" if multi_agent else ""))
                 HISTORY.append(run_id, {"kind": "status", "text": note})
                 yield {"type": "status", "text": note, "parallelNudge": parallel_nudges}
 
