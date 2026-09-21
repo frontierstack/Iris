@@ -890,6 +890,27 @@ def note_append(prev_version: int, version: int, n_before: int, n_after: int) ->
         return True
 
 
+def note_unchanged(prev_version: int, version: int, n: int) -> bool:
+    """The version moved but the POOL did not: keep the index as it is.
+
+    A case switch — and `create_case`, which the AI investigator calls mid-run — clears the case's
+    events and reads the new case back, bumping the version twice on the way. When nothing entered or
+    left the pool (`Store.activate` compares its source signature), every indexed position still holds
+    the same event and `_doc` packs nothing case-specific, so the 834 MB index describes the pool
+    exactly. Throwing it away cost an 8 s reload from disk, during which every query fell to the scan
+    path: measured live, two `search_events` calls took 3.0 s and 7.1 s against 0.13-0.3 s on the index.
+
+    Kept only if it was built for `prev_version` (the version before the switch began) and covers
+    exactly `n` events; anything else returns False and the caller invalidates, as before.
+    """
+    with _lock:
+        idx = _index
+        if idx is None or idx.version != prev_version or idx.n != n:
+            return False
+        idx.version = version
+        return True
+
+
 def invalidate() -> None:
     global _index
     with _lock:

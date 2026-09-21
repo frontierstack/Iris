@@ -224,6 +224,18 @@ TOOLS_SHARE_COMPACT = 0.33
 # before the run is failed. Nothing of the turn has reached the transcript when they happen.
 PROVIDER_RETRIES = 3
 PROVIDER_BACKOFF = (2.0, 5.0, 10.0)
+# A 429 that is a RATE limit clears on the provider's clock, not ours: Open-Source-Model-Manager
+# counts requests per key per MINUTE (60 by default), so three retries inside seventeen seconds could
+# all land in the same window. Wait longer for those, and never less than a Retry-After the provider sent.
+RATE_LIMIT_BACKOFF = (15.0, 30.0, 60.0)
+MAX_PROVIDER_WAIT = 120.0
+
+
+def provider_delay(exc: "ProviderUnavailable", attempt: int) -> float:
+    """How long to wait before re-sending after a transient provider failure (`attempt` from 1)."""
+    ladder = RATE_LIMIT_BACKOFF if getattr(exc, "status", 0) == 429 else PROVIDER_BACKOFF
+    base = ladder[min(attempt - 1, len(ladder) - 1)]
+    return min(MAX_PROVIDER_WAIT, max(base, float(getattr(exc, "retry_after", 0.0) or 0.0)))
 # ---- record AS YOU GO. The analyst's report: findings need to be documented "as it is finding, then
 # build a full summary at the end". The compaction and provider-failure paths above are why it is not
 # tidiness: the transcript is finite and a run can end mid-way, so a finding that lives only in the
@@ -858,15 +870,26 @@ def _names(items: Any, key: str, cap: int = 3) -> str:
 
 
 def _where(d: dict[str, Any]) -> str:
-    """The source names behind an entity_profile / aggregate answer, from its own top-N breakdown."""
-    top = ((d.get("breakdown") or {}).get("source") or {}).get("top")
+    """The FILES behind an entity_profile answer, from its own top-N breakdown.
+
+    Not the `source` breakdown: that is what a line was parsed AS, and several logs share a parser —
+    three CSV exports all read "delimited.csv", so an address seen in two different logs was
+    summarised as "1 source(s) — delimited.csv". The file is what the analyst opens.
+    """
+    bd = d.get("breakdown") or {}
+    top = (bd.get("file") or bd.get("source") or {}).get("top")
     return _names(top, "value")
+
+
+def _file_count(d: dict[str, Any]) -> int:
+    bd = d.get("breakdown") or {}
+    return int((bd.get("file") or bd.get("source") or {}).get("distinct", 0) or 0)
 
 
 _SUMMARY: dict[str, Callable[[dict[str, Any]], str]] = {
     "search_events": lambda d: (f"{d.get('returned', _len(d, 'rows'))} of {_n(d.get('total', 0))} matching events"
-                                + (f" — {_names(d.get('rows'), 'source')}"
-                                   if _names(d.get("rows"), "source") else "")),
+                                + (f" — {_names(d.get('rows'), 'file')}"
+                                   if _names(d.get("rows"), "file") else "")),
     "get_events": lambda d: (f"read {d.get('returned', 0)} of {d.get('requested', 0)} event(s)"
                              + (f" — {_len(d, 'missing')} id(s) do not exist" if d.get("missing") else "")),
     "get_event": lambda d: (f"event {d.get('id', '?')} — {d.get('source', '?')} {d.get('ts') or 'no timestamp'}"
@@ -904,7 +927,7 @@ _SUMMARY: dict[str, Callable[[dict[str, Any]], str]] = {
     "graph_path": lambda d: (f"path found: {' → '.join(d.get('path') or [])}" if d.get("found")
                              else "no path between those entities"),
     "entity_profile": lambda d: (f"{d.get('value', '?')}: {_n(d.get('total', 0))} event(s) in "
-                                 f"{(d.get('breakdown') or {}).get('source', {}).get('distinct', 0)} source(s)"
+                                 f"{_file_count(d)} file(s)"
                                  + (f" — {_where(d)}" if _where(d) else "")
                                  + f", {(d.get('graph') or {}).get('totalRelations', 0)} relation(s)"),
     "list_iocs": lambda d: f"{_len(d, 'iocs')} indicator(s)",
@@ -1042,6 +1065,13 @@ async def investigate(store: Any, objective: str, run_id: str,
         return
 
     multi_agent = agents_enabled(settings.ai)
+    # A provider already measured to serve one request at a time runs this investigation as ONE
+    # agent: delegating there is slower than the lead working alone (see subagents.probe_parallel).
+    serial_known = multi_agent and subagents.known_parallel(client) is False
+    if serial_known:
+        multi_agent = False
+        HISTORY.append(run_id, {"kind": "status", "text": subagents.SERIAL_PROVIDER_NOTE})
+        yield {"type": "status", "text": subagents.SERIAL_PROVIDER_NOTE, "providerSerialised": True}
     tools = tool_schemas() if multi_agent else _without_delegation(tool_schemas())
     # The system prompt: the built-in one, plus the analyst's saved instructions (ai/system_prompts.py) —
     # `system_prompt_id` None = the settings default, '' = built-in, an id = that prompt. A missing id
@@ -1294,9 +1324,27 @@ async def investigate(store: Any, objective: str, run_id: str,
                 alone = turns_alone
                 turns_alone = 0
                 width = subagents.max_agents(max_parallel)
-                plan, why_not = await autodelegate.plan(
-                    client, objective, messages, build_context(store, fresh=False), width,
-                    lambda: runs.stop_requested(run_id))
+                # ASK THE PROVIDER FIRST. On a one-slot model the planner call alone costs a lead
+                # turn, and the delegation it plans runs its agents in turn: measured live, 417 s
+                # for two agents that both ran out of time. Known verdicts are free; an unknown one
+                # costs two tiny concurrent requests, once per model per half hour.
+                # Only a client that can plan is asked: one that cannot is skipped in silence by the
+                # planner below, and a probe must not spend requests on it either — a scripted test
+                # provider's turns are the run's, not the probe's.
+                parallel = (await subagents.probe_parallel(client)
+                            if callable(getattr(client, "complete", None)) else None)
+                if parallel is False:
+                    auto_delegate_on = False
+                    plan, why_not = None, ""
+                    if not serial_warned:
+                        serial_warned = True
+                        HISTORY.append(run_id, {"kind": "status", "text": subagents.SERIAL_PROVIDER_NOTE})
+                        yield {"type": "status", "text": subagents.SERIAL_PROVIDER_NOTE,
+                               "providerSerialised": True}
+                else:
+                    plan, why_not = await autodelegate.plan(
+                        client, objective, messages, build_context(store, fresh=False), width,
+                        lambda: runs.stop_requested(run_id))
                 if plan:
                     auto_msg = autodelegate.assistant_turn(run_id, auto_attempts, plan)
                     note = (f"the assistant had worked alone for {alone} tool turns — Iris split the "
@@ -1470,7 +1518,7 @@ async def investigate(store: Any, objective: str, run_id: str,
                         raise AIError(f"{exc} — gave up after {PROVIDER_RETRIES} retries. Everything "
                                       f"written to the case so far is kept; send a follow-up in this "
                                       f"conversation to continue from here once the provider is back.") from exc
-                    delay = PROVIDER_BACKOFF[min(prov_tries - 1, len(PROVIDER_BACKOFF) - 1)]
+                    delay = provider_delay(exc, prov_tries)
                     note = (f"the AI provider failed ({str(exc)[:200]}); retrying in {delay:.0f}s "
                             f"(attempt {prov_tries} of {PROVIDER_RETRIES}) — the run continues from where "
                             f"it was, nothing is lost")
@@ -1857,6 +1905,9 @@ async def investigate(store: Any, objective: str, run_id: str,
                         delegations += 1
                         turns_alone = 0
                         solo_turns = 0
+                        if entry["result"].get("providerSerialised"):
+                            # no more automatic splits this run: each would cost the same again
+                            auto_delegate_on = False
                         if entry["result"].get("providerSerialised") and not serial_warned:
                             # SAID ONCE, IN WORDS THE ANALYST CAN ACT ON. Three agents "working" on a
                             # provider with one inference slot are three agents QUEUING, and nothing

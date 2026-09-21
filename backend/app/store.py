@@ -698,7 +698,10 @@ class Store:
         """Bulk-load depth for THIS thread (see `bulk_load`). Read-only: `bulk_load` owns it."""
         return getattr(self._bulk_local, "depth", 0)
 
-    def bump(self) -> None:
+    def bump(self, pool_unchanged_since: Optional[int] = None) -> None:
+        """`pool_unchanged_since`: the version the pool was last indexed at, when the caller KNOWS no
+        event entered, left or moved since (a case switch over an unchanged pool) — the search index
+        is then kept rather than reloaded. See `search.note_unchanged`."""
         self.version += 1
         self._drop_derived()
         if self._bulk:
@@ -711,8 +714,11 @@ class Store:
             # else - a reorder, a delete, a phase-2 swap, a re-stamped detection - leaves the hint
             # unset and lands on invalidate(), exactly as before.
             hint, self._append_hint = self._append_hint, None
-            if hint is None or not _search.note_append(self.version - 1, self.version,
-                                                       hint, len(self.events)):
+            if pool_unchanged_since is not None:
+                if not _search.note_unchanged(pool_unchanged_since, self.version, len(self.events)):
+                    _search.invalidate()
+            elif hint is None or not _search.note_append(self.version - 1, self.version,
+                                                         hint, len(self.events)):
                 _search.invalidate()
             self.warm_search_async()
         except Exception:
@@ -3201,6 +3207,7 @@ class Store:
             if case_id == self.case_id and not force and not self.pending:
                 return
             before = self._pool_signature()
+            indexed_at = self.version       # what the search index was built against, if it is current
             if save_current:
                 self.save_meta()  # no-op while pending
             # keep_library: the case-less pool is NOT part of any case, so switching cases must never
@@ -3235,10 +3242,14 @@ class Store:
         # cannot change what a rule matched on an event that did not move: every surviving event still
         # carries its own detections, and the windowed burst rules only see a different density if the
         # SET of events changed. So compare the pool before and after, and do nothing when it is the same.
-        if self._pool_signature() != before:
+        # ...and for the same reason the SEARCH INDEX survives: an unchanged pool is the same events in
+        # the same positions, so `bump` re-keys the index instead of throwing it away (an 8 s reload
+        # at 1.7 M events, every query on the scan path meanwhile).
+        unchanged = self._pool_signature() == before
+        if not unchanged:
             with self._detect_lock:
                 self._run_detections()
-        self.bump()
+        self.bump(pool_unchanged_since=indexed_at if unchanged else None)
 
     def _pool_signature(self) -> tuple:
         """What is in the pool, cheaply: one entry per SOURCE, never a walk of the events.

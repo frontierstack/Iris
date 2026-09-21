@@ -37,8 +37,35 @@ def _ioc_id(kind: str, value: str) -> str:
     return f"{kind.strip().lower()}:{value.strip()}"
 
 
+def _candidates(value: str, events: list) -> list:
+    """The events that CAN contain `value`, found through the search index instead of a pool walk.
+
+    `_locate` over the whole pool is a Python pass over every event — ~3.6 s at 1.7 M events for ONE
+    indicator, paid by every `add_ioc` and once per manual indicator on every IOC listing. The packed
+    index holds each event's raw line, message (when it says more than raw), entities and field
+    values, lower-cased, so a free-text search for the value returns every event `_locate` could
+    match, and running `_locate` on those gives exactly its whole-pool answer. Anything that makes
+    that uncertain — a subset rather than the pool, a value the DSL would have to escape, a capped
+    position list — falls back to the full walk.
+    """
+    if events is not STORE.events or not value or '"' in value or "\\" in value:
+        return events
+    try:
+        from .. import search as search_engine
+        with STORE.lock:
+            evs, ts, version = STORE.events, STORE.ts, STORE.version
+        res = search_engine.search(evs, ts, version, f'"{value}"', 0, len(evs), set(), set(), 0, 0,
+                                   positions=True)
+        if not res.get("positionsExact", False) or res.get("positions") is None:
+            return events
+        return [evs[int(i)] for i in res["positions"]]
+    except Exception:  # noqa: BLE001 — the full walk is always correct, only slower
+        return events
+
+
 def _locate(value: str, events: list) -> IOC:
     """Find every place a literal indicator appears: raw, message, entities and field values."""
+    events = _candidates(value, events)
     needle = value.lower()
     hit = IOC(id="", kind="", value=value, manual=True)
     for e in events:

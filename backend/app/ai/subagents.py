@@ -448,6 +448,108 @@ def stream_overlap(per_agent: list[list[tuple[float, float]]]) -> tuple[Optional
 # Below this much streamed time there is no verdict: a fast provider answers in slivers, and
 # slivers that happen not to touch say nothing about how many slots it has.
 MIN_STREAMED_SECONDS = 1.5
+# The share of streamed time with two agents receiving tokens at once, below which the provider is
+# serving them one at a time. `delegate_investigation` reports against the same figure.
+SERIAL_SHARE = 0.15
+
+
+# ------------------------------------------------------------------ can this provider run agents at all?
+# Found by driving a real investigation on the analyst's gateway (Open-Source-Model-Manager over
+# llama.cpp, the model loaded with ONE parallel slot): a delegation of two agents took 417 s, the
+# agents took turns (0 % overlap), each switch threw away the other's prompt cache so every agent
+# turn re-read its whole prompt, and BOTH agents ran out of their time budget before finishing. The
+# overlap was measured — after the fact, and automatic delegation stayed on for the rest of the run.
+# So it is asked BEFORE delegating: two tiny concurrent requests, and whether their replies overlap.
+# A second request on a one-slot llama.cpp is queued inside the server, never refused, so the only
+# evidence is timing. The verdict is remembered per (provider, model) for CAPACITY_TTL, and a real
+# delegation's own measurement overwrites it, because a model can be reloaded with more slots.
+CAPACITY_TTL = 1800.0
+PROBE_TIMEOUT = 60.0
+PROBE_PROMPT = ("Count from 1 to 40. Output only the numbers, separated by single spaces, "
+                "with nothing before or after them.")
+_CAPACITY: dict[tuple[str, str], tuple[bool, float]] = {}
+_CAP_LOCK = threading.Lock()
+
+
+def _cap_key(client: Any) -> tuple[str, str]:
+    base = getattr(client, "resolved_base", None) or getattr(client, "base_url", "") or ""
+    return (str(base).rstrip("/"), str(getattr(client, "model", "") or ""))
+
+
+def known_parallel(client: Any) -> Optional[bool]:
+    """The remembered verdict: True = runs requests together, False = one at a time, None = unknown."""
+    with _CAP_LOCK:
+        hit = _CAPACITY.get(_cap_key(client))
+    if hit and time.monotonic() - hit[1] < CAPACITY_TTL:
+        return hit[0]
+    return None
+
+
+def note_parallel(client: Any, parallel: bool) -> None:
+    with _CAP_LOCK:
+        _CAPACITY[_cap_key(client)] = (bool(parallel), time.monotonic())
+
+
+def forget_capacity() -> None:
+    with _CAP_LOCK:
+        _CAPACITY.clear()
+
+
+async def probe_parallel(client: Any) -> Optional[bool]:
+    """Does this provider serve two requests AT THE SAME TIME? None when it cannot be told.
+
+    Two small completions go out together and the spans over which each one's reply streamed are
+    compared with `stream_overlap`, the measure a real delegation is judged by. None — "carry on as
+    before" — on anything inconclusive: an error, replies too short to time, a client that cannot
+    stream. Only evidence switches agents off.
+    """
+    known = known_parallel(client)
+    if known is not None:
+        return known
+    if not callable(getattr(client, "stream_chat", None)):
+        return None
+    spans: list[list[Optional[float]]] = [[None, None], [None, None]]
+
+    async def one(i: int) -> None:
+        async for item in client.stream_chat([{"role": "user", "content": PROBE_PROMPT}],
+                                             tools=None, temperature=0.0, tool_choice="none"):
+            if item.get("type") == "text" and item.get("text"):
+                now = time.monotonic()
+                if spans[i][0] is None:
+                    spans[i][0] = now
+                spans[i][1] = now
+
+    tasks = [asyncio.ensure_future(one(i)) for i in (0, 1)]
+    done, pending = await asyncio.wait(tasks, timeout=PROBE_TIMEOUT)
+    for t in pending:
+        t.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    if any(t.exception() is not None for t in done if not t.cancelled()):
+        return None
+    started = [s for s in spans if s[0] is not None]
+    if len(started) == 2:
+        share, _streamed = stream_overlap([[(s[0], s[1])] for s in spans])  # type: ignore[misc]
+        if share is None:
+            return None
+        verdict = share >= SERIAL_SHARE
+    elif len(started) == 1 and len(done) == 1:
+        # one reply streamed from start to finish while the other never received a token
+        s = started[0]
+        if (s[1] or 0) - (s[0] or 0) < 1.0:
+            return None
+        verdict = False
+    else:
+        return None
+    note_parallel(client, verdict)
+    return verdict
+
+
+SERIAL_PROVIDER_NOTE = (
+    "your AI provider serves one request at a time (one inference slot), so worker agents would take "
+    "turns rather than work together — slower than the assistant working alone, and every switch "
+    "between them throws away the model's prompt cache. Worker agents are off for this model; load it "
+    "with 2 or more parallel slots (Open-Source-Model-Manager: parallel slots; llama.cpp: --parallel) "
+    "to use them.")
 
 
 def max_agents(parallel: int) -> int:

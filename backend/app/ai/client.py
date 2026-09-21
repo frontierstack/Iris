@@ -79,9 +79,21 @@ class ProviderUnavailable(AIError):
     that is not a context overflow is NOT one of these: a wrong key or URL will not fix itself.
     """
 
-    def __init__(self, message: str, status: int = 0) -> None:
+    def __init__(self, message: str, status: int = 0, retry_after: float = 0.0) -> None:
         super().__init__(message)
         self.status = status
+        # seconds the provider asked for (a Retry-After header), 0 when it did not say
+        self.retry_after = retry_after
+
+
+class ProviderQuota(AIError):
+    """The provider refused on a QUOTA — the key's token or spend allowance is used up.
+
+    A 429, but not a transient one: Open-Source-Model-Manager answers `429 "Token limit exceeded"`
+    when an API key has spent its daily token allowance (100,000 by default), and OpenAI answers
+    `insufficient_quota`. Retrying three times over seventeen seconds cannot succeed and ended the run
+    on "gave up after 3 retries", which reads as the provider being down. Said once, with the fix.
+    """
 
 
 class BadToolArguments(AIError):
@@ -503,9 +515,19 @@ class LLMClient:
                                 + (f", limit {limit:,} tokens" if limit else "")
                                 + (f", requested {requested:,}" if requested else "") + ")",
                                 status=resp.status_code, limit=limit, requested=requested)
+                        if resp.status_code == 429 and _quota_exhausted(text):
+                            print(f"[iris] ai: HTTP 429 (quota) from {url}: {text.strip()[:300]}")
+                            raise ProviderQuota(
+                                f"the AI provider refused the request because this API key's usage "
+                                f"allowance is used up (HTTP 429 at {url}). Retrying cannot help until the "
+                                f"allowance resets. Raise the key's token limit on the gateway (on "
+                                f"Open-Source-Model-Manager a new key is capped at 100,000 tokens a day) or "
+                                f"use another key in Settings → AI assistant. Everything already written to "
+                                f"the case is kept.")
                         if _transient_status(resp.status_code):
                             raise ProviderUnavailable(self._http_error(resp.status_code, text, url, tried=bases),
-                                                      status=resp.status_code)
+                                                      status=resp.status_code,
+                                                      retry_after=_retry_after(resp.headers))
                         if tools and _rejects_tools(resp.status_code, text):
                             # Fail LOUDLY and specifically. Retrying without `tools` would produce a model
                             # that cannot act, narrating tool calls it never made — which is the failure
@@ -713,23 +735,55 @@ def _context_overflow(status: int, body: str) -> bool:
     return any(w in low for w in _CTX_WORDS)
 
 
-_CTX_LIMIT_RE = re.compile(r"(?:maximum|max)[^.\d]{0,40}?(\d{3,7})\s*tokens", re.I)
-_CTX_REQ_RE = re.compile(r"(?:requested|resulted in|your messages? (?:resulted in|contains?))\D{0,30}?(\d{3,8})\s*tokens", re.I)
+# OpenAI states "maximum context length is N tokens"; llama.cpp and Open-Source-Model-Manager's
+# context guard say "exceeds the available context size (N tokens)" and carry `"n_ctx": N` /
+# `"n_prompt_tokens": M` in the JSON — the first pattern alone missed both, so Iris never learned
+# the real window from them and guessed at 0.75x its own estimate instead.
+_CTX_LIMIT_RES = (re.compile(r"(?:maximum|max)[^.\d]{0,40}?(\d{3,7})\s*tokens", re.I),
+                  re.compile(r"context size \((\d{3,7}) tokens\)", re.I),
+                  re.compile(r'"n_ctx"\s*:\s*(\d{3,7})'))
+_CTX_REQ_RES = (re.compile(r"(?:requested|resulted in|your messages? (?:resulted in|contains?))\D{0,30}?(\d{3,8})\s*tokens", re.I),
+                re.compile(r"request \(~?(\d{3,8}) tokens estimated\)", re.I),
+                re.compile(r'"n_prompt_tokens"\s*:\s*(\d{3,8})'))
 
 
 def _context_numbers(body: str) -> tuple[int, int]:
     """(limit, requested) token counts from an overflow body, 0 when it does not state them."""
-    def _n(rx: "re.Pattern[str]") -> int:
-        m = rx.search(body or "")
-        try:
-            return int(m.group(1)) if m else 0
-        except (TypeError, ValueError):
-            return 0
-    return _n(_CTX_LIMIT_RE), _n(_CTX_REQ_RE)
+    def _n(rxs: "tuple[re.Pattern[str], ...]") -> int:
+        for rx in rxs:
+            m = rx.search(body or "")
+            if m:
+                try:
+                    return int(m.group(1))
+                except (TypeError, ValueError):
+                    continue
+        return 0
+    return _n(_CTX_LIMIT_RES), _n(_CTX_REQ_RES)
 
 
 def _transient_status(status: int) -> bool:
     return status in (408, 425, 429, 500, 502, 503, 504)
+
+
+# A 429 that is a spent ALLOWANCE, not a busy moment. Open-Source-Model-Manager: "Token limit
+# exceeded" (daily tokens per key); OpenAI: insufficient_quota / "exceeded your current quota".
+# Its per-minute "Rate limit exceeded" is deliberately NOT here: that one does clear by waiting.
+_QUOTA_WORDS = ("token limit exceeded", "insufficient_quota", "exceeded your current quota",
+                "quota exceeded", "daily limit")
+
+
+def _quota_exhausted(body: str) -> bool:
+    low = (body or "").lower()
+    return any(w in low for w in _QUOTA_WORDS)
+
+
+def _retry_after(headers: Any) -> float:
+    """Seconds from a Retry-After header (the delta form; an HTTP date is rare here and ignored)."""
+    try:
+        v = float(str(headers.get("retry-after") or "").strip())
+    except (TypeError, ValueError, AttributeError):
+        return 0.0
+    return v if 0 < v <= 300 else 0.0
 
 
 def _model_wrote_bad_json(status: int, body: str) -> bool:

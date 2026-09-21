@@ -24,6 +24,7 @@ a search over a million events would otherwise stall every other request on the 
 """
 from __future__ import annotations
 
+import asyncio
 import inspect
 import os
 import re
@@ -1580,7 +1581,7 @@ def _entity_profile(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
     rows = res["rows"]
 
     facets: dict[str, Any] = {}
-    for field in ("source", "host", "user", "sev", "detection"):
+    for field in ("source", "file", "host", "user", "sev", "detection"):
         groups, distinct, _missing = _aggregate(rows, field)
         if groups:
             facets[field] = {"distinct": distinct,
@@ -2338,6 +2339,18 @@ def _delegate_investigation(args: dict[str, Any], ctx: RunContext) -> dict[str, 
     if not getattr(client, "configured", False):
         raise ToolError("no AI provider is configured, so there is nothing to delegate to. Do the work "
                         "yourself with the read tools.")
+    # A ONE-SLOT PROVIDER RUNS AGENTS IN TURN, which is slower than not delegating (see
+    # subagents.probe_parallel). Remembered when known, asked when not; unknown carries on as before.
+    parallel = subagents.known_parallel(client)
+    if parallel is None:
+        try:
+            parallel = asyncio.run(subagents.probe_parallel(client))
+        except Exception:  # noqa: BLE001 — an inconclusive probe must not cost the delegation
+            parallel = None
+    if parallel is False:
+        raise ToolError(subagents.SERIAL_PROVIDER_NOTE + " Do this work yourself — several independent "
+                        "read calls in ONE reply still run at the same time, because tools do not need "
+                        "a model slot.")
     width = subagents.max_agents(parallel_limit(settings.ai))
     store = _store()
     context_block = build_context(store)
@@ -2372,7 +2385,9 @@ def _delegate_investigation(args: dict[str, Any], ctx: RunContext) -> dict[str, 
     share, streamed = subagents.stream_overlap([r.pop("spans", None) or [] for r in results])
     if share is not None:
         out["agentOverlap"] = round(share, 2)
-        if share < 0.15:
+        # the real measurement is the better evidence: it overwrites what the probe said
+        subagents.note_parallel(client, share >= subagents.SERIAL_SHARE)
+        if share < subagents.SERIAL_SHARE:
             out["providerSerialised"] = True
             out["concurrencyNote"] = (
                 f"the {len(results)} agents were dispatched together but the provider served them "
@@ -2527,7 +2542,7 @@ def _remove_events_from_case(args: dict[str, Any], ctx: RunContext) -> dict[str,
       # check runs first, and a fabricated event id must stay the refusal the model hears first.
       ["kind", "value", "citedEventIds"], writes=True)
 def _add_ioc(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
-    from ..routers.iocs import _all_iocs, _ioc_id
+    from ..routers.iocs import _apply_citations, _ioc_id, _locate
     _budget(ctx)
     _require_case("an indicator")
     value = _s(args.get("value"), 500).strip()
@@ -2556,7 +2571,11 @@ def _add_ioc(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
                                   "addedBy": "ai", "runId": ctx.run_id,
                                   "citedEventIds": cited})
     store.save_meta()
-    ioc = next((i for i in _all_iocs("all") if i.id == iid), None)
+    # ONE indicator is reported on, so only it is located: rebuilding the whole indicator list
+    # re-extracted every IOC in the pool and walked all of it per manual indicator — 3.6 s for this
+    # call on a 1.7 M-event workspace. `_locate` finds it through the search index (see `_candidates`).
+    ioc = _locate(value, store.events)
+    _apply_citations(ioc, cited)
     action = ctx.record("add_ioc", f"recorded indicator {kind}:{value}", {"kind": "ioc", "iocId": iid})
     return {"ok": True, "ioc": {"id": iid, "kind": kind, "value": value,
                                 "count": ioc.count if ioc else 0,

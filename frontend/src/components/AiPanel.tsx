@@ -322,8 +322,13 @@ function trailNodes(blocks: Block[]): TrailNode[] {
         // roster instead of a column of near-identical sentences. Persisted on the entry, so this
         // works in a polling tab and after a reload too.
         if (e.text.trim()) {
-          out.push({ k: 'note', key: e.seq, text: e.text, turn, agent: e.agent, phase: e.phase, task: e.task, said: e.said });
-          turn = false;
+          // The "N tools running in parallel" line is written between a turn's boundary and the calls
+          // it announces, so it must not take the turn marker from them: a SILENT turn whose calls
+          // went out together read as "part of the same move" as the turn before it.
+          const announces = LANE_NOTE.test(e.text);
+          out.push({ k: 'note', key: e.seq, text: e.text, turn: announces ? false : turn,
+                     agent: e.agent, phase: e.phase, task: e.task, said: e.said });
+          if (!announces) turn = false;
         }
         continue;
       }
@@ -591,21 +596,27 @@ function CopyMicro({ text, what }: { text: string; what: string }) {
  * A line with no separator is ONE of the two, judged by how it opens — never invented into both.
  * A hyphen between digits is a range ("02:14 - 02:19"), not the separator.
  */
-const NARR_SEP = /\s+[\u2014\u2013]\s+|(?<!\d)\s+-\s+(?!\d)|;\s+/;
-const NARR_INTENT = /^(?:now|next|then|first|before|let me|i'll|i will|i'm|going to|to see|to check)\b|^[a-z]+ing\b/i;
+// ...and so is a NEW SENTENCE that opens with an intention ("… no detections. Now I'll read …"):
+// models write the two halves as two sentences at least as often as they use the dash.
+const NARR_SEP = /\s+[\u2014\u2013]\s+|(?<!\d)\s+-\s+(?!\d)|;\s+|(?<=[.!?])\s+(?=(?:Now|Next|Then|So|Let me|I'll|I will|I need|I'm going)\b)/;
+const NARR_INTENT = /^(?:now|next|then|so|first|before|let me|i'll|i will|i'm|i need|i want|going to|to see|to check)\b|^(?!(?:nothing|something|anything|everything|thing|string|during|morning|evening)\b)[a-z]+ing\b/i;
 
 export function splitNarration(text: string): { found: string; next: string } {
   const t = text.replace(/\s+/g, ' ').trim();
-  const m = NARR_SEP.exec(t);
-  if (m && m.index >= 8 && t.length - (m.index + m[0].length) >= 8) {
-    const head = t.slice(0, m.index).trim();
-    // "Profiling X first - one call gives me..." is an intention with its reason, not a finding:
-    // labelling its first half "Found" would claim a result the run has not had yet.
-    if (NARR_INTENT.test(head)) return { found: '', next: t };
+  // "Profiling X first - one call gives me..." is an intention with its reason, not a finding:
+  // labelling its first half "Found" would claim a result the run has not had yet.
+  if (NARR_INTENT.test(t)) return { found: '', next: t };
+  // A dash also ELABORATES ("an Amazon CloudFront edge (US) — the domain resolved to it at 15:50"),
+  // and splitting there labelled half a finding "Next". So a separator only splits when what follows
+  // it reads as an intention; each one is tried in turn, and with none the whole line is the finding.
+  const sep = new RegExp(NARR_SEP.source, 'g');
+  for (let m = sep.exec(t); m; m = sep.exec(t)) {
+    if (m.index < 8 || t.length - (m.index + m[0].length) < 8) continue;
     const rest = t.slice(m.index + m[0].length).trim();
-    return { found: head, next: rest.charAt(0).toUpperCase() + rest.slice(1) };
+    if (!NARR_INTENT.test(rest)) continue;
+    return { found: t.slice(0, m.index).trim(), next: rest.charAt(0).toUpperCase() + rest.slice(1) };
   }
-  return NARR_INTENT.test(t) ? { found: '', next: t } : { found: t, next: '' };
+  return { found: t, next: '' };
 }
 
 const Narration = memo(function Narration({ text, className }: { text: string; className?: string }) {
@@ -628,20 +639,6 @@ const Narration = memo(function Narration({ text, className }: { text: string; c
     </div>
   );
 });
-
-/**
- * Which step each group of the trail is. A STEP is one dispatch of the model's calls — one card, or
- * one parallel group — and the narration log and the tool cards number them from the SAME grouping,
- * so "step 4" on the left is always "step 4" on the right.
- */
-function stepNumbers(groups: TrailGroup[]): Map<number, number> {
-  const m = new Map<number, number>();
-  let n = 0;
-  for (const g of groups) {
-    if (g.g === 'lane' || (g.g === 'one' && g.node.k === 'tool')) m.set(g.key, ++n);
-  }
-  return m;
-}
 
 const ToolCall = memo(function ToolCall({ e, live }: { e: AiTranscriptEntry; live: boolean }) {
   const [open, setOpen] = useState(false);
@@ -828,30 +825,37 @@ function countsOf(nodes: TrailNode[]): { bits: string[]; pending: boolean; tools
  * collapses to its head, which still says how much work there was and what the latest step found.
  * It is open for the turn being read and closed for the earlier turns of a conversation.
  */
+type Dispatch = { key: number; calls: AiTranscriptEntry[]; cards: Array<Extract<TrailNode, { k: 'tool' }>> };
 type LogItem =
-  | { t: 'step'; key: number; n: number; lead: string; calls: AiTranscriptEntry[]; agents: AgentRow[];
-      /** a later dispatch of the SAME model turn (a second write goes out on its own): it shares the
-       *  narration of the step before it rather than having none */
-      sameTurnAs?: number }
+  | { t: 'step'; key: number; n: number; lead: string; dispatches: Dispatch[]; agents: AgentRow[] }
   | { t: 'note'; key: number; text: string }
   | { t: 'say'; key: number; text: string };
 
+/**
+ * A STEP IS ONE MODEL TURN. A turn's calls can go out as several dispatches — a write always goes
+ * out on its own, so a turn that wrote a note and three indicators is four dispatches — and numbering
+ * the dispatches read "16 steps" for a 10-turn run, with most of them saying "part of the same move".
+ * A dispatch starts a new step when it opens a model turn or carries narration of its own; otherwise
+ * it is one more call line of the step it belongs to.
+ */
 function logItems(groups: TrailGroup[]): LogItem[] {
   const out: LogItem[] = [];
-  const steps = stepNumbers(groups);
+  let cur: Extract<LogItem, { t: 'step' }> | null = null;
+  let n = 0;
   for (const g of groups) {
-    const n = steps.get(g.key);
-    if (n !== undefined) {
-      const tools = g.g === 'lane' ? g.nodes
-        : g.g === 'one' && g.node.k === 'tool' ? [g.node] : [];
-      const lead = tools.map((x) => x.lead).find((l) => l.trim()) ?? '';
-      const turnStart = g.g === 'lane' ? g.turn : (g.g === 'one' && g.node.turn);
-      const prev = [...out].reverse().find((i): i is Extract<LogItem, { t: 'step' }> => i.t === 'step');
-      out.push({ t: 'step', key: g.key, n, lead, calls: tools.map((x) => x.e), agents: [],
-                 sameTurnAs: !lead && !turnStart && prev ? (prev.sameTurnAs ?? prev.n) : undefined });
+    const cards = g.g === 'lane' ? g.nodes : g.g === 'one' && g.node.k === 'tool' ? [g.node] : [];
+    if (cards.length) {
+      const lead = cards.map((x) => x.lead).find((l) => l.trim()) ?? '';
+      const turnStart = g.g === 'lane' ? g.turn : cards[0]!.turn;
+      const dispatch = { key: g.key, calls: cards.map((x) => x.e), cards };
+      if (cur && !lead && !turnStart) {
+        cur.dispatches.push(dispatch);
+      } else {
+        cur = { t: 'step', key: g.key, n: ++n, lead, dispatches: [dispatch], agents: [] };
+        out.push(cur);
+      }
     } else if (g.g === 'agents') {
-      const last = [...out].reverse().find((i): i is Extract<LogItem, { t: 'step' }> => i.t === 'step');
-      if (last) last.agents = [...last.agents.filter((r) => !g.rows.some((x) => x.agent === r.agent)), ...g.rows];
+      if (cur) cur.agents = [...cur.agents.filter((r) => !g.rows.some((x) => x.agent === r.agent)), ...g.rows];
     } else if (g.g === 'one' && g.node.k === 'note') {
       out.push({ t: 'note', key: g.key, text: g.node.text });
     } else if (g.g === 'one' && g.node.k === 'prose') {
@@ -899,11 +903,7 @@ const WorkLog = memo(function WorkLog({ nodes, live, startOpen, tailPrefix, onPa
     );
   }
 
-  const groups = groupTrail(nodes);
-  const items = logItems(groups);
-  const byStep = new Map<number, TrailGroup>();
-  const nums = stepNumbers(groups);
-  for (const g of groups) { const n = nums.get(g.key); if (n !== undefined) byStep.set(n, g); }
+  const items = logItems(groupTrail(nodes));
   const steps = items.filter((i): i is Extract<LogItem, { t: 'step' }> => i.t === 'step');
   const { bits, inflight } = countsOf(nodes);
   const lastLead = [...steps].reverse().find((s) => s.lead.trim());
@@ -946,14 +946,10 @@ const WorkLog = memo(function WorkLog({ nodes, live, startOpen, tailPrefix, onPa
             if (it.t === 'say') {
               return <li key={it.key} className="nlog__say"><Narration text={it.text} /></li>;
             }
-            const running = it.calls.filter((c) => c.ok === null).length;
-            const refused = it.calls.filter((c) => c.ok === false).length;
-            const writes = it.calls.some((c) => c.writes);
+            const all = it.dispatches.flatMap((d) => d.calls);
+            const refused = all.filter((c) => c.ok === false).length;
+            const writes = all.some((c) => c.writes);
             const now = live && i === items.length - 1 && !tailPrefix;
-            const one = it.calls.length === 1 ? it.calls[0]! : null;
-            const shown = detail.has(it.n);
-            const g = byStep.get(it.n);
-            const cards = g && g.g === 'lane' ? g.nodes : g && g.g === 'one' && g.node.k === 'tool' ? [g.node] : [];
             return (
               <li key={it.key} className={cx('nlog__step', now && 'nlog__step--now', writes && 'nlog__step--write',
                                               refused > 0 && 'nlog__step--bad')}>
@@ -961,28 +957,38 @@ const WorkLog = memo(function WorkLog({ nodes, live, startOpen, tailPrefix, onPa
                 <div className="nlog__body">
                   {it.lead.trim()
                     ? <Narration text={it.lead} />
-                    : it.sameTurnAs !== undefined
-                      ? <div className="nlog__silent">Part of the same move as step {it.sameTurnAs}.</div>
-                      : <div className="nlog__silent">No commentary for this step.</div>}
-                  <button type="button" className="nlog__calls" aria-expanded={shown} onClick={() => toggleDetail(it.n)}
-                          title={shown ? 'hide the tool calls of this step' : 'show the tool calls of this step'}>
-                    {running > 0 && live
-                      ? <span className="spinner" style={{ width: 9, height: 9, borderWidth: 1.5 }} aria-hidden />
-                      : refused ? <Icon.Warn /> : <Icon.Check />}
-                    <span className="nlog__names">{callNames(it.calls)}</span>
-                    {it.calls.length > 1 && <span className="nlog__tag">{it.calls.length} at once</span>}
-                    {writes && <span className="nlog__tag nlog__tag--write">changes the case</span>}
-                    {one && one.ok !== null && !!one.summary && (
-                      <span className="nlog__got">{one.ok ? '→ ' : 'refused — '}{one.summary}</span>
-                    )}
-                    {!one && refused > 0 && <span className="nlog__got">{refused} refused</span>}
-                    <span className="nlog__more">{shown ? 'hide details' : 'details'}</span>
-                  </button>
-                  {shown && (
-                    <div className="nlog__detail">
-                      {cards.map((c) => <ToolCall key={c.key} e={c.e} live={live} />)}
-                    </div>
-                  )}
+                    : <div className="nlog__silent">No commentary for this step.</div>}
+                  {it.dispatches.map((d) => {
+                    const running = d.calls.filter((c) => c.ok === null).length;
+                    const bad = d.calls.filter((c) => c.ok === false).length;
+                    const wrote = d.calls.some((c) => c.writes);
+                    const one = d.calls.length === 1 ? d.calls[0]! : null;
+                    const shown = detail.has(d.key);
+                    return (
+                      <div key={d.key} className="nlog__dispatch">
+                        <button type="button" className={cx('nlog__calls', bad > 0 && 'nlog__calls--bad')}
+                                aria-expanded={shown} onClick={() => toggleDetail(d.key)}
+                                title={shown ? 'hide these tool calls' : 'show these tool calls'}>
+                          {running > 0 && live
+                            ? <span className="spinner" style={{ width: 9, height: 9, borderWidth: 1.5 }} aria-hidden />
+                            : bad ? <Icon.Warn /> : <Icon.Check />}
+                          <span className="nlog__names">{callNames(d.calls)}</span>
+                          {d.calls.length > 1 && <span className="nlog__tag">{d.calls.length} at once</span>}
+                          {wrote && <span className="nlog__tag nlog__tag--write">changes the case</span>}
+                          {one && one.ok !== null && !!one.summary && (
+                            <span className="nlog__got">{one.ok ? '→ ' : 'refused — '}{one.summary}</span>
+                          )}
+                          {!one && bad > 0 && <span className="nlog__got">{bad} refused</span>}
+                          <span className="nlog__more">{shown ? 'hide details' : 'details'}</span>
+                        </button>
+                        {shown && (
+                          <div className="nlog__detail">
+                            {d.cards.map((c) => <ToolCall key={c.key} e={c.e} live={live} />)}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                   {it.agents.length > 0 && (
                     <ul className="nlog__agents">
                       {it.agents.map((a) => (
