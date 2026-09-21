@@ -22,7 +22,7 @@ import numpy as np
 
 from .derived import AsyncCache, BuildCancelled, DEFAULT_SYNC_LIMIT
 from .models import Event, GraphEdge, GraphNode, SEV_ORDER
-from .normalize import AKIA_RE, IPV4_RE, IPV6_RE, KEYFP_RE, is_private_ip
+from .normalize import AKIA_RE, IPV4_RE, IPV6_RE, KEYFP_RE, is_private_ip, pct_decode
 
 # ----------------------------------------------------------------------------- vocab
 NODE_TYPES = ("ip", "user", "host", "process", "pid", "file", "hash", "domain", "url", "port", "email", "key",
@@ -134,26 +134,7 @@ def _may_hold_domain(head_lower: str) -> bool:
 
 URL_RE = re.compile(r"\b(https?://[^\s\"'<>()\]]{4,300})", re.I)
 
-_PCT_RE = re.compile(r"%[0-9A-Fa-f]{2}")
-
-
-def pct_decode(s: str) -> str:
-    """`s` with its %xx escapes decoded (UTF-8), twice when it was encoded twice (%2540 -> %40 -> @).
-
-    Reported from the analyst's proxy log: a login callback URL carried `email=name%40gmail.com` in
-    its query string. There is no literal '@' in that, so EMAIL_RE could not see an address, and
-    DOMAIN_RE — for which '%' is a word boundary — read the tail as the domain `40gmail.com`: a node
-    for a domain that does not exist, and no node for the email that does. The domain / email / URL
-    patterns read this decoded view instead; the raw line is never changed. A string with no valid
-    %xx escape is returned as it is, so the common case costs one substring test.
-    """
-    if "%" not in s or not _PCT_RE.search(s):
-        return s
-    from urllib.parse import unquote
-    d = unquote(s, errors="replace")
-    if "%" in d and _PCT_RE.search(d):
-        d = unquote(d, errors="replace")
-    return d
+# `pct_decode` lives in normalize (imported above) so search and the graph decode identically.
 EMAIL_RE = re.compile(r"\b([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\b")
 WIN_PATH_RE = re.compile(r"(?<![\w\\])([A-Za-z]:\\(?:[^\\/:*?\"<>|\r\n]+\\)*[^\\/:*?\"<>|\r\n]+)")
 NIX_PATH_RE = re.compile(r"(?<![\w/])(/(?:tmp|root|home|etc|var|opt|usr|dev|srv|mnt|data|bin|sbin|lib|proc|sys)/[\w./+-]+)")

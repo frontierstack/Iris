@@ -340,6 +340,27 @@ def is_public_ip(ip: str) -> bool:
     return not (addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_reserved or addr.is_unspecified)
 
 
+_PCT_RE = re.compile(r"%[0-9A-Fa-f]{2}")
+
+
+def pct_decode(s: str) -> str:
+    """`s` with its %xx escapes decoded (UTF-8), twice when it was encoded twice (%2540 -> %40 -> @).
+
+    A value that came out of a URL is percent-encoded: an account taken from a query string is
+    `name%40domain`, not `name@domain`, and searching `user:name@domain` found nothing. Applied to the
+    event's user and host and to the entities built from them, and to what the entity graph reads for
+    domains / emails / URLs (see graph.extract). The raw line and the parsed fields are never changed.
+    A string with no valid %xx escape is returned as it is — the common case costs one substring test.
+    """
+    if not s or "%" not in s or not _PCT_RE.search(s):
+        return s
+    from urllib.parse import unquote
+    d = unquote(s, errors="replace")
+    if "%" in d and _PCT_RE.search(d):
+        d = unquote(d, errors="replace")
+    return d
+
+
 def extract_entities(ev: ParsedEvent) -> list[str]:
     """Return an ordered, de-duplicated list of entity names for an event."""
     found: list[str] = []
@@ -361,18 +382,19 @@ def extract_entities(ev: ParsedEvent) -> list[str]:
     for ip in IPV4_RE.findall(text):
         if ip not in ("0.0.0.0", "127.0.0.1", "255.255.255.255"):
             add(ip)
+    # users and hosts decoded (see pct_decode): an account out of a URL is `name%40domain`
     if ev.user:
-        add(ev.user)
+        add(pct_decode(ev.user))
     for f in USER_FIELDS:
         v = ev.fields.get(f)
         if v and len(v) < 64 and " " not in v:
-            add(v)
+            add(pct_decode(v))
     if ev.host:
-        add(ev.host)
+        add(pct_decode(ev.host))
     for f in HOST_FIELDS:
         v = ev.fields.get(f)
         if v and len(v) < 64 and " " not in v:
-            add(v)
+            add(pct_decode(v))
     # Both of these scan the WHOLE raw line, on every event, at ingest. Neither is case-insensitive
     # and each has a mandatory literal prefix, so a line without it cannot match - and `in` is a C
     # memmem while `findall` is Python re retrying at every position. Measured on an ordinary

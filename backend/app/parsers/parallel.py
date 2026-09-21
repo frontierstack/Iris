@@ -50,7 +50,7 @@ from multiprocessing import get_context
 from typing import Callable, Iterable, Optional
 
 from ..models import Event
-from ..normalize import extract_entities, infer_severity, to_iso
+from ..normalize import extract_entities, infer_severity, pct_decode, to_iso
 from .base import BaseParser, ParsedEvent
 
 UTC = timezone.utc
@@ -263,8 +263,9 @@ def normalize_batch(parsed: list[ParsedEvent], sid: str, filename: str, family: 
         # repeats them on every line, and the entities extracted from those lines (addresses, users,
         # domains) repeat just as hard. Each unshared repeat is a fresh string object — ~49 bytes of
         # header before a single character of content.
-        host = _shared(pe.host, shared) if pe.host else ""
-        user = _shared(pe.user, shared) if pe.user else ""
+        # decoded: an account or host taken out of a URL is percent-encoded (normalize.pct_decode)
+        host = _shared(pct_decode(pe.host), shared) if pe.host else ""
+        user = _shared(pct_decode(pe.user), shared) if pe.user else ""
         ents = [_shared(e, shared) if len(e) <= _SHARE_MAX_LEN else e for e in extract_entities(pe)]
         for ent in (host, user):
             if ent and ent not in ents and ent not in ("-", "—"):
