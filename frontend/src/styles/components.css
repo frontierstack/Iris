@@ -1792,21 +1792,6 @@ button.header__ctx:hover {
 .entity-chip .chip--mono { border-top-right-radius: 0; border-bottom-right-radius: 0; }
 .entity-chip .chip--icon { border-top-left-radius: 0; border-bottom-left-radius: 0; padding: 0 6px; display: inline-flex; align-items: center; }
 
-/* ───── Font pickers (Settings → Appearance) ─────
-   Every option is rendered IN the face it selects: a list that describes typefaces in the current
-   typeface tells you nothing about the one you are about to choose. */
-/* The sample and the NAME only. The prose that used to sit here overflowed the box at every width
-   worth having, and a sentence about letterforms teaches less than the letterforms do — it is a
-   tooltip now. */
-.fontpick { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
-.fontpick__item { display: flex; align-items: baseline; gap: 9px; text-align: left; padding: 9px 11px;
-  background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius-md);
-  cursor: pointer; min-width: 0; }
-.fontpick__item:hover { border-color: var(--border-hover); }
-.fontpick__item.on { border-color: var(--accent-border); background: var(--accent-bg); }
-.fontpick__sample { font-size: 16px; line-height: 1.1; color: var(--text-bright); flex: 0 0 auto; }
-.fontpick__name { font-size: var(--fs-sm); color: var(--text); min-width: 0; overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap; }
 
 /* ───────── Collapsible section CARDS (Anomalies) ─────────
    Each section is one bordered card. Closed, the card is its head alone: eyebrow, title and a

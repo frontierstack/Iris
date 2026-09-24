@@ -376,16 +376,55 @@ button:focus-visible,
    The face is an attribute on :root, exactly like the theme, so switching costs one attribute write
    and no re-render. Every family is bundled via @fontsource — Iris makes no network request at
    runtime, so a font can never be a way for a page to phone home. Each stack keeps real fallbacks so
-   a missing bundle degrades to the system UI face rather than to Times New Roman. */
-:root[data-font='inter']         { --font-ui: 'Inter', 'Helvetica Neue', Helvetica, Arial, sans-serif; }
-:root[data-font='space-grotesk']  { --font-ui: 'Space Grotesk', 'Helvetica Neue', Helvetica, Arial, sans-serif; }
+   a missing bundle degrades to the system UI face rather than to Times New Roman, and that fallback
+   is also what is on screen for the moment a lazily fetched face is still arriving
+   (theme/fontLoader.ts: only the three defaults are in the entry bundle). */
 :root[data-font='ibm-plex-sans'] { --font-ui: 'IBM Plex Sans', 'Helvetica Neue', Helvetica, Arial, sans-serif; }
+:root[data-font='inter']         { --font-ui: 'Inter', 'Helvetica Neue', Helvetica, Arial, sans-serif; }
+:root[data-font='geist']         { --font-ui: 'Geist', 'Helvetica Neue', Helvetica, Arial, sans-serif; }
+:root[data-font='public-sans']   { --font-ui: 'Public Sans', 'Helvetica Neue', Helvetica, Arial, sans-serif; }
 :root[data-font='source-sans']   { --font-ui: 'Source Sans 3', 'Helvetica Neue', Helvetica, Arial, sans-serif; }
+:root[data-font='atkinson']      { --font-ui: 'Atkinson Hyperlegible', 'Helvetica Neue', Helvetica, Arial, sans-serif; }
+:root[data-font='noto-sans']     { --font-ui: 'Noto Sans', 'Helvetica Neue', Helvetica, Arial, sans-serif; }
+:root[data-font='space-grotesk'] { --font-ui: 'Space Grotesk', 'Helvetica Neue', Helvetica, Arial, sans-serif; }
 :root[data-font='system']        { --font-ui: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
 
+/* JetBrains Mono is also the bare `:root` default, so that first paint has a face before any
+   script runs. It needs its OWN rule as well: without one, `data-mono='jetbrains-mono'`
+   selects nothing and the variable resolves by luck rather than by intent — and the day the
+   `:root` default changes, choosing it in Settings would silently select the new default. */
+:root[data-mono='jetbrains-mono']  { --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 :root[data-mono='ibm-plex-mono']   { --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+:root[data-mono='geist-mono']      { --font-mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+:root[data-mono='roboto-mono']     { --font-mono: 'Roboto Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+:root[data-mono='fira-code']       { --font-mono: 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+:root[data-mono='red-hat-mono']    { --font-mono: 'Red Hat Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 :root[data-mono='source-code-pro'] { --font-mono: 'Source Code Pro', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 :root[data-mono='system']          { --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Courier New', monospace; }
+
+/* LIGATURES OFF, EVERYWHERE THE MONO FACE IS USED. Fira Code's selling point is `!=` drawn as one
+   glyph, and in a log viewer that is a defect rather than a feature: an analyst reads `->` in a raw
+   line to know the line contains a hyphen and a greater-than, and a rule regex matches those two
+   characters. A face may not silently change what evidence looks like, so the contextual
+   alternates that draw the ligatures are disabled rather than the face being left out of the list —
+   its letterforms (a dotted zero, an unmistakable l/1/I) are exactly what a log viewer wants. */
+:root[data-mono='fira-code'] code,
+:root[data-mono='fira-code'] pre,
+:root[data-mono='fira-code'] .mono,
+:root[data-mono='fira-code'] .num,
+:root[data-mono='fira-code'] input,
+:root[data-mono='fira-code'] textarea { font-variant-ligatures: none; font-feature-settings: 'calt' 0, 'liga' 0; }
+
+/* ───── The assistant's reading face (Settings → Appearance) ─────
+   A third axis, because it is a third job: `--font-ui` has to survive a 10px table head and
+   `--font-mono` has to hold a log line, while this one only ever sets a paragraph in the AI panel's
+   792px answer column. `ui` is not a face — it is the opt-out, for an analyst who does not want a
+   serif, and it resolves to whatever the interface font currently is. */
+:root[data-serif='newsreader']   { --serif-face: 'Newsreader', Georgia, 'Times New Roman', serif; }
+:root[data-serif='source-serif'] { --serif-face: 'Source Serif 4', Georgia, 'Times New Roman', serif; }
+:root[data-serif='literata']     { --serif-face: 'Literata', Georgia, 'Times New Roman', serif; }
+:root[data-serif='lora']         { --serif-face: 'Lora', Georgia, 'Times New Roman', serif; }
+:root[data-serif='ui']           { --serif-face: var(--font-ui); }
 
 /* The template's live-tail indicator: the dot fades, it does not blink, and nothing else in the app
    animates a colour. Kept to that one use. */

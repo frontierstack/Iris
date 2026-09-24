@@ -275,10 +275,18 @@ export interface Case {
 }
 
 export type ThemeName = 'iris-dark' | 'graphite' | 'midnight-blue' | 'solar' | 'paper'
-  | 'nord' | 'ember' | 'daylight' | 'contrast';
-/** Interface and monospace faces, both bundled — see styles/base.css for the stacks. */
-export type FontName = 'space-grotesk' | 'inter' | 'ibm-plex-sans' | 'source-sans' | 'system';
-export type MonoName = 'jetbrains-mono' | 'ibm-plex-mono' | 'source-code-pro' | 'system';
+  | 'nord' | 'ember' | 'daylight' | 'contrast'
+  | 'abyss' | 'slate' | 'carbon' | 'moss' | 'plum' | 'phosphor' | 'sepia' | 'frost' | 'contrast-light';
+/** Interface, monospace and reading faces, all bundled — see styles/base.css for the stacks.
+ *  Only the three DEFAULTS are in the entry bundle; the rest are fetched when they are chosen
+ *  (theme/fontLoader.ts), so the list can grow without costing first paint. */
+export type FontName = 'space-grotesk' | 'inter' | 'ibm-plex-sans' | 'source-sans' | 'geist'
+  | 'public-sans' | 'atkinson' | 'noto-sans' | 'system';
+export type MonoName = 'jetbrains-mono' | 'ibm-plex-mono' | 'source-code-pro' | 'geist-mono'
+  | 'roboto-mono' | 'fira-code' | 'red-hat-mono' | 'system';
+/** The face the ASSISTANT'S ANSWER is set in (the reading column — see styles/ai-panel.css).
+ *  `ui` is not a face: it means "use the interface font", for anyone who does not want a serif. */
+export type SerifName = 'newsreader' | 'source-serif' | 'literata' | 'lora' | 'ui';
 export type ComputeMode = 'auto' | 'cuda' | 'cpu';
 export type AiProvider = 'none' | 'openai';
 

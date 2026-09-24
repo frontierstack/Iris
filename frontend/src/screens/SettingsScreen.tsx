@@ -10,7 +10,8 @@ import { Bar, ConfirmDialog, ErrorState, Loading, Toggle } from '../components/u
 import { qk, useCase, useCases, useInvalidateCaseData, useLibrary, useSaveSettings, useSettings } from '../hooks/queries';
 import { useToast } from '../hooks/useToast';
 import { useTheme } from '../theme/ThemeProvider';
-import { MONO_FONTS, THEMES, UI_FONTS, type Density } from '../theme/themes';
+import { FacePickers, ThemePicker } from '../components/AppearancePicker';
+import { type Density } from '../theme/themes';
 import { cx, fmtInt, fmtMB, fmtRelative, fmtTs } from '../utils/format';
 
 const DEFAULT_MODEL = 'gpt-4o-mini';
@@ -89,7 +90,7 @@ function Section({ id, title, desc, children, footer, danger, collapsible, defau
 
 /* ───────── Appearance ───────── */
 function Appearance({ settings }: { settings: Settings }) {
-  const { theme, density, font, mono, setTheme, setDensity, setFont, setMono } = useTheme();
+  const { theme, density, font, mono, serif, setTheme, setDensity, setFont, setMono, setSerif } = useTheme();
   const save = useSaveSettings();
   const toast = useToast();
   const pick = (t: ThemeName) => {
@@ -97,58 +98,9 @@ function Appearance({ settings }: { settings: Settings }) {
     if (settings.theme !== t) save.mutate({ theme: t }, { onError: (e) => toast.error('Theme saved locally only', e) });
   };
   return (
-    <Section id="appearance" title="Appearance" desc="theme, fonts and density · applied instantly, persisted in this browser (the theme also on the server)">
-      <div className="themes" role="radiogroup" aria-label="Theme">
-        {THEMES.map((t) => {
-          const s = t.swatch;
-          return (
-            <button key={t.id} role="radio" aria-checked={theme === t.id} className={cx('theme-card', theme === t.id && 'on')} onClick={() => pick(t.id)}>
-              <div className="theme-card__preview" style={{ background: s.bg, borderColor: s.border }}>
-                <div className="theme-card__side" style={{ background: s.sidebar, borderColor: s.border }} />
-                <div className="theme-card__main">
-                  <div className="theme-card__line" style={{ background: s.text }} />
-                  <div className="theme-card__line short" style={{ background: s.muted }} />
-                  <div className="theme-card__line" style={{ background: s.muted, width: '55%' }} />
-                  <div className="theme-card__accent" style={{ background: s.accent }} />
-                </div>
-              </div>
-              <div className="theme-card__name">{t.name}</div>
-              <div className="theme-card__desc">{t.desc}</div>
-            </button>
-          );
-        })}
-      </div>
-      {/* Each option previews ITSELF: a font list that describes faces in the current face tells you
-          nothing about the one you are choosing. */}
-      <div className="field">
-        <span className="field__label">Interface font</span>
-        <div className="fontpick" role="radiogroup" aria-label="Interface font">
-          {UI_FONTS.map((f) => (
-            <button key={f.id} role="radio" aria-checked={font === f.id}
-              className={cx('fontpick__item', font === f.id && 'on')} onClick={() => setFont(f.id)}
-              title={f.desc}>
-              <span className="fontpick__sample" style={{ fontFamily: f.stack }}>Aa</span>
-              <span className="fontpick__name" style={{ fontFamily: f.stack }}>{f.name}</span>
-            </button>
-          ))}
-        </div>
-      </div>
-      <div className="field">
-        <span className="field__label">Monospace font</span>
-        <div className="fontpick" role="radiogroup" aria-label="Monospace font">
-          {MONO_FONTS.map((f) => (
-            <button key={f.id} role="radio" aria-checked={mono === f.id}
-              className={cx('fontpick__item', mono === f.id && 'on')} onClick={() => setMono(f.id)}
-              title={f.desc}>
-              <span className="fontpick__name" style={{ fontFamily: f.stack }}>{f.name}</span>
-            </button>
-          ))}
-        </div>
-        <div className="field__hint">
-          Used for every log line, event id, address and hash. All faces are bundled with Iris — nothing
-          is fetched at runtime.
-        </div>
-      </div>
+    <Section id="appearance" title="Appearance" desc="theme, typefaces and density · applied instantly, persisted in this browser (the theme also on the server)">
+      <ThemePicker value={theme} onPick={pick} />
+      <FacePickers font={font} mono={mono} serif={serif} setFont={setFont} setMono={setMono} setSerif={setSerif} />
       <div className="field">
         <span className="field__label">Density</span>
         <div className="density" role="radiogroup" aria-label="Density">

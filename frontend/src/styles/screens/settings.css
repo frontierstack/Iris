@@ -201,9 +201,92 @@
 }
 
 /* ═══════ Appearance ═══════ */
+/* A picker head: what is chosen now on the left of the filter, so the answer to "which one am I on?"
+   never requires scanning eighteen cards for the selected rule. */
+.pickhead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.pickhead .field__label {
+  margin: 0;
+}
+.pickhead__now {
+  font-size: var(--fs-base);
+  color: var(--text-bright);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pickhead__filter {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  height: 28px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-md);
+  color: var(--muted-2);
+  flex: 0 0 auto;
+}
+.pickhead__filter:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+.pickhead__filter svg {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+}
+.pickhead__filter input {
+  background: none;
+  border: 0;
+  padding: 0;
+  width: 150px;
+  font-size: var(--fs-sm);
+}
+.pickhead__filter input:hover,
+.pickhead__filter input:focus-visible {
+  border: 0;
+  box-shadow: none;
+}
+.pickhead__clear {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+.pickhead__clear:hover {
+  color: var(--text);
+}
+.pickempty {
+  padding: 18px 2px;
+  font-size: var(--fs-base);
+  color: var(--muted);
+  max-width: 62ch;
+}
+
+/* A group is its label and its cards; the gap between groups is what separates them, and the label
+   is quiet because it is the placement that groups, not the heading. */
+.thmgroup + .thmgroup {
+  margin-top: 16px;
+}
+.thmgroup__head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 7px;
+}
+.thmgroup__head .num {
+  color: var(--muted-3);
+  letter-spacing: 0;
+}
+
 .themes {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
 }
 .theme-card {
@@ -229,44 +312,19 @@
 .theme-card.on .theme-card__name {
   color: var(--accent);
 }
-/* The preview's own colours are the THEME being previewed and are set inline from theme metadata —
-   that is the one place a literal is correct, because the point is to show a palette this document
-   is not rendered in. */
-.theme-card__preview {
-  height: 64px;
-  border: 1px solid;
-  border-radius: var(--radius-sm);
-  display: flex;
-  overflow: hidden;
-}
-.theme-card__side {
-  width: 22%;
-  border-right: 1px solid;
-}
-.theme-card__main {
-  flex: 1;
-  padding: 6px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.theme-card__line {
-  height: 3px;
-  width: 70%;
-}
-.theme-card__line.short {
-  width: 40%;
-}
-.theme-card__accent {
-  height: 6px;
-  width: 30%;
-  margin-top: auto;
-}
 .theme-card__name {
   margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
   font-size: var(--fs-base);
   font-weight: 500;
   color: var(--text-bright);
+}
+.theme-card__name svg {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
 }
 .theme-card__desc {
   font-size: var(--fs-xs);
@@ -274,9 +332,195 @@
   line-height: 1.4;
 }
 
-/* the font cards are the same object as a theme card, so they take the same selected marker */
-.settings .fontpick__item.on {
+/* ── the theme preview: a miniature of the app ──
+   Every colour in here is the THEME BEING PREVIEWED and arrives inline from theme metadata. That is
+   the one place in this codebase where a literal colour is correct, because the whole point is to
+   show a palette this document is not rendered in — so nothing below sets a colour of its own. */
+.tprev {
+  height: 78px;
+  border: 1px solid;
+  border-radius: var(--radius-sm);
+  display: flex;
+  overflow: hidden;
+}
+.tprev__side {
+  width: 26%;
+  border-right: 1px solid;
+  padding: 6px 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.tprev__brand {
+  height: 3px;
+  width: 62%;
+  opacity: 0.9;
+}
+.tprev__nav {
+  height: 2px;
+  width: 78%;
+  opacity: 0.5;
+}
+.tprev__nav--on {
+  width: 88%;
+  opacity: 1;
+}
+.tprev__main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.tprev__head {
+  height: 15px;
+  border-bottom: 1px solid;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 6px;
+}
+.tprev__head i {
+  height: 2px;
+  width: 26%;
+  opacity: 0.55;
+}
+.tprev__head i:last-child {
+  width: 14%;
+  height: 5px;
+  margin-left: auto;
+  opacity: 1;
+}
+.tprev__row {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 6px;
+  border-bottom: 1px solid;
+  opacity: 0.92;
+}
+.tprev__row:last-child {
+  border-bottom: 0;
+}
+.tprev__dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+}
+.tprev__bar {
+  height: 2px;
+  opacity: 0.8;
+}
+
+/* ── the face pickers ──
+   Wider cards than a theme card because each one carries a SAMPLE of the job the face does, and a
+   log line clipped at 150px shows nothing about whether the face fits a log line. */
+.facepick {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(258px, 1fr));
+  gap: 8px;
+}
+.face {
+  text-align: left;
+  padding: 9px 11px 10px;
+  min-width: 0;
+  cursor: pointer;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  transition: border-color var(--t-fast), background var(--t-fast);
+}
+.face:hover {
+  border-color: var(--border-hover);
+}
+.face.on {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
   box-shadow: inset 2px 0 0 var(--accent);
+}
+.face__top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.face__name {
+  font-size: var(--fs-2xl);
+  color: var(--text-bright);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.face.on .face__name {
+  color: var(--accent);
+}
+.face__top svg {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--accent);
+}
+.face__sample {
+  margin-top: 5px;
+  font-size: var(--fs-base);
+  line-height: 1.5;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.face__sample--mono {
+  font-size: var(--fs-sm);
+  letter-spacing: -0.01em;
+}
+.face__desc {
+  margin-top: 5px;
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+/* The three faces at once, on the surfaces they actually appear on: the argument for a pairing is
+   not any one of them, it is whether the mono line sits comfortably beside the interface label. */
+.typeprev {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--panel-2);
+  overflow: hidden;
+}
+.typeprev__row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border-2);
+}
+.typeprev__label {
+  font-family: var(--font-ui);
+  font-size: var(--fs-xl);
+  color: var(--text-bright);
+}
+.typeprev__val {
+  font-size: var(--fs-xl);
+  color: var(--accent);
+}
+.typeprev__mono {
+  font-family: var(--font-mono);
+  font-size: var(--fs-base);
+  color: var(--muted);
+  margin-left: auto;
+}
+.typeprev__prose {
+  margin: 0;
+  padding: 12px 14px 14px;
+  font-family: var(--aic-serif, var(--serif-face, Georgia, serif));
+  font-size: 16px;
+  line-height: 1.66;
+  color: var(--text-2);
+  max-width: 56ch;
 }
 
 .density {

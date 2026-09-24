@@ -91,8 +91,12 @@
 
 .aic {
   /* Newsreader is BUNDLED (@fontsource/newsreader, imported in main.tsx). Iris makes no runtime
-     network request for a font, so there is no <link> to Google Fonts anywhere in this app. */
-  --aic-serif: 'Newsreader', 'Iowan Old Style', Georgia, 'Times New Roman', serif;
+     network request for a font, so there is no <link> to Google Fonts anywhere in this app.
+     The analyst can choose another reading face (Settings -> Appearance), which sets `--serif-face`
+     on :root — see the `data-serif` rules in base.css. It is read through a var() FALLBACK rather
+     than being overridden there, because this variable is declared HERE, on `.aic`, and a
+     declaration on the element wins over one on an ancestor whatever the selector says. */
+  --aic-serif: var(--serif-face, 'Newsreader', 'Iowan Old Style', Georgia, 'Times New Roman', serif);
   --aic-head-h: 58px;
   --aic-col: 792px;
   --aic-wide: 1180px;   /* the turn's width: the narration log and the tool calls side by side */

@@ -1,38 +1,26 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import '@fontsource/space-grotesk/400.css';
-import '@fontsource/space-grotesk/500.css';
-import '@fontsource/space-grotesk/600.css';
-import '@fontsource/space-grotesk/700.css';
-// The other faces an analyst can choose in Settings -> Appearance. All BUNDLED: Iris makes no
-// network request at runtime, so a font cannot be a way for a page to phone home.
-import '@fontsource/inter/400.css';
-import '@fontsource/inter/500.css';
-import '@fontsource/inter/600.css';
-import '@fontsource/inter/700.css';
+// ONLY THE THREE DEFAULT FACES ARE IMPORTED HERE, and the reason is first paint: this is the entry
+// chunk, so anything in it is parsed before the first screen draws. Every other selectable face is
+// code-split and fetched when it is chosen (theme/fontLoader.ts) — the list of faces can then grow
+// without the default install paying for any of it. All of them are BUNDLED either way: Iris makes
+// no network request at runtime, so a font cannot be a way for a page to phone home.
+//
+// The interface face...
 import '@fontsource/ibm-plex-sans/400.css';
 import '@fontsource/ibm-plex-sans/500.css';
 import '@fontsource/ibm-plex-sans/600.css';
 import '@fontsource/ibm-plex-sans/700.css';
-import '@fontsource/source-sans-3/400.css';
-import '@fontsource/source-sans-3/600.css';
-import '@fontsource/source-sans-3/700.css';
-// The SERIF, and the one face that is not selectable in Settings: it belongs to the AI assistant's
-// answer (styles/ai-panel.css `--aic-serif`), which the template sets in Newsreader at 19px/1.66 so
-// the report reads like a document while everything around it stays mono or sans. Bundled like the
-// rest — the app never fetches a font at runtime, so there is no <link> to Google Fonts anywhere.
-import '@fontsource/newsreader/300.css';
-import '@fontsource/newsreader/400.css';
-import '@fontsource/newsreader/500.css';
-import '@fontsource/ibm-plex-mono/400.css';
-import '@fontsource/ibm-plex-mono/500.css';
-import '@fontsource/ibm-plex-mono/700.css';
-import '@fontsource/source-code-pro/400.css';
-import '@fontsource/source-code-pro/500.css';
-import '@fontsource/source-code-pro/700.css';
+// ...the monospace one, which is every log line, event id, address and hash...
 import '@fontsource/jetbrains-mono/400.css';
 import '@fontsource/jetbrains-mono/500.css';
 import '@fontsource/jetbrains-mono/700.css';
+// ...and the SERIF, which belongs to the AI assistant's answer (styles/ai-panel.css `--aic-serif`):
+// the template sets it in Newsreader at 19px/1.66 so the report reads like a document while
+// everything around it stays mono or sans.
+import '@fontsource/newsreader/300.css';
+import '@fontsource/newsreader/400.css';
+import '@fontsource/newsreader/500.css';
 import './styles/themes.css';
 import './styles/base.css';
 import './styles/components.css';
