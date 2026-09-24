@@ -585,6 +585,30 @@ read the evidence it is citing while it works, instead of opening and closing a 
 page underneath stays clickable and <kbd>Esc</kbd> no longer closes it (that would throw away a half-written
 objective); use the × on the title bar.
 
+**Following a thread.** An investigation is a walk: an address authenticates as an account, the account
+touches a host, the host writes a file — and the finding is usually the chain rather than any one link.
+The assistant walks it in ONE call (`trace_thread`) instead of one model turn per hop, which is where a
+long run's time actually goes. What comes back is the nodes it reached, the connections between them with
+the event ids that carry BOTH ends (so a link opens on the evidence for that link, not for one of its
+endpoints), and the chains leading out of your seed.
+
+It ranks by how SPECIFIC a connection is, not by how big: a neighbour is followed because a large share of
+a node's own activity involves it, or because the shared events carry detections or high severity. Anything
+that touches everything — a proxy, a resolver, a domain controller, a load balancer — is reported under
+*infrastructure* and deliberately not expanded. That is stated rather than hidden, because "Iris did not
+follow this" and "this leads nowhere" are different facts about your evidence.
+
+**What it has already asked, and what is still open.** Iris keeps a ledger of the run OUTSIDE the
+conversation: every distinct call with what it returned, everything written to the case, and the LEADS the
+evidence turned up that nothing has looked at yet. Leads are collected automatically from the results and
+closed automatically the moment a later call goes and looks at one, so the assistant spends no turns on
+bookkeeping. The ledger matters most at the moment the conversation is folded to fit the model's context
+window: the fold is where a smaller model used to lose the record and start re-running calls it had already
+made, and the ledger is handed back complete every time that happens. A run about to finish with leads still
+open is asked about them once — it can follow them, or rule each one out in a line — and the run's own
+summary reports how many were left, which is the honest measure of whether an investigation finished or
+merely stopped.
+
 **Worker agents, and automatic delegation.** The assistant can hand whole lines of enquiry to worker agents that research at the same time and report back; the panel shows them as a roster while they work — each agent's question, how many calls it has made and which tool it is on. Many models never choose to delegate, so with **Settings → AI assistant → Delegate automatically** on (the default) Iris does it for them: once a run has made a couple of tool turns on its own, it plans a split of what is left and runs an agent on each part. A question answered in a turn or two never triggers it, and a plan that says the remaining work is one dependent chain is respected. Agents only help if your AI provider can serve more than one request at a time: if it cannot, Iris measures that and says so once, with the fix (llama.cpp `--parallel 3`, Ollama `OLLAMA_NUM_PARALLEL`; vLLM and hosted APIs already do).
 
 **The loop guard.** A run that has stopped moving is stopped, whether or not the run limits are on — the limits
@@ -609,8 +633,28 @@ text the model receives, and the built-in prompt is readable there too. Saved pr
 `ai/system_prompts.json` in the data directory and are kept by *Clear all data*, like rules.
 
 ### 7. Settings
-**Appearance** (9 themes + the interface and monospace face + density; the default is *Iris dark*, the
-observability console palette — teal on graphite, IBM Plex Sans over JetBrains Mono) · **Compute** (GPU list, live utilization / VRAM / temp / power / CPU / RSS /
+
+**Appearance.** Eighteen themes, grouped by what they are FOR rather than listed flat — **Dark** (12),
+**Light** (4) and **High contrast** (2, one on black and one on white, for a projector, a screen read over
+someone's shoulder, or low vision). Each card previews the palette as a miniature of Iris itself, and a
+filter above them searches the name, the description and hidden tags, so *purple*, *grey*, *reading*,
+*night*, *a11y* and *print* each land on something. The default is *Iris dark*, the observability console
+palette — teal on graphite.
+
+Three type axes, because they are three different jobs: the **interface** face (every label, button and
+table head — 9 choices, default IBM Plex Sans), the **monospace** face (every log line, event id, address,
+hash and figure you compare down a column — 8 choices, default JetBrains Mono; Fira Code is offered with
+its ligatures switched OFF, because a face may not redraw `->` as one glyph in evidence), and the
+**assistant reading** face, which sets the AI panel's ANSWER column (5 choices, default Newsreader;
+*Match interface* opts out of the serif entirely). Every option is rendered in its own face beside a sample
+of the job it does, and a combined preview shows the three together.
+
+All faces are bundled with Iris and none is fetched from the internet at runtime — only the three defaults
+are in the first page load, and a face you choose is fetched from Iris itself the moment you pick it. Theme,
+faces and density persist in the browser; the theme is also saved on the server, so a new browser starts on
+it.
+
+**Compute** (GPU list, live utilization / VRAM / temp / power / CPU / RSS /
 parse throughput sampled every 2 s with 2–30 min charts, mode auto / CUDA / CPU, *Re-check now*, and
 **Two-phase ingest** — the auto-enrich toggle, which schedules *when* the expensive parse runs, not whether
 it runs) · **AI assistant**
