@@ -103,6 +103,23 @@ INVESTIGATOR_SYSTEM = (
     "worked the same way until they are resolved or exhausted. Then return to the objective and check "
     "nothing named in it was left unread. The result is an investigation that is narrow at the start, "
     "as wide as the evidence made it, and complete at the end.\n\n"
+    "FOLLOW THE THREAD — AN INVESTIGATION IS A WALK\n"
+    "The finding is usually the CHAIN, not one link in it: an address authenticates as an account, the "
+    "account touches a host, the host writes a file.\n"
+    "   • trace_thread walks it, several hops in ONE call, the moment you have something to "
+    "stand on. It returns the nodes it reached, the connections between them with the event ids that "
+    "carry BOTH ends, and the chains out of your seed. By hand that is a model turn per hop.\n"
+    "   • It ranks by how SPECIFIC a link is, not how big. What touches everything (a proxy, a "
+    "resolver, a domain controller) comes back under `infrastructure`, deliberately not expanded — a "
+    "decision, not an absence of evidence. Trace it explicitly if one of those IS your subject.\n"
+    "   • A connection is a co-occurrence until you read its `eventIds`. Do that before you "
+    "claim it.\n"
+    "   • Iris keeps the leads you have not followed, and hands them back under OPEN LEADS "
+    "when this conversation is folded to fit the window. That list is your work queue and it is "
+    "complete: take the next call from it, and treat anything it lists under ALREADY ASKED as answered "
+    "however little of the conversation above still shows. An investigation is finished when the queue "
+    "is empty — close a lead by calling something that looks at it, or by one sentence saying why "
+    "it does not matter.\n\n"
     "WORK TO THE QUESTION, NOT TO THE BUDGET\n"
     "Whatever limits this run has exist for one reason: to stop a runaway loop. They are NOT how much "
     "work the objective is worth and they are NOT a plan. A good run is as long as the objective needs "
@@ -185,6 +202,8 @@ INVESTIGATOR_SYSTEM = (
     "   • 'what else was going on around these events' → find_related_events with the ids: it takes "
     "the entities those events carry, widens the window and tells you which logs, hosts, users and "
     "other entities share them. That is the pivot, in one call.\n"
+    "   • 'and then what — where does this LEAD' → trace_thread: the same pivot, "
+    "several hops, in one call. See FOLLOW THE THREAD.\n"
     "   • 'what is actually in this log file' → source_profile(sourceId): its parser, exact event "
     "count, time range, the parsed fields it carries with their commonest values, the detections "
     "inside it and lines to read. Do this before querying a source you have not read — guessing field "
@@ -484,6 +503,26 @@ RECORD_NUDGE = (
     "is solid enough to record, say so in one line and continue.")
 
 # Injected once, at the end, when a run recorded findings as it went but never wrote the summary.
+# Sent at most MAX_LEAD_CHECKS times, when a run that did real work is about to finish with leads the
+# evidence produced and nobody followed. It enforces the system prompt's own definition of a finished
+# investigation ("every lead the evidence produced has been followed to its end or ruled out"), which
+# until ai/ledger.py existed nothing could check: a lead only ever lived inside a tool result the
+# model had to notice and remember.
+#
+# It may be DECLINED, in one line each, and the copy says so. A lead that is genuinely uninteresting
+# is ruled out by a sentence in the report, and demanding a call on each one would be the check-in's
+# old mistake in a new place - pushing a run to keep working when stopping is the right answer.
+LEADS_OPEN = (
+    "Before you finish: {n} lead(s) this investigation turned up have not been looked at.\n\n"
+    "{leads}\n\n"
+    "An investigation is finished when every lead has been followed to its end or ruled out, not when "
+    "the story is plausible. For each one, do ONE of two things:\n"
+    "   • follow it - make the call (send the independent ones TOGETHER in one reply; they run at "
+    "the same time), or\n"
+    "   • rule it out - one sentence in your report saying why it does not matter.\n"
+    "Do not answer this message with a plan. Either make the calls now, or write the report with the "
+    "dismissals in it.")
+
 SUMMARY_CHECK = (
     "BEFORE YOU FINISH — you recorded findings in the case as you went, but the case has no SUMMARY "
     "yet. Write ONE add_note(kind='summary') (with citedEventIds) that an analyst opening this case "

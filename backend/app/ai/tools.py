@@ -480,14 +480,30 @@ def _shed(out: dict[str, Any], budget: int, steps: list[tuple[str, Callable[[], 
     answer (every row the caller asked for, every count) and gives up the detail, which is the right
     way round. Never drop a ROW here: the caller named those ids.
     """
+    # THE EXPLANATION COSTS BYTES TOO, and it is added AFTER the loop — so a budget measured without
+    # it is a budget the result then overshoots by exactly the length of the sentence saying what was
+    # shed. Harmless while `why` was one line; `_fit_trace`'s is a paragraph, and a trace that shed
+    # its way to 5,469 bytes came back at 6,047 and was clipped mid-JSON by the very mechanism this
+    # function exists to avoid.
+    #
+    # The note is MEASURED each pass rather than reserved up front, because the labels in it are the
+    # ones actually applied. Reserving for the whole ladder was tried first and is much worse than
+    # the bug: a caller with thirty rungs then hands the loop a budget of a few hundred bytes and it
+    # sheds the entire answer to make room for a sentence about having shed it.
+    def note_for(labels: list[str]) -> str:
+        return ", ".join(labels) + " — " + why
+
+    def projected(labels: list[str]) -> int:
+        return 0 if not labels else _size({"trimmed": note_for(labels)}) - 1   # -1 for the outer brace
+
     shed: list[str] = []
     for label, apply in steps:
-        if _size(out) <= budget:
+        if _size(out) + projected(shed) <= budget:
             break
         apply()
         shed.append(label)
     if shed:
-        out["trimmed"] = ", ".join(shed) + " — " + why
+        out["trimmed"] = note_for(shed)
     return out
 
 
@@ -2178,6 +2194,500 @@ def _find_related_events(args: dict[str, Any], ctx: RunContext) -> dict[str, Any
         raw_cap, field_cap = _detail_caps(len(picked))
         out["rows"] = [_row(r, {"raw"}, raw_cap, field_cap) for r in store.stamp_membership(picked)]
     return _fit_rows(out)
+
+
+# ================================================================== FOLLOWING THE THREAD
+#
+# `find_related_events` answers ONE hop: here are the seeds, here is what shares their entities. An
+# investigation is not one hop. The address names an account, the account touches a host, the host
+# runs a process, the process writes a file — and every one of those steps used to cost a whole model
+# turn: read the result, pick a value out of it, write another call. Measured on the analyst's own
+# gateway, a model turn is ~30 s and a tool call is ~0.5 s, so a four-hop thread spent two minutes of
+# a ten-minute run deciding what to type, and a smaller model frequently lost the thread halfway and
+# went back to the seed.
+#
+# `trace_thread` does the walk in the backend. It is a bounded breadth-first expansion over the
+# co-occurrence of entities, and the whole value is in WHICH neighbours it keeps, because the naive
+# answer — the ones that co-occur most — returns the proxy, the resolver and the domain controller
+# every single time. See `_thread_score`.
+#
+# Three rules it shares with the rest of this module:
+#   • it never BUILDS a derived structure (the entity graph is used when it is already there, and
+#     its absence is declared, never quietly worked around);
+#   • nothing is omitted silently — the hubs it refuses to expand come back in `infrastructure`
+#     with their numbers, because "I did not follow this" and "this leads nowhere" are different
+#     facts about the evidence;
+#   • every connection cites REAL event ids from the events that actually carry BOTH ends, so a
+#     claim about a link opens on the evidence for that link and not for one of its endpoints. That
+#     is the same rule `graph_rules._cite_edge` exists for.
+
+TRACE_HOPS_MAX = 3
+TRACE_BRANCH_MAX = 6
+TRACE_ROW_CAP = 2500      # events sampled per expansion; the TOTAL is always exact (search reports it)
+TRACE_NODES_MAX = 60      # nodes one trace may report
+TRACE_EDGE_IDS = 6        # citations kept per connection
+TRACE_HUB_DEGREE = 24     # distinct co-occurring entities past which a node is treated as infrastructure
+TRACE_LEAD_CAP = 12       # unexpanded nodes offered back as leads (ai/ledger.py absorbs these)
+TRACE_MAX_EXPANSIONS = 80  # searches one walk may make, whatever the hops and branch allow
+# Seconds of the call's own budget kept in reserve. A walk is many searches and each one can be
+# slow on a pool whose index is cold (measured elsewhere in this project: 3-7 s on the scan path),
+# so a wide trace can genuinely run out. Stopping EARLY and returning what it has is much better
+# than `ctx.check()` refusing the call at the deadline, which throws away every hop it already
+# walked - the same reasoning as `delegate_investigation`'s longer rope, from the other end.
+TRACE_RESERVE_SEC = 8.0
+
+_HEX = re.compile(r"^[0-9a-f]{32}$|^[0-9a-f]{40}$|^[0-9a-f]{64}$", re.I)
+_DOMAINISH = re.compile(r"^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$", re.I)
+
+
+def _guess_kind(value: str) -> str:
+    """The TYPE of an entity value, from the value alone.
+
+    The entity graph knows this properly, but it is often not built and this tool may not build it
+    (see `entity_profile`'s rule). A guess is enough for what it is used for here — weighting a lead
+    and labelling a node — and it is never presented as the graph's own typing.
+    """
+    from ..graph import plausible_ip
+    v = (value or "").strip()
+    if not v:
+        return "entity"
+    if plausible_ip(v):
+        return "ip"
+    if "@" in v and "." in v.split("@")[-1]:
+        return "email"
+    if _HEX.match(v):
+        return "hash"
+    if "/" in v or "\\" in v:
+        return "file"
+    if _DOMAINISH.match(v):
+        return "domain"
+    return "entity"
+
+
+#: How much a neighbour's TYPE is worth following. An address, an account and a hash are what an
+#: investigation pivots on; a port or a bare number almost never is.
+_TRACE_KIND_WEIGHT = {"ip": 1.15, "email": 1.1, "hash": 1.2, "domain": 1.05, "file": 0.85,
+                      "entity": 1.0}
+
+
+def _thread_score(shared: int, sampled: int, sev_hits: int, det_hits: int, hubbiness: int,
+                  kind: str) -> float:
+    """How worth following a neighbour is. The ranking IS this tool.
+
+    Ranking by raw co-occurrence returns the busiest thing in the workspace, which is the proxy, the
+    resolver or the domain controller — true, useless, and the same answer for every seed. What makes
+    a connection interesting is not how big it is but how SPECIFIC:
+
+      • FOCUS — the share of the node's own activity that involves this neighbour. A neighbour on
+        90 % of an account's events is that account's story; one on 2 % is background.
+      • SEVERITY and DETECTIONS on the events that carry BOTH ends. Somebody else's judgement that
+        the shared events matter is the cheapest good signal available here.
+      • HUBBINESS — how many of the nodes already expanded also touch it. Infrastructure touches
+        everything, and it is the one property that separates it from a pivot without needing a
+        global count of anything. Past `TRACE_HUB_DEGREE` a node is not expanded at all and is
+        reported as infrastructure instead.
+      • a small floor on RARE neighbours, because a value seen three times next to a compromised
+        account is a better lead than one seen three thousand times.
+    """
+    if shared <= 0 or sampled <= 0:
+        return 0.0
+    focus = min(1.0, shared / float(sampled))
+    sev = (sev_hits / float(shared)) if shared else 0.0
+    det = (det_hits / float(shared)) if shared else 0.0
+    rare = 1.15 if shared <= 4 else (0.85 if shared > 0.8 * sampled else 1.0)
+    hub = 1.0 / (1.0 + 0.45 * max(0, hubbiness - 1))
+    return round(focus * (1.0 + 0.7 * sev + 0.8 * det) * rare * hub
+                 * _TRACE_KIND_WEIGHT.get(kind, 1.0), 4)
+
+
+def _fit_trace(out: dict[str, Any], budget: int = ROW_BUDGET) -> dict[str, Any]:
+    """Fit a thread trace into ONE tool result, shedding in a stated order.
+
+    Measured on the SAMPLE CASE (2,548 events, the smallest pool this repo has) a three-hop trace
+    came out at 15.4 kB against a 6,000-character clip — and `investigator._clip` cuts from the END,
+    so the model would have been handed a JSON document truncated mid-object. That is worse than a
+    smaller answer in every way: it is unreadable, and nothing says so.
+
+    The shedding order is the answer's own priority. The CHAINS go last because a path from a seed
+    to something three hops away IS the finding; the per-connection citations go late because a
+    connection nobody can open is an assertion; what goes first is breadth (weak connections, distant
+    nodes) and decoration (the log names, the timestamps), which is detail the model can re-ask for
+    with a narrower trace. Everything shed is counted and stated, never silently dropped — a trace
+    that quietly returned half its connections would read as "these are the connections".
+    """
+    def trim(key: str, n: int) -> Callable[[], None]:
+        def go() -> None:
+            rows = out.get(key)
+            if isinstance(rows, list) and len(rows) > n:
+                out[key + "Dropped"] = out.get(key + "Dropped", 0) + len(rows) - n
+                del rows[n:]
+        return go
+
+    def trim_connections(n: int) -> Callable[[], None]:
+        """Trim the connection list, but NEVER a link a returned CHAIN walks.
+
+        Found by `test_a_chain_is_returned_as_a_chain` going red: the plain trim above dropped a
+        connection that a path depended on, so the answer claimed `a -> b -> c` and carried no
+        evidence for `a -> b`. A chain whose steps cannot be opened is exactly the assertion this
+        tool exists not to make — and the chain is the FINDING, so the rest of the list gives way to
+        it rather than the other way round.
+        """
+        def go() -> None:
+            rows = out.get("connections")
+            if not isinstance(rows, list) or len(rows) <= n:
+                return
+            need = set()
+            for p in out.get("paths") or []:
+                chain = p.get("chain") or []
+                for a, b in zip(chain, chain[1:]):
+                    need.add((a, b))
+                    need.add((b, a))
+            keep = [c for c in rows if (c.get("from"), c.get("to")) in need]
+            rest = [c for c in rows if (c.get("from"), c.get("to")) not in need]
+            kept = keep + rest[:max(0, n - len(keep))]
+            out["connectionsDropped"] = out.get("connectionsDropped", 0) + len(rows) - len(kept)
+            # back into the answer's own order (strongest first), so the list still reads as a ranking
+            order = {id(c): i for i, c in enumerate(rows)}
+            rows[:] = sorted(kept, key=lambda c: order[id(c)])
+        return go
+
+    def thin(key: str, field: str, n: int) -> Callable[[], None]:
+        def go() -> None:
+            for r in out.get(key) or []:
+                v = r.get(field)
+                if isinstance(v, list) and len(v) > n:
+                    del v[n:]
+        return go
+
+    def drop(key: str, field: str) -> Callable[[], None]:
+        def go() -> None:
+            for r in out.get(key) or []:
+                r.pop(field, None)
+        return go
+
+    # The CHAINS are trimmed before the second and third pass over the connections, and that
+    # ordering is load-bearing rather than aesthetic: `trim_connections` keeps every link a
+    # surviving chain walks, so while six chains are held nothing below them can free much. Cutting
+    # the chain list first releases the links it was protecting. Chains are never taken below one —
+    # a trace with no chain in it has lost the thing it was called for.
+    return _shed(out, budget, [
+        ("weaker connections", trim_connections(24)),
+        ("the log names on each connection", drop("connections", "logs")),
+        ("distant nodes", trim("nodes", 30)),
+        ("each node's first and last timestamp", drop("nodes", "first")),
+        ("...and its last", drop("nodes", "last")),
+        ("the source list on each node", drop("nodes", "sources")),
+        ("some chains", trim("paths", 3)),
+        ("more connections", trim_connections(14)),
+        ("fewer citations per connection", thin("connections", "eventIds", 3)),
+        ("the explanation of each connection", drop("connections", "why")),
+        ("more nodes", trim("nodes", 16)),
+        ("how many neighbours each node had", drop("nodes", "distinctNeighbours")),
+        ("all but the strongest chain", trim("paths", 1)),
+        ("connections that no chain walks", trim_connections(8)),
+        ("one citation per connection", thin("connections", "eventIds", 1)),
+        ("all but the nearest nodes", trim("nodes", 8)),
+    ], "to fit one tool result. For the full detail of one part of this, trace again from a node in "
+       "it with fewer hops, a smaller branch or a narrower windowMinutes.")
+
+
+@tool("trace_thread",
+      "FOLLOW THE THREAD, SEVERAL HOPS AT ONCE — the call that turns a lead into an investigation. "
+      "Give it the events or the entities you are standing on and it walks the connections for you: "
+      "what shares events with them, what shares events with THAT, and so on for up to three hops, "
+      "returning the nodes it reached, the connections between them with real event ids for each "
+      "connection, and the chains that lead from your seed to whatever it found. It is "
+      "find_related_events repeated automatically, and it is the difference between spending four "
+      "model turns walking ip -> account -> host -> process and spending one. "
+      "IT RANKS BY SPECIFICITY, NOT BY VOLUME: a neighbour is followed because a large share of the "
+      "node's own activity involves it, or because the shared events carry detections or high "
+      "severity — not because it is busy. Anything that touches everything (a proxy, a resolver, a "
+      "domain controller) is reported in `infrastructure` and deliberately NOT expanded, so read "
+      "that list before concluding something is absent. Use it right after a detection, an "
+      "indicator or an entity_profile that found something; use find_related_events instead when "
+      "one hop is genuinely all you want.",
+      {"seedEventIds": {"type": "array", "items": {"type": "string"},
+                        "description": "events to start from, 1-40 — their entities become the seeds"},
+       "seedEntities": {"type": "array", "items": {"type": "string"},
+                        "description": "start from these values instead of (or as well as) events: "
+                                       "IPs, accounts, hosts, hashes, domains. 1-10"},
+       "hops": {"type": "integer", "description": "how many steps to follow, 1-3 (default 2)"},
+       "branch": {"type": "integer",
+                  "description": "neighbours kept per node per hop, 1-6 (default 4). Raise it for a "
+                                 "wide sweep, lower it to follow one line"},
+       "windowMinutes": {"type": "integer",
+                         "description": "bound the whole trace to this many minutes either side of the "
+                                        "seed events, 0-10080. Default 120 when the seeds have "
+                                        "timestamps; 0 means the whole pool, which on a busy entity "
+                                        "traces its entire life rather than this incident"},
+       "scope": {"type": "string", "enum": ["all", "case"]}},
+      [], budget_factor=2.0)
+def _trace_thread(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
+    from ..store import _iso_to_epoch
+    from math import isfinite
+    store = _store()
+    scope = _scope(args)
+    hops = _int(args, "hops", 2, 1, TRACE_HOPS_MAX)
+    branch = _int(args, "branch", 4, 1, TRACE_BRANCH_MAX)
+
+    ids = _ids(args, "seedEventIds", cap=40)
+    seeds: list[str] = []
+    missing: list[str] = []
+    seed_events: list[Any] = []
+    for i in ids:
+        e = store.event(i)
+        if e is None:
+            missing.append(i)
+        else:
+            seed_events.append(e)
+    for e in seed_events:
+        for v in e.entities:
+            if v not in seeds:
+                seeds.append(v)
+    for v in (args.get("seedEntities") or [])[:10]:
+        v = _s(v, 200).strip()
+        if v and v not in seeds:
+            seeds.append(v)
+    if not seeds:
+        if ids and not seed_events:
+            raise ToolError("none of those event ids exist in this workspace: " + ", ".join(ids[:10]) +
+                            ". Search for the real ids first — never pass ids you have not seen returned.")
+        if seed_events:
+            return {"seeds": [], "missingEventIds": missing,
+                    "note": "those events carry NO extracted entities — they are from a source still in "
+                            "phase 1 (raw), so there is nothing to walk structurally. Read the lines "
+                            "with get_events(include='raw'), pick the values out of the text yourself, "
+                            "and pass them as seedEntities."}
+        raise ToolError("trace_thread needs somewhere to start: pass seedEventIds (the events you are "
+                        "standing on) or seedEntities (the values you want to follow), or both.")
+    seeds = seeds[:10]
+
+    # The time bound. A trace over the WHOLE pool of a busy address returns that address's entire
+    # life; an incident is a window, and bounding it is what makes the connections mean "at the same
+    # time" rather than "ever".
+    minutes = _int(args, "windowMinutes", 120, 0, 10080)
+    span = [t for t in (_iso_to_epoch(e.ts) for e in seed_events) if isfinite(t)]
+    frm = to = None
+    if minutes and span:
+        pad = minutes * 60
+        frm = datetime.fromtimestamp(min(span) - pad, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        to = datetime.fromtimestamp(max(span) + pad, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    nodes: dict[str, dict[str, Any]] = {}
+    edges: dict[tuple[str, str], dict[str, Any]] = {}
+    parent: dict[str, str] = {}
+    hubbiness: dict[str, int] = {}
+    infra: dict[str, dict[str, Any]] = {}
+    engine = ""
+    took = 0
+    expansions = 0
+
+    def note_node(value: str, hop: int) -> dict[str, Any]:
+        n = nodes.get(value)
+        if n is None:
+            n = {"value": value, "kind": _guess_kind(value), "hop": hop, "events": None,
+                 "sources": [], "first": "", "last": "", "detections": 0, "expanded": False}
+            nodes[value] = n
+        else:
+            n["hop"] = min(n["hop"], hop)
+        return n
+
+    for v in seeds:
+        note_node(v, 0)
+
+    stopped = ""
+    frontier = list(seeds)
+    visited: set[str] = set(seeds)
+    for hop in range(1, hops + 1):
+        next_frontier: list[str] = []
+        for value in frontier:
+            if len(nodes) >= TRACE_NODES_MAX:
+                stopped = stopped or f"the walk reached its {TRACE_NODES_MAX}-node ceiling"
+                break
+            if expansions >= TRACE_MAX_EXPANSIONS:
+                stopped = stopped or f"the walk reached its {TRACE_MAX_EXPANSIONS}-search ceiling"
+                break
+            if ctx.remaining() <= TRACE_RESERVE_SEC:
+                stopped = stopped or "the call ran low on time"
+                break
+            ctx.check(f"tracing the thread from {value}")
+            call: dict[str, Any] = {"query": _entity_query(value), "scope": scope}
+            if frm:
+                call["from"], call["to"] = frm, to
+            res = _matching(call, cap=TRACE_ROW_CAP)
+            expansions += 1
+            engine = engine or str(res.get("engine") or "")
+            took += int(res.get("tookMs") or 0)
+            rows = res["rows"]
+            total = int(res.get("total") or len(rows))
+            node = note_node(value, hop - 1)
+            node["events"] = total
+            node["expanded"] = True
+            node["sampled"] = len(rows) < total
+            if rows:
+                node["first"] = min(r.ts for r in rows if r.ts) if any(r.ts for r in rows) else ""
+                node["last"] = max(r.ts for r in rows if r.ts) if any(r.ts for r in rows) else ""
+                # `_count_by`, not `_aggregate`: this reads the value and nothing else, and
+                # `_aggregate` maintains a first/last timestamp per group per event in Python -
+                # 306 ms against 25 ms at 150,000 rows when `source_profile` measured it. A walk
+                # does this once per expansion, up to TRACE_MAX_EXPANSIONS times.
+                node["sources"] = [v for v, _n in _count_by(rows, "file")[0][:4]]
+                node["detections"] = sum(1 for r in rows if r.detections)
+            if not rows:
+                continue
+
+            # Co-occurrence over the node's own events, with the evidence for each pair kept as we go:
+            # `shared` counts the events carrying BOTH ends, and `ids` are those events, which is what
+            # makes a connection openable on its own evidence rather than on one endpoint's.
+            pair: dict[str, dict[str, Any]] = {}
+            for r in rows:
+                sev_hit = 1 if r.sev in ("critical", "high") else 0
+                det_hit = 1 if r.detections else 0
+                for other in r.entities:
+                    if other == value or not other:
+                        continue
+                    p = pair.get(other)
+                    if p is None:
+                        p = pair[other] = {"n": 0, "sev": 0, "det": 0, "ids": [], "files": set()}
+                    p["n"] += 1
+                    p["sev"] += sev_hit
+                    p["det"] += det_hit
+                    if len(p["ids"]) < TRACE_EDGE_IDS:
+                        p["ids"].append(r.id)
+                    if len(p["files"]) < 4:
+                        p["files"].add(r.file)
+            node["distinctNeighbours"] = len(pair)
+
+            scored: list[tuple[float, str, dict[str, Any]]] = []
+            for other, p in pair.items():
+                hubbiness[other] = hubbiness.get(other, 0) + 1
+                kind = _guess_kind(other)
+                s = _thread_score(p["n"], len(rows), p["sev"], p["det"], hubbiness[other], kind)
+                scored.append((s, other, p))
+            scored.sort(key=lambda t: (-t[0], -t[2]["n"], t[1]))
+
+            kept = 0
+            for s, other, p in scored:
+                if kept >= branch:
+                    break
+                if hubbiness.get(other, 0) > TRACE_HUB_DEGREE:
+                    row = infra.setdefault(other, {"value": other, "kind": _guess_kind(other),
+                                                   "touches": 0, "sharedWith": []})
+                    row["touches"] = hubbiness[other]
+                    if len(row["sharedWith"]) < 6:
+                        row["sharedWith"].append(value)
+                    continue
+                key = (value, other) if value <= other else (other, value)
+                edge = edges.get(key)
+                if edge is None:
+                    edges[key] = {"from": value, "to": other, "sharedEvents": p["n"],
+                                  "score": s, "logs": sorted(p["files"]),
+                                  "withDetections": p["det"], "highSeverity": p["sev"],
+                                  "eventIds": list(p["ids"]),
+                                  "why": _why_connected(value, other, p, len(rows))}
+                elif p["n"] > edge["sharedEvents"]:
+                    edge.update(sharedEvents=p["n"], score=max(s, edge["score"]),
+                                eventIds=list(p["ids"]))
+                kept += 1
+                if other in visited or len(nodes) >= TRACE_NODES_MAX:
+                    continue
+                visited.add(other)
+                parent.setdefault(other, value)
+                note_node(other, hop)
+                next_frontier.append(other)
+        frontier = next_frontier
+        if stopped or not frontier:
+            break
+
+    # The chains. A path from a seed to something several hops away IS the finding — "this address
+    # reached that file, through this account and that host" — and it is what a single node's
+    # neighbour list cannot say.
+    paths: list[dict[str, Any]] = []
+    far = sorted((n for n in nodes.values() if n["hop"] >= 2),
+                 key=lambda n: (-n["hop"], -(n.get("detections") or 0)))
+    for n in far[:6]:
+        chain = [n["value"]]
+        cur = n["value"]
+        while cur in parent and len(chain) < TRACE_HOPS_MAX + 2:
+            cur = parent[cur]
+            chain.append(cur)
+        chain.reverse()
+        if len(chain) >= 3:
+            paths.append({"chain": chain, "hops": len(chain) - 1,
+                          "why": " -> ".join(chain)})
+
+    ordered_nodes = sorted(nodes.values(), key=lambda n: (n["hop"], -(n.get("events") or 0), n["value"]))
+    ordered_edges = sorted(edges.values(), key=lambda e: (-e["score"], -e["sharedEvents"]))
+    leads = [{"kind": n["kind"], "value": n["value"], "weight": 1.0 + 0.2 * (n.get("detections") or 0 > 0),
+              "why": f"reached at hop {n['hop']} of this trace and not yet read"}
+             for n in ordered_nodes if n["hop"] >= 1 and not n["expanded"]][:TRACE_LEAD_CAP]
+
+    out: dict[str, Any] = {
+        "seeds": seeds,
+        "hops": hops,
+        "branch": branch,
+        "window": ({"from": frm, "to": to, "paddedByMinutes": minutes} if frm else
+                   {"note": "no time bound — the whole pool was walked" if not minutes else
+                            "the seed events have no parsed timestamp, so the whole pool was walked"}),
+        "expansions": expansions,
+        "nodes": ordered_nodes,
+        "connections": ordered_edges,
+        "paths": paths,
+        "leads": leads,
+        "engine": engine, "tookMs": took,
+    }
+    if missing:
+        out["missingEventIds"] = missing
+    if stopped:
+        # Never a silent short walk. "I stopped here" and "there was nothing further" are different
+        # facts about the evidence, and only one of them means the thread is exhausted.
+        out["stoppedEarly"] = stopped
+        out["stoppedNote"] = (
+            f"This trace is INCOMPLETE: {stopped}, so hops beyond what is listed were not walked. "
+            f"Everything below is real. To go further, trace again from one of the nodes at the "
+            f"outer hop with a smaller branch, or narrow windowMinutes.")
+    if infra:
+        out["infrastructure"] = sorted(infra.values(), key=lambda r: -r["touches"])[:12]
+        out["infrastructureNote"] = (
+            "These values touch most of what this trace walked, which is what a proxy, a resolver, a "
+            "domain controller or a load balancer looks like. They were NOT expanded — that is a "
+            "decision, not an absence of evidence. If one of them IS the subject, call trace_thread "
+            "again with it as an explicit seedEntity.")
+    if not ordered_edges:
+        out["note"] = ("nothing co-occurs with these seeds inside the window. Widen windowMinutes, or "
+                       "check whether the sources involved are still RAW — a raw source has no "
+                       "extracted entities at all, so it cannot contribute a connection. Free-text "
+                       "search still reaches it.")
+    sampled = [n["value"] for n in ordered_nodes if n.get("sampled")]
+    if sampled:
+        out["samplingNote"] = (
+            f"{len(sampled)} node(s) have more events than the {TRACE_ROW_CAP} this walk read "
+            f"({', '.join(sampled[:5])}): their event COUNTS are exact, but the connections were "
+            f"scored on the earliest {TRACE_ROW_CAP} events in the window. Narrow windowMinutes for "
+            f"an unsampled view of a specific period.")
+    # What the walk FOUND, before anything is shed to fit one tool result. The two figures are the
+    # honest ones and they are stated first: a trace that quietly returned half its connections
+    # would read as "these are the connections".
+    out["nodesFound"] = len(ordered_nodes)
+    out["connectionsFound"] = len(ordered_edges)
+    return _fit_trace(out)
+
+
+
+def _why_connected(a: str, b: str, p: dict[str, Any], sampled: int) -> str:
+    """One sentence saying what the connection IS, in numbers a reader can check."""
+    n = p["n"]
+    share = int(round(100.0 * n / max(1, sampled)))
+    bits = [f"{n} event(s) carry both {a} and {b}"]
+    if share >= 10:
+        bits.append(f"{share}% of the events read for {a}")
+    if p["det"]:
+        bits.append(f"{p['det']} of them fired a detection rule")
+    if p["sev"]:
+        bits.append(f"{p['sev']} are high or critical")
+    if p["files"]:
+        bits.append("in " + ", ".join(sorted(p["files"])[:3]))
+    return "; ".join(bits)
 
 
 @tool("source_profile",

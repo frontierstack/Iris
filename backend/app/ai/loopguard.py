@@ -124,6 +124,8 @@ ROUTES: tuple[tuple[str, str], ...] = (
                        "the query for its own events"),
     ("find_related_events", "what else in the pool shares the entities of the events you already "
                             "have — the pivot, from ids you hold"),
+    ("trace_thread", "the SAME pivot followed several hops at once: what connects to what, with the "
+                     "event ids for each connection and the chains that lead out of your seed"),
     ("list_detections", "what the detection catalogue already flagged, which is evidence you have "
                         "not read yet"),
     ("list_graph_findings", "what the entity graph says — fan-out and failure-heavy relations that no "
@@ -142,7 +144,8 @@ _ROUTE_NAMES = frozenset(name for name, _ in ROUTES)
 # present, not on the tool's identity, and a new query tool should get the same advice for free.
 QUERY_TOOLS = frozenset({"search_events", "count_events", "aggregate_events", "distinct_values",
                          "events_over_time", "sample_events", "batch_query", "get_events"})
-ENTITY_TOOLS = frozenset({"entity_profile", "profile_entities", "find_related_events"})
+ENTITY_TOOLS = frozenset({"entity_profile", "profile_entities", "find_related_events",
+                          "trace_thread"})
 GRAPH_TOOLS = frozenset({"build_graph", "graph_find", "graph_node", "graph_path", "graph_sources"})
 RULE_TOOLS = frozenset({"list_detection_rules", "create_detection_rule", "update_detection_rule",
                         "preview_detection_rule", "set_builtin_rule_params"})

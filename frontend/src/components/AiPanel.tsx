@@ -149,6 +149,7 @@ const WRITE_TOOLS = new Set([
   'create_detection_rule', 'update_detection_rule', 'delete_detection_rule',
   'set_detection_rule_enabled', 'set_builtin_rule_params',
   'add_exclusion', 'delete_exclusion',
+  'create_chart', 'delete_chart',
   // NOT preview_detection_rule: a dry run saves nothing and changes nothing on the case.
 ]);
 

@@ -35,12 +35,13 @@ Wall clock and the 200-writes limit stay hard stops: this raises the CONTEXT cei
 """
 from __future__ import annotations
 
-import re
 from typing import Any, Optional
 
 import orjson
 
 from . import eventids
+from . import ledger as ledger_headers
+from .ledger import Ledger
 
 MAX_BRIEF_CHARS = 6000
 MAX_IDS = 120
@@ -115,15 +116,25 @@ def safe_cut(messages: list[dict[str, Any]], keep_tail: int) -> int:
 
 
 def build_brief(middle: list[dict[str, Any]], actions: list[dict[str, Any]], objective: str,
-                max_chars: int = MAX_BRIEF_CHARS) -> str:
+                max_chars: int = MAX_BRIEF_CHARS, ledger: Optional[Ledger] = None) -> str:
     """One user-role message standing in for `middle`. Deterministic and bounded.
 
     `max_chars` scales the brief to the window: a 60k-token run can afford a far fuller record than
     the 6k-char default, and a run that has been told its window is small gets the floor. The line
     caps scale with it.
+
+    `ledger` is the run's own record of what it has asked and what is still open (ai/ledger.py), and
+    when one is supplied it is rendered AHEAD of everything else and takes a reserved share of the
+    budget. That ordering is the fix for the analyst's report that a small-window model "will perform
+    already completed tasks" once a fold has happened. The scraped record below is reconstructed from
+    the very messages being deleted, capped by line count, and shed OLDEST-FIRST — so on a long run
+    the calls that fell off were the first twenty, which are exactly the ones the model has most
+    thoroughly forgotten and is therefore most likely to make again. The ledger is COMPLETE, lives
+    outside the transcript, and sheds by importance rather than by age.
     """
     calls: list[str] = []
     findings: list[str] = []
+    carried_ledger = ""
     ids: list[str] = []
     seen_calls: set[str] = set()
     pending: dict[str, str] = {}
@@ -140,6 +151,9 @@ def build_brief(middle: list[dict[str, Any]], actions: list[dict[str, Any]], obj
                 if line and line not in seen_calls:
                     seen_calls.add(line)
                     calls.append(line)
+            prior_ledger = _carry_ledger(text)
+            if prior_ledger and not carried_ledger:
+                carried_ledger = prior_ledger
             prior_found = _section(text, H_FOUND)
             if prior_found:
                 findings.append(prior_found)
@@ -170,14 +184,35 @@ def build_brief(middle: list[dict[str, Any]], actions: list[dict[str, Any]], obj
                 _ids_in(text, ids)
 
     parts = [BRIEF_HEADER, f"\nOBJECTIVE (unchanged): {objective[:600]}"]
-    if calls:
+    # The LEDGER goes first and is not squeezed by the scraped record under it, because it is the
+    # complete one. A reserved share rather than the whole budget: the recent prose and the verified
+    # ids are what the model is mid-thought about, and taking those away to make room for a fuller
+    # list of calls would trade one kind of forgetting for another.
+    ledger_block = (ledger.render(max_chars=max(1200, int(max_chars * 0.45))) if ledger is not None
+                    else carried_ledger)
+    if ledger_block:
+        parts.append("\n" + ledger_block)
+        max_chars = max(MAX_BRIEF_CHARS // 2, max_chars - len(ledger_block))
+    # A LIVE ledger SUPERSEDES the scraped list below rather than sitting beside it. Measured on a
+    # twenty-call transcript, printing both put every call in the brief TWICE — the ledger's deduped
+    # line and the scraped `name(args)` + "returned:" pair — which is the opposite of what a fold is
+    # for, and worst on exactly the small window that triggers one. The ledger's list is the better
+    # of the two: complete (it is not built from the messages being deleted), deduped by call
+    # identity, and shed by importance rather than by age.
+    #
+    # A CARRIED ledger (`carried_ledger`, from an earlier brief, with no live one) does NOT
+    # supersede it: that block is what fold ONE wrote, and the scraped calls are the middle of the
+    # transcript since then. There they are different records of different spans.
+    if calls and ledger is None:
         parts.append(H_WORK + "\n".join(calls[-max_lines:]))
     if findings:
         joined = "\n".join(findings[-max_lines:])
         parts.append(H_FOUND + joined[-(max_chars // 2):])
     if ids:
         parts.append(H_IDS + ", ".join(ids))
-    if actions:
+    # ...and the same for the WRITES, for the same reason: `Ledger.render` already lists what is on
+    # the case under its own header, fed from these very actions (investigator.note_ledger_writes).
+    if actions and ledger is None:
         parts.append(H_WRITTEN + "\n".join(f"- {a.get('tool')}: {a.get('summary')}" for a in actions[-max_lines:]))
     parts.append(H_CONTINUE)
     brief = "\n".join(parts)
@@ -209,7 +244,8 @@ def _result_gist(body: str) -> str:
 
 def compact(messages: list[dict[str, Any]], actions: list[dict[str, Any]], *,
             keep_tail: int = TAIL_MESSAGES, force: bool = False,
-            max_chars: int = MAX_BRIEF_CHARS) -> Optional[tuple[list[dict[str, Any]], int]]:
+            max_chars: int = MAX_BRIEF_CHARS,
+            ledger: Optional[Ledger] = None) -> Optional[tuple[list[dict[str, Any]], int]]:
     """(new transcript, number of messages folded away) — or None when there is nothing worth folding.
 
     `force` folds even a short middle. Used when the PROVIDER has refused the transcript for its size
@@ -223,6 +259,28 @@ def compact(messages: list[dict[str, Any]], actions: list[dict[str, Any]], *,
     if len(middle) < (1 if force else MIN_COMPACTIBLE):
         return None
     objective = _text_of(messages[1])
-    brief = build_brief(middle, actions, objective, max_chars)
+    brief = build_brief(middle, actions, objective, max_chars, ledger)
     out = [messages[0], messages[1], {"role": "user", "content": brief}] + messages[start:]
     return out, len(middle)
+
+
+def _carry_ledger(text: str) -> str:
+    """The ledger block of an EARLIER brief, so a second fold does not drop it.
+
+    A live run always passes its own `Ledger` and this never fires. It is for the case where one is
+    not available — a direct call, a test, or a future caller that folds a transcript it did not
+    run — where the ledger block of fold one is nevertheless the best record that exists, and
+    reading it as prose (which is what happened to the WORK section before named headers were
+    introduced) loses it entirely.
+    """
+    i = text.find(ledger_headers.H_LEDGER[:48])
+    if i < 0:
+        return ""
+    body = text[i:]
+    # it ends where the brief's own next section begins
+    cut = len(body)
+    for h in _HEADERS:
+        j = body.find(h)
+        if 0 <= j < cut:
+            cut = j
+    return body[:cut].strip("\n")

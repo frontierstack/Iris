@@ -1319,7 +1319,16 @@ type AiRunEvent =
       // a `status` with autoSummary:true precedes `done` when the model reached a report but never filed a
       // summary note: Iris posts the report as the case summary note itself (cited with verified ids)
       outputContinues:number;   // replies cut off at the model's output limit that were continued and joined (≤ 3)
+      ledger:{ calls:number; writes:number; open:number; followed:number; dismissed:number };
+      openLeads:number;         // leads the evidence produced that nothing in the run went and looked at
       loopGuard:AiLoopGuard }
+  /** ledger / openLeads: the run's own record of what it asked and what it turned up (app/ai/ledger.py),
+      which is kept OUTSIDE the transcript so compaction, a provider refusing the request for its size and an
+      in-run restart cannot lose it. `openLeads` is the honest measure of whether an investigation FINISHED
+      or merely stopped: the system prompt's definition is "every lead followed to its end or ruled out", and
+      until the ledger existed nothing could check it because a lead only ever lived inside a tool result.
+      A run about to finish with strong leads outstanding is asked about them once (twice at most) - a
+      `status` event carrying `openLeads:n` - and may decline in one line each. */
 /** What the loop guard refused during the run, and why it ended the run if it did. Every refusal is ALSO a
     tool_result with ok:false whose summary says what to do instead, so the model and the analyst both see it.
     refusedRepeats: an identical call on its 3rd attempt (the 2nd is served from the run cache); refusedWrites:
@@ -1552,13 +1561,19 @@ running as it was) and the reason goes back to the model. AI-authored rules carr
   NO cap with the run limits switched off — the count is policy, the window is the fact) and by a floor: a fold
   has to get the estimate under 80 % of the room above the request's fixed cost (tool schemas + system prompt +
   objective), or it is refused. A second fold carries the first brief's calls and findings forward, so a long
-  run degrades gradually rather than forgetting everything before fold one. When no fold can fit, the run
+  run degrades gradually rather than forgetting everything before fold one. Every brief also carries the
+  INVESTIGATION LEDGER, which is not built from the messages being folded and is therefore complete: the
+  distinct calls this run has made with what each returned, what it has written to the case, and the OPEN
+  LEADS it has not followed. It is rendered first and sheds by IMPORTANCE rather than by age - the scraped
+  record above it caps by line count and drops its OLDEST lines, which are exactly the calls a small-window
+  model has most thoroughly forgotten and is most likely to make again. A fold that does not fit is retried
+  with a smaller brief before a restart is considered. When no fold can fit, the run
   RESTARTS from its own persisted record (`status` event with `reset:n`, ≤ 3 per run) — the transcript is rebuilt
   as system + objective + the same brief a follow-up turn would get — and only past that does it stop on `budget`.
   A reply cut off at the model's output limit (`finish_reason: length`, no tool call) is continued and the pieces
   joined (`status` with `outputContinue:n`, ≤ 3). Every compaction emits a `status` event ("compacted N earlier steps into a running
   brief …") that is persisted in the transcript — an analyst reading a run back must know the model's view was
-  summarised. `done` reports `compactions`, `cachedToolCalls` and `textToolCalls`.
+  summarised. `done` reports `compactions`, `cachedToolCalls`, `textToolCalls`, `ledger` and `openLeads`.
 - **Tool calling is verified, not assumed.** A provider that rejects the `tools` body key fails with a specific
   message naming the endpoint and the model. A provider that silently ignores it — the model writes
   `<tool_call><function=…><parameter=…>` or a `{"name":…,"arguments":…}` block as PROSE — has that text parsed

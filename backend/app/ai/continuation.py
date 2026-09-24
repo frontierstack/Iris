@@ -119,8 +119,18 @@ def _writes_of(rec: dict[str, Any]) -> list[str]:
     return out
 
 
-def build(records: list[dict[str, Any]], *, max_chars: int = MAX_BRIEF_CHARS) -> str:
-    """The prior-conversation block for a follow-up turn, or '' when there is nothing to carry."""
+def build(records: list[dict[str, Any]], *, max_chars: int = MAX_BRIEF_CHARS,
+          ledger: Any = None) -> str:
+    """The prior-conversation block for a follow-up turn, or '' when there is nothing to carry.
+
+    `ledger` is the LIVE ledger when this is an in-run restart (investigator._reset_transcript) — the
+    one case where Iris has something better than the persisted record, because the record holds a
+    tool entry's result SUMMARY while the ledger holds the leads those results turned up. On a
+    genuine follow-up there is no live ledger and one is rebuilt from the records instead, which
+    recovers the calls and the writes exactly and the leads not at all: a lead nobody wrote down is
+    not evidence that it is still open, and inventing one would send the next turn after a question
+    the last turn may already have answered in prose.
+    """
     turns = [r for r in records if (r.get("prompt") or r.get("answer") or r.get("transcript"))]
     if not turns:
         return ""
@@ -184,6 +194,17 @@ def build(records: list[dict[str, Any]], *, max_chars: int = MAX_BRIEF_CHARS) ->
                      "\n".join(f"- {w}" for w in writes[-40:]))
     else:
         parts.append("\nNOTHING has been written to the case by this conversation yet.")
+
+    # THE LEDGER, but only a LIVE one. This is an in-run restart (investigator._reset_transcript),
+    # and a live ledger holds something the persisted record does not: the OPEN LEADS, which are
+    # what the RESULTS turned up rather than anything ai/history.py stores. On a genuine follow-up
+    # there is no live ledger, and appending one rebuilt from the records would print the same
+    # calls a SECOND time under a different heading -- `_calls_of` above already lists every one of
+    # them, per turn, with what it returned. Paying twice for one list on a small window is the
+    # opposite of what the ledger is for.
+    block = ledger.render(max_chars=max(1500, int(max_chars * 0.4))) if ledger is not None else ""
+    if block:
+        parts.append("\n" + block)
 
     brief = "\n".join(parts)
     if len(brief) > max_chars:

@@ -80,6 +80,7 @@ import orjson
 
 from ..config import get_settings
 from . import autodelegate, compaction, continuation, eventids, readcache, runs, subagents
+from .ledger import Ledger
 from .argrepair import repair_arguments
 from .client import (AIError, BadToolArguments, ContextTooLong, LLMClient, ProviderUnavailable,
                      absorb_text_calls, has_tool_call_syntax, parse_text_tool_calls)
@@ -88,7 +89,8 @@ from .loopguard import (LoopGuard, MAX_RECOVERIES as MAX_LOOP_RECOVERIES, call_k
                         returned_something as _returned_something)
 from .system_prompts import PROMPTS
 from .prompts import (CONTINUE_OUTPUT, RESET_NOTE, ARG_TOO_BIG, BUDGET_NOTICE, CHECK_IN, COMPACTED_CONTINUE, CONTINUE_WORK,
-                      DOCUMENT_CHECK, LOOP_RECOVERY, LOOP_STOP, NO_CASE_LINE, run_budget, RECORD_NUDGE, REPORT_NOW,
+                      DOCUMENT_CHECK, LEADS_OPEN, LOOP_RECOVERY, LOOP_STOP, NO_CASE_LINE, run_budget,
+                      RECORD_NUDGE, REPORT_NOW,
                       NARRATE_NUDGE, PARALLEL_NUDGE, PARALLEL_NUDGE_SOLO, SUMMARY_CHECK, WRAP_UP, delegation_block,
                       investigator_user_prompt)
 from .tools import (REGISTRY, RunContext, ToolError, _s, tool_budget_seconds, tool_schemas,
@@ -149,6 +151,16 @@ DOCUMENT_MIN_CALLS = 3
 # limits off nothing else would end it. Past these, the request simply stays unanswered.
 MAX_DOCUMENT_CHECKS = 3
 MAX_SUMMARY_CHECKS = 3
+# ---- OPEN LEADS (ai/ledger.py). The system prompt has always said an investigation is finished
+# when every lead has been followed to its end or ruled out; nothing could CHECK that, because a
+# lead only ever existed inside a tool result the model had to notice and remember. The ledger
+# keeps the list, so a run about to finish with leads outstanding is asked once (twice at most).
+# It is a prompt, not a requirement: 'that one does not matter, because…' is a legitimate answer
+# and the copy says so. Weak leads are never raised at all — a value seen once beside something
+# busy is noise, and a nudge listing noise teaches the model to skim the next one.
+MAX_LEAD_CHECKS = 2
+LEAD_WEIGHT_FLOOR = 0.95   # below this a lead is not worth a turn of the analyst's budget
+LEAD_SHOW = 8              # leads named in one nudge; more than this is a list nobody reads
 # ---- THE LOOP GUARD (ai/loopguard.py) is what ends a run that has stopped moving, and it is NOT a
 # budget: it applies with the limits off. An identical call is refused on its third attempt, an
 # identical successful write on its second, paging past 8 pages, and more than 24 calls in one turn;
@@ -407,7 +419,8 @@ def _clip(text: str, limit: int = TOOL_RESULT_CHARS) -> str:
 
 def _fit_context(messages: list[dict[str, Any]], actions: list[dict[str, Any]],
                  ceiling: int, overhead: int = 0,
-                 brief_chars: int = compaction.MAX_BRIEF_CHARS) -> tuple[list[dict[str, Any]], int, int, bool]:
+                 brief_chars: int = compaction.MAX_BRIEF_CHARS,
+                 ledger: Optional[Ledger] = None) -> tuple[list[dict[str, Any]], int, int, bool]:
     """Make the transcript fit under `ceiling` after the PROVIDER refused it: (messages, folded, elided, fits).
 
     Folds first (progressively shorter tails, forced), then — if the kept tail is itself too big, which
@@ -424,10 +437,11 @@ def _fit_context(messages: list[dict[str, Any]], actions: list[dict[str, Any]],
     target = _floor_target(messages, ceiling, overhead) - overhead
     before = _est_tokens(messages)
     folded = 0
-    for tail in (compaction.TAIL_MESSAGES, 4, 2):
+    for tail, chars in _fit_ladder(brief_chars):
         if _est_tokens(messages) < target:
             break
-        attempt = compaction.compact(messages, actions, keep_tail=tail, force=True, max_chars=brief_chars)
+        attempt = compaction.compact(messages, actions, keep_tail=tail, force=True,
+                                     max_chars=chars, ledger=ledger)
         if attempt is None:
             continue
         messages, d = attempt
@@ -453,10 +467,37 @@ def _fit_context(messages: list[dict[str, Any]], actions: list[dict[str, Any]],
     return messages, folded, elided, after + overhead < ceiling
 
 
+def _fit_ladder(brief_chars: int) -> tuple[tuple[int, int], ...]:
+    """The same ladder as `_brief_ladder`, from an explicit brief size rather than from a ceiling.
+
+    `_fit_context` is handed the size its caller already computed, so it cannot call `_brief_chars`
+    again without ignoring that argument.
+    """
+    return ((compaction.TAIL_MESSAGES, brief_chars), (4, brief_chars), (2, brief_chars),
+            (2, max(2_000, brief_chars // 2)), (2, 1_500))
+
+
 def _floor_target(messages: list[dict[str, Any]], ceiling: int, overhead: int) -> int:
     """What a fold has to get the estimate (messages + overhead) under to count as progress."""
     fixed = overhead + _est_tokens(messages[:2])
     return int(fixed + max(0, ceiling - fixed) * COMPACT_FLOOR)
+
+
+def _brief_ladder(ceiling: int) -> tuple[tuple[int, int], ...]:
+    """(keep_tail, brief chars) to try, in order, when folding.
+
+    Two dimensions, not one. The TAIL is what the model is mid-thought about and the BRIEF is what
+    it has established; which of the two a given run can afford to give up depends on the shape of
+    the run, so the ladder walks both. Shortening the tail first is deliberate — a tail of six large
+    tool results is usually the bigger half, and the brief is the half that was written to survive.
+
+    The last rung is deliberately tiny. A 1,500-character brief is a poor record, and it is still a
+    far better outcome than the alternative at that point, which is an in-run RESTART: a restart
+    throws the kept tail away as well and costs a full rebuild from the persisted record.
+    """
+    full = _brief_chars(ceiling)
+    return ((compaction.TAIL_MESSAGES, full), (4, full), (2, full),
+            (2, max(2_000, full // 2)), (2, 1_500))
 
 
 def _brief_chars(ceiling: int) -> int:
@@ -464,7 +505,8 @@ def _brief_chars(ceiling: int) -> int:
     return max(compaction.MAX_BRIEF_CHARS, min(24_000, int(ceiling * 4 * 0.15)))
 
 
-def _reset_transcript(messages: list[dict[str, Any]], run_id: str) -> Optional[list[dict[str, Any]]]:
+def _reset_transcript(messages: list[dict[str, Any]], run_id: str,
+                      ledger: Optional[Ledger] = None) -> Optional[list[dict[str, Any]]]:
     """The transcript REBUILT from this run's own persisted record — an in-run "continue".
 
     ai/history.py records every call, result summary, write and line of prose as the run goes, and
@@ -479,7 +521,7 @@ def _reset_transcript(messages: list[dict[str, Any]], run_id: str) -> Optional[l
     rec = runs.get(run_id)
     if not rec:
         return None
-    brief = continuation.build([rec])
+    brief = continuation.build([rec], ledger=ledger)
     if not brief:
         return None
     return [messages[0], messages[1], {"role": "user", "content": RESET_NOTE + "\n\n" + brief}]
@@ -1044,9 +1086,20 @@ async def investigate(store: Any, objective: str, run_id: str,
     # A follow-up inherits the conversation, not the run: same thread, fresh budgets. Resolved BEFORE
     # `runs.start`, because the record it writes is what carries `threadId` for every later turn.
     prior_brief, thread_id, parent_id = "", "", ""
+    # THE LEDGER (ai/ledger.py) — what this investigation has asked, and what it has turned up and not
+    # yet looked at. It is created here, BEFORE the transcript, because it deliberately does not live
+    # in the transcript: compaction, a provider refusing the request for its size and an in-run
+    # restart all re-shape `messages` and none of them can reach this object. On a follow-up it is
+    # seeded from the earlier turns of the thread, so "now build me the timeline" does not re-ask the
+    # twenty questions the previous turn already answered.
+    ledger = Ledger()
     if continue_from:
         prior_brief, thread_id, parent_id, _parent = await asyncio.to_thread(
             continuation.for_run, continue_from, exclude=run_id)
+        try:
+            ledger = Ledger.from_records(await asyncio.to_thread(runs.thread, continue_from))
+        except Exception:  # noqa: BLE001 — a follow-up must run even with an unreadable parent record
+            ledger = Ledger()
     runs.start(run_id, objective, client.model, focus=focus, case_id=case_id, case_name=case_name,
                parent_id=parent_id, thread_id=thread_id)
     yield {"type": "run", "runId": run_id, "model": client.model,
@@ -1119,6 +1172,7 @@ async def investigate(store: Any, objective: str, run_id: str,
     next_check_in = CHECK_IN_MIN_CALLS
     budget_noticed = False   # the "leave room for the report" nudge has been sent once
     documented = False       # the "you wrote nothing to the case" prompt has been sent once
+    lead_checks = 0          # times the run has been asked about leads it left open
     summarised = False       # the "write the summary note" prompt has been sent once
     document_checks = 0      # ...and how many times in all (re-armed after a fold, bounded)
     summary_checks = 0
@@ -1172,6 +1226,14 @@ async def investigate(store: Any, objective: str, run_id: str,
     def floor() -> int:
         return _floor_target(messages, ceiling, tools_tokens + est_bias)
 
+    def note_ledger_writes() -> None:
+        """Fold the run's own action log into the ledger. Cheap and idempotent (`note_write` dedupes),
+        so it runs at every point the ledger is about to be rendered rather than being threaded
+        through the six places a write can land."""
+        for a in ctx.actions:
+            if not a.get("undone"):
+                ledger.note_write(a)
+
     def re_arm() -> None:
         # A fold or a reset can swallow the very message carrying DOCUMENT_CHECK / SUMMARY_CHECK —
         # that is how a run ended having been asked for its summary note and never seeing the
@@ -1217,9 +1279,10 @@ async def investigate(store: Any, objective: str, run_id: str,
                     # Try progressively shorter tails: on a run whose individual tool results are large,
                     # six recent messages can be over the ceiling on their own, and giving up there would
                     # stop an investigation that a two-message tail could have carried on.
-                    for tail in (compaction.TAIL_MESSAGES, 4, 2):
+                    for tail, chars in _brief_ladder(ceiling):
+                        note_ledger_writes()
                         attempt = compaction.compact(messages, ctx.actions, keep_tail=tail,
-                                                     max_chars=_brief_chars(ceiling))
+                                                     max_chars=chars, ledger=ledger)
                         if attempt is None:
                             continue
                         folded = attempt
@@ -1228,7 +1291,8 @@ async def investigate(store: Any, objective: str, run_id: str,
                 if folded is not None and est(folded[0]) >= floor():
                     folded = None      # it fits no better than before: not a fold worth taking
                 if folded is None:
-                    reset = (_reset_transcript(messages, run_id)
+                    note_ledger_writes()
+                    reset = (_reset_transcript(messages, run_id, ledger)
                              if resets < lim["maxResets"] else None)
                     if reset is None or est(reset) >= floor() or est(reset) >= est():
                         note = ("context is full and neither summarising the earlier steps nor restarting "
@@ -1461,16 +1525,17 @@ async def investigate(store: Any, objective: str, run_id: str,
                             yield {"type": "status", "text": note, "toolsCompacted": saved}
                     messages, folded, elided, fits = _fit_context(
                         messages, ctx.actions, ceiling, overhead=tools_tokens + est_bias,
-                        brief_chars=_brief_chars(ceiling))
+                        brief_chars=_brief_chars(ceiling), ledger=ledger)
                     if folded:
                         compactions += 1
                     exhausted = (ctx_tries > CONTEXT_RETRIES
                                  or (lim.get("enforced", 1) and context_recoveries > CONTEXT_RECOVERIES)
                                  or (not folded and not elided))
                     if exhausted:
+                        note_ledger_writes()
                         # Folding is not enough: RESTART from the run's own record, the recovery the
                         # analyst would otherwise perform by hand with "continue" in a new turn.
-                        reset = (_reset_transcript(messages, run_id)
+                        reset = (_reset_transcript(messages, run_id, ledger)
                                  if resets < lim["maxResets"] else None)
                         if reset is not None and est(reset) < est_now:
                             messages = reset
@@ -1611,6 +1676,28 @@ async def investigate(store: Any, objective: str, run_id: str,
                 # the right answer, and inventing a finding to have something to file would be worse
                 # than filing nothing. Only when there IS a case (writes refuse while pending) and the
                 # run did real work (DOCUMENT_MIN_CALLS).
+                # LEADS FIRST. The run is about to say it is finished; the ledger knows whether it
+                # is. Everything in the DOCUMENT_CHECK guard below applies for the same reasons —
+                # only a real investigation, only with room to pay for the turn, never over a stop —
+                # and the one extra condition is that there is actually something worth naming.
+                if (lead_checks < MAX_LEAD_CHECKS and tool_calls >= DOCUMENT_MIN_CALLS
+                        and not runs.stop_requested(run_id)
+                        and elapsed() < lim["maxSeconds"] and step < lim["maxSteps"]
+                        and est() < ceiling):
+                    strong = [l for l in ledger.open_leads() if l.weight >= LEAD_WEIGHT_FLOOR]
+                    if strong:
+                        lead_checks += 1
+                        shown = strong[:LEAD_SHOW]
+                        body = "\n".join(f"  {i + 1}. {l.line()}" for i, l in enumerate(shown))
+                        if len(strong) > len(shown):
+                            body += f"\n  … and {len(strong) - len(shown)} more."
+                        messages.append({"role": "user",
+                                         "content": LEADS_OPEN.format(n=len(strong), leads=body)})
+                        note = (f"{len(strong)} lead(s) from this investigation have not been followed "
+                                f"— asking the assistant to follow them or rule them out")
+                        HISTORY.append(run_id, {"kind": "status", "text": note})
+                        yield {"type": "status", "text": note, "openLeads": len(strong)}
+                        continue
                 if (not documented and ctx.writes == 0 and tool_calls >= DOCUMENT_MIN_CALLS
                         and not runs.stop_requested(run_id)
                         and elapsed() < lim["maxSeconds"] and step < lim["maxSteps"]
@@ -1893,6 +1980,13 @@ async def investigate(store: Any, objective: str, run_id: str,
                     # ONE judgement of "did this move the investigation", shared by the guard's streaks and
                     # the check-in's — two implementations would eventually disagree about a result.
                     productive = guard.observe(entry["ok"], entry["result"], pending=entry["pending"])
+                    # The ledger sees every finished call, in emitted order, exactly once. It is fed
+                    # HERE rather than in `_run_tool` for one reason: this is the point at which the
+                    # run's own state is updated, and a call whose result was streamed but whose
+                    # effect on the run has not been applied yet is not a call the model can be told
+                    # it has already made.
+                    ledger.observe(entry["name"], entry["args"], entry["ok"], entry["result"],
+                                   step=step, productive=productive)
                     barren = 0 if productive else barren + 1
                     if entry["writes"] and entry["ok"]:
                         productive_since_write = 0
@@ -2158,6 +2252,10 @@ async def investigate(store: Any, objective: str, run_id: str,
                "toolCalls": tool_calls, "writes": ctx.writes, "actions": ctx.actions,
                "unverifiedCitations": unverified, "answer": answer, "elapsedSec": round(elapsed(), 1),
                "compactions": compactions, "cachedToolCalls": ctx.cache_hits, "textToolCalls": text_mode,
+               # What the ledger knew at the end. `openLeads` is the honest measure of whether the
+               # investigation finished or merely stopped, and it is reported whether or not the
+               # nudge above ever fired.
+               "ledger": ledger.counts(), "openLeads": len(ledger.open_leads()),
                "contextCeiling": ceiling, "recordNudges": record_nudges, "resets": resets,
                "outputContinues": output_continues, "loopGuard": guard.stats()}
     except AIError as exc:

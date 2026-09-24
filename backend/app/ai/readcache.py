@@ -40,7 +40,7 @@ import orjson
 # Pure functions of (pool, catalogue). See the module docstring for what keeps a tool OFF this list.
 CACHEABLE = frozenset({
     "count_events", "aggregate_events", "distinct_values", "events_over_time", "batch_query",
-    "search_events", "source_profile", "list_event_fields",
+    "search_events", "source_profile", "list_event_fields", "trace_thread",
 })
 
 MAX_ENTRIES = 256
