@@ -78,7 +78,9 @@ R = {
         description="Service accounts exist for machines to call APIs. A human-style sign-in on one means its "
                     "credentials leaked, or someone is hiding behind it.",
         trigger="user starts with svc_, svc-, sa_ or sa- on a successful login-path POST (path matched by the "
-                "login-path regex) — or on a CloudTrail ConsoleLogin by a svc_/svc- principal.",
+                "login-path regex), on a CloudTrail ConsoleLogin by such a principal, or on a Windows 4624 "
+                "whose LogonType is one of the interactive types and whose TargetUserName carries one of the "
+                "prefixes.",
         mechanism="regex"),
     "WEB-0050": Rule(
         "SIGMA-WEB-0050", "Web scanner user-agent", "medium",
@@ -498,10 +500,28 @@ R = {
         mechanism="regex"),
     "APP-0080": Rule(
         "SIGMA-APP-0080", "Ransomware indicator", "critical",
-        description="A ransom note name or an encrypted-file extension. By the time this reaches a log the encryption "
-                    "has already started somewhere.",
-        trigger="The raw line of ANY source matches the ransomware regex (ransom note filenames, known encrypted "
-                "extensions).",
+        description="A ransom note name, a ransomware family's file extension, or a security product's own "
+                    "ransomware verdict. By the time a NOTE or a family extension reaches a log the encryption "
+                    "has already started somewhere - unless the line also says the attempt was blocked, in which "
+                    "case this is the containment, reported at high rather than critical.",
+        trigger="The raw line of ANY source matches the ransomware regex, AND the match survives a second "
+                "opinion. A specific ransom-note name, a product ransomware signature (Ransom:Win32/...), or a "
+                "FAMILY extension (.lockbit, .ryuk, ...) fires on its own. A bare README.txt, or an AMBIGUOUS "
+                "extension (.enc, .crypt, .encrypted, .djvu, .onion, .aes - what every backup and "
+                "secrets tool writes), only fires when the line corroborates it or when the extension is "
+                "appended to a user document (payroll.xlsx.encrypted). Dropped to high when the line carries a "
+                "blocked / quarantined / cleaned marker.",
+        mechanism="regex"),
+    "APP-0085": Rule(
+        "SIGMA-APP-0085", "Ransom note text", "critical",
+        description="The note itself, judged by its own words rather than by a file name. A rename can hide the "
+                    "extension and the note's filename, but not the sentence that tells the victim their files "
+                    "are encrypted and what to pay. This is the one ransomware signal that survives an attacker "
+                    "who picked their own names.",
+        trigger="The raw line of ANY source matches the encryption-claim regex ('your files have been "
+                "encrypted' and its variants) AND carries at least the required number of DISTINCT corroborating "
+                "markers from the marker regex - a decryptor offer, a wallet, an onion address, a personal id, a "
+                "do-not-rename threat.",
         mechanism="regex"),
     # ---------------------------------------------------------------- identity (continued)
     "AUTH-0240": Rule(
@@ -715,15 +735,163 @@ R = {
         trigger="A Microsoft 365 audit event whose Operation is Set-AdminAuditLogConfig, "
                 "Set-MailboxAuditBypassAssociation, or a mailbox audit disable.",
         mechanism="fields"),
+    # ---------------------------------------------------------------- Windows (fourth tranche)
+    "WIN-0191": Rule(
+        "SIGMA-WIN-0191", "AS-REP roasting - pre-authentication not required", "high",
+        description="A ticket was issued for an account that does not require Kerberos pre-authentication. "
+                    "The reply is encrypted with that account's password hash, so anyone who can ask for it "
+                    "can crack the password offline - no failed logon, no lockout, nothing else in the log.",
+        trigger="Security event 4768 whose PreAuthType is one of the no-pre-auth values (0), on an account "
+                "that is not a computer account.",
+        mechanism="fields"),
+    "WIN-0192": Rule(
+        "SIGMA-WIN-0192", "DCSync - directory replication requested", "critical",
+        description="Something asked a domain controller to replicate directory secrets. Done by a DC that is "
+                    "normal; done by anything else it is every password hash in the domain, including "
+                    "krbtgt, which is a golden ticket.",
+        trigger="Security event 4662 whose Properties or raw body names one of the replication control access "
+                "rights (DS-Replication-Get-Changes and its All / In-Filtered-Set siblings), by a subject that "
+                "is not a computer account and is not on the ignore list.",
+        mechanism="fields"),
+    "WIN-0195": Rule(
+        "SIGMA-WIN-0195", "Windows logon succeeded from an attacking source", "critical",
+        description="The guessing worked on Windows. A successful 4624 from an address that this same "
+                    "workspace already caught spraying, brute forcing or scanning is the moment the account "
+                    "stopped being the owner's - treat it as compromised from this timestamp.",
+        trigger="A 4624 success whose IpAddress is an address already flagged during this run (a 4625 burst, "
+                "a password spray, an SSH brute force, a port scan, a scanner user-agent or a 401 burst).",
+        mechanism="correlation"),
+    "WIN-0245": Rule(
+        "SIGMA-WIN-0245", "Office or browser spawned a shell", "high",
+        description="A document reader, a mail client or a browser started a command interpreter. Those "
+                    "programs open files; they do not run commands. This is the first process of almost every "
+                    "intrusion that begins with a macro, a PDF or a drive-by.",
+        trigger="A process-creation event (4688, or Sysmon 1) whose ParentProcessName matches the parent "
+                "regex and whose NewProcessName matches the child regex.",
+        mechanism="regex"),
+    # ---------------------------------------------------------------- Linux (third tranche)
+    "LNX-0080": Rule(
+        "SIGMA-LNX-0080", "Downloaded content piped straight into a shell", "critical",
+        description="Something fetched from the network went directly into an interpreter without ever "
+                    "touching disk. Nothing scans it, nothing keeps a copy, and what ran is whatever the "
+                    "server chose to send at that moment.",
+        trigger="The raw line matches the pipe-to-shell regex - curl or wget whose output is piped into sh, "
+                "bash, python, perl, ruby or node.",
+        mechanism="regex"),
+    "LNX-0085": Rule(
+        "SIGMA-LNX-0085", "Shell run by a service account", "critical",
+        description="A web server, database or worker account started an interactive shell. Those accounts "
+                    "exist to run one program; a shell under one is command execution through whatever that "
+                    "program exposes - which is what a webshell or an RCE looks like from the host's side.",
+        trigger="A syslog or auditd line whose account (user, acct or auid field) is one of the named service "
+                "accounts AND whose raw line matches the shell-execution regex.",
+        mechanism="regex"),
+    "LNX-0090": Rule(
+        "SIGMA-LNX-0090", "System logging destroyed or stopped", "high",
+        description="The system's own log was truncated, vacuumed or shredded, or the logging daemon was "
+                    "stopped. Whatever it held is gone and whatever happens next is not recorded - the act "
+                    "itself is now the only evidence there is.",
+        trigger="The raw line matches the log-destruction regex (journalctl --vacuum, rm/shred/truncate "
+                "against /var/log, auditctl -D, stopping rsyslog / auditd / systemd-journald, wevtutil cl, "
+                "Clear-EventLog).",
+        mechanism="regex"),
+    # ---------------------------------------------------------------- Azure / Entra ID (continued)
+    "AZURE-0050": Rule(
+        "SIGMA-AZURE-0050", "Device code authentication flow", "high",
+        description="A sign-in completed through the device code flow. It exists for televisions and "
+                    "headless devices; used against a person it is phishing, because the victim types a code "
+                    "into a REAL Microsoft page and the attacker walks away with the token. Almost no "
+                    "organisation uses it on purpose, so every one is worth a question.",
+        trigger="An Azure sign-in whose authenticationProtocol is deviceCode, whose resultType is one of the "
+                "device-code codes (50199, 70016), or whose raw body names the device code grant.",
+        mechanism="fields"),
+    "AZURE-0054": Rule(
+        "SIGMA-AZURE-0054", "MFA prompt bombing", "high",
+        description="Repeated second-factor prompts against one identity in a short window. The password is "
+                    "already correct - that is what makes a prompt appear - so this is somebody holding a "
+                    "valid credential and waiting for the owner to approve one out of fatigue.",
+        trigger="Counts Azure sign-in events whose resultType is one of the MFA denial or timeout codes, "
+                "grouped by the identity. Fires on the window/threshold below.",
+        mechanism="threshold"),
+    # ---------------------------------------------------------------- mail (continued)
+    "MAIL-0018": Rule(
+        "SIGMA-MAIL-0018", "Reply-To points at another domain", "high",
+        description="The message says it is from one domain and asks for the answer to go to another. That "
+                    "is the mechanism of business e-mail compromise: the thread looks like the one the "
+                    "finance team was already having, and the reply leaves the company.",
+        trigger="A mail event whose reply_to_mismatch field is set, or whose reply_to domain differs from "
+                "from_domain, where neither domain is on the allowed list.",
+        mechanism="fields"),
+    "MAIL-0022": Rule(
+        "SIGMA-MAIL-0022", "Double-extension attachment", "critical",
+        description="An attachment named to look like a document and built to run - invoice.pdf.exe. The "
+                    "first extension is what the person sees in the mail client; the second is what Windows "
+                    "does with it.",
+        trigger="A mail event whose attachment names match the double-extension regex: a document, image or "
+                "archive extension immediately followed by an executable or script extension.",
+        mechanism="regex"),
+    # ---------------------------------------------------------------- Kubernetes (continued)
+    "K8S-0040": Rule(
+        "SIGMA-K8S-0040", "Pod created sharing a host namespace", "high",
+        description="A pod was created with hostNetwork, hostPID or hostIPC. Each one removes a wall between "
+                    "the container and the node: the node's traffic, the node's processes, the node's shared "
+                    "memory. SIGMA-K8S-0017 covers privileged and hostPath; this is the other half of the "
+                    "escape surface.",
+        trigger="resource = pods, verb = create, and the raw request contains one of the host-namespace "
+                "markers set to true.",
+        mechanism="fields"),
+    # ---------------------------------------------------------------- AWS (continued)
+    "AWS-0100": Rule(
+        "SIGMA-AWS-0100", "EC2 instance credentials used from outside AWS", "critical",
+        description="A role session that belongs to an EC2 INSTANCE was used from an address that is not that "
+                    "instance. Instance credentials never leave the instance on their own, so this is the "
+                    "metadata service having been read - an SSRF, a compromised application - and the key "
+                    "being used somewhere else.",
+        trigger="A CloudTrail event whose userIdentity.type is AssumedRole and whose userIdentity.arn names "
+                "an instance session (an assumed-role session id starting i-), where sourceIPAddress is a "
+                "PUBLIC address rather than an AWS service principal or a private address.",
+        mechanism="fields"),
 }
 
 RULES: list[Rule] = list(R.values())
 
 _SCANNER_UA = re.compile(r"sqlmap|nikto|nmap|masscan|zgrab|dirbuster|gobuster|wpscan|nuclei|acunetix", re.I)
-_ATTACK_PATH = re.compile(r"\.\./|/etc/passwd|cmd=|;wget|;curl|\bunion\b.*\bselect\b|<script|\.php\?|/wp-login|/\.env|/\.git/", re.I)
-_SUSP_PROC = re.compile(r"powershell.*(-enc|-e |downloadstring|iex|frombase64)|certutil.*(-urlcache|-decode)|mimikatz|procdump|"
-                        r"whoami|net\s+user\s+\S+\s+/add|net\s+localgroup\s+administrators|wmic.*process\s+call\s+create|"
-                        r"rundll32.*comsvcs|vssadmin.*delete|bitsadmin|mshta|regsvr32.*/i:http|ntdsutil|reg\s+save\s+hklm\\sam", re.I)
+# Two alternatives were REMOVED here and it is worth saying which, because they read as coverage:
+#   `\.php\?`  — every query-string request to any PHP page. On a WordPress or Drupal site that is
+#                most of the traffic, flagged `medium` as "web attack pattern in request path".
+#   `/wp-login` — the LOGIN PAGE of a WordPress site, requested by everyone who signs in. Brute force
+#                against it is SIGMA-WEB-0042's job (a burst of 401s), which is evidence; one GET of
+#                the login page is not.
+# What replaced them is narrower and covers more: traversal in its encoded spellings, the LFI/RFI
+# shape (a file/page parameter pointing at a URL or a traversal), a command-injection separator
+# followed by a downloader, and the dot-directories nobody browses to by accident.
+_ATTACK_PATH = re.compile(r"\.\./|\.\.%2f|%2e%2e[/%\\]|/etc/passwd|/proc/self/environ|/windows/win\.ini"
+                          r"|[?&][a-z_]{0,12}(?:file|page|path|template|include|url|doc|dir)="
+                          r"(?:https?(?::|%3a)|\.\./|/etc/|php://|data:)"
+                          r"|[?&](?:cmd|exec|system|shell_exec|passthru|eval)="
+                          r"|[;|]\s*(?:wget|curl|nc|ncat|bash|sh|python)\b"
+                          r"|\bunion\b[^\n]{0,60}\bselect\b|\bselect\b[^\n]{0,60}\binformation_schema\b"
+                          r"|<script|%3cscript|\bonerror\s*=|javascript:"
+                          r"|/\.env\b|/\.git/|/\.aws/|/\.ssh/|/\.svn/|/\.DS_Store", re.I)
+# Three alternatives here used to be BARE TOOL NAMES, and each one is a command an administrator runs
+# every day: `whoami` (in every logon script), `bitsadmin` (a shipped Windows transfer tool) and
+# `mshta` (how several line-of-business apps still launch). A 4688 carrying one of them was reported
+# `high` as "suspicious process creation". Each now has to appear in the form an ATTACKER uses it in:
+# `whoami /priv`, a bitsadmin TRANSFER, an mshta pointing at a URL or a script scheme. The rest of the
+# list grew instead — log clearing, domain recon, remote WMI, a service binPath, credential tooling.
+_SUSP_PROC = re.compile(r"powershell.*(-enc|-e |downloadstring|iex|frombase64|-nop\b|hidden)"
+                        r"|certutil.*(-urlcache|-decode|-encode|-verifyctl)|mimikatz|procdump|lazagne|"
+                        r"seatbelt|sharphound|bloodhound|rubeus|psexec|paexec|winpeas|nanodump|"
+                        r"\bwhoami(\.exe)?\s+/(all|priv|groups|user)\b|"
+                        r"net\s+user\s+\S+\s+/add|net\s+(local)?group\s+[\"']?(domain admins|enterprise admins|administrators)|"
+                        r"nltest\s+/(domain_trusts|dclist|dsgetdc)|"
+                        r"wmic.*process\s+call\s+create|wmic\s+/node:|"
+                        r"rundll32.*(comsvcs|javascript:|url\.dll)|vssadmin.*delete|"
+                        r"bitsadmin[^\n]*/(transfer|addfile|setnotifycmdline)|"
+                        r"mshta[^\n]*(https?:|javascript:|vbscript:|\\\\)|regsvr32.*/i:http|"
+                        r"esentutl[^\n]*/(y|vss)|sc\s+(create|config)[^\n]*binpath|"
+                        r"schtasks[^\n]*/create[^\n]*(powershell|cmd\.exe|mshta|https?:)|"
+                        r"wevtutil(\.exe)?\s+cl\b|ntdsutil|reg\s+save\s+hklm\\(sam|system|security)", re.I)
 _HISTORY = re.compile(r"\.bash_history|\.zsh_history|history\s+-c|unset\s+HISTFILE|HISTFILESIZE=0|HISTSIZE=0", re.I)
 _HISTORY_REMOVAL = re.compile(r"trunc|unlink|remov|rm |history -c|unset", re.I)
 _SHELL = re.compile(r"COMMAND=(?:/usr)?/bin/(?:ba|z|da)?sh\b|COMMAND=/bin/su\b|COMMAND=(?:/usr)?/bin/su\b", re.I)
@@ -735,7 +903,10 @@ _AUTH_FAIL = re.compile(r"(login|auth|authentication|password).*(fail|invalid|de
 #      SHIPPED DEFAULT of a regex Param below (never a bare constant in run_rules): RULE_PATTERNS and
 #      Rule.patterns are derived from those params, so a pattern maintained here and there would drift.
 _WEBSHELL = re.compile(r"/(c99|r57|wso|b374k|alfa|shell|cmd|backdoor|webshell|adminer|tinyfilemanager)\.(php|asp|aspx|jsp|jspx|phtml|cfm)\b"
-                       r"|\.(php|asp|aspx|jsp|jspx|phtml)\?(?:[^&]*&)*(cmd|exec|eval|system|shell|passthru|run|download)=", re.I)
+                       # `run=` and `download=` were on this list and are ordinary parameters on an
+                       # ordinary PHP page (`/files.php?download=1`). A webshell is named by the
+                       # functions it exposes, not by having a parameter.
+                       r"|\.(php|asp|aspx|jsp|jspx|phtml)\?(?:[^&]*&)*(cmd|exec|eval|system|shell|passthru|shell_exec|popen|proc_open)=", re.I)
 _JNDI = re.compile(r"\$\{\s*(?:\$\{[^}]*\}|[^}])*?jndi\s*:|\$\{jndi:|%24%7bjndi", re.I)
 _RECOVERY_DESTROY = re.compile(r"vssadmin(\.exe)?\s+delete\s+shadows|wmic\s+shadowcopy\s+delete|wbadmin(\.exe)?\s+delete\s+(catalog|systemstatebackup|backup)"
                                r"|bcdedit(\.exe)?\s+.*(recoveryenabled\s+no|bootstatuspolicy\s+ignoreallfailures)"
@@ -746,12 +917,21 @@ _REVERSE_SHELL = re.compile(r"(?:ba|z|k)?sh\s+-i\s*>&\s*/dev/(tcp|udp)/|/dev/(tc
                             r"|perl\s+-e\s+['\"]?use\s+Socket|\bmkfifo\b[^\n]*\|\s*(?:ba|z)?sh", re.I)
 _CRON_PERSIST = re.compile(r"/etc/systemd/system/[^\s]+\.(service|timer)|/etc/cron\.(d|daily|hourly|weekly|monthly)/|/var/spool/cron/"
                            r"|\bcrontab\b[^\n]*\s-(?:e|r|l\s+-u)|systemctl\s+(enable|link)\b|BEGIN\s+EDIT|REPLACE\b.*crontab", re.I)
+# Every package install on a systemd box emits `Created symlink /etc/systemd/system/…` and drops a
+# job in /etc/cron.daily — the persistence pattern matches all of it, at `high`. This is the "not
+# that" half, the same shape as `_secret_real`'s placeholder list: the package manager and the
+# systemd generator doing their job. It is a PARAM, so an analyst investigating a supply-chain
+# compromise can empty it and see every one of those lines again.
+_PERSIST_ROUTINE = re.compile(r"(?:created|removed)\s+symlink"
+                              r"|\b(?:apt|apt-get|aptd|apt\.systemd\.daily|dpkg|yum|dnf|rpm|zypper|pacman"
+                              r"|apk|snapd|unattended-upgrades?|needrestart|puppet-agent|chef-client"
+                              r"|salt-minion|cloud-init|dracut|update-rc\.d)\b", re.I)
 _SUID = re.compile(r"\bchmod\b[^\n]*\b[ug]\+s\b|\bchmod\b\s+[0-7]?[246][0-7]{3}\b|\bchown\b[^\n]*\broot\b[^\n]*\bchmod\b", re.I)
 _KERNEL_MODULE = re.compile(r"\b(insmod|modprobe|kextload|rmmod)\b|\bmodule\s+(loaded|verification\s+failed)\b|loading\s+out-of-tree\s+module", re.I)
 _ATTACHMENT_BAD = re.compile(r"\.(exe|scr|pif|com|bat|cmd|ps1|vbs|vbe|js|jse|jar|hta|msi|msp|cpl|lnk|iso|img|vhd|reg|wsf|dll)\b"
                              r"|\.(docm|xlsm|pptm|dotm|xlam|xll)\b|\.(zip|rar|7z|gz)\s*[>\)]?\s*$", re.I)
 _LONG_LABEL = re.compile(r"(?:^|\.)[A-Za-z0-9+/=_-]{40,}(?:\.|$)")
-_SUSPICIOUS_SNI = re.compile(r"\.(tk|top|xyz|gq|ml|cf|ru|su|cc|pw|buzz|click|zip|mov)$"
+_SUSPICIOUS_SNI = re.compile(r"\.(tk|top|xyz|gq|ml|cf|ru|su|cc|pw|buzz|click|zip|mov|onion)$"
                              r"|(duckdns|no-ip|noip|hopto|ddns|dynu|serveo|ngrok|trycloudflare|localtunnel|pagekite|portmap|onion)\.", re.I)
 # The FORMAT branches are high confidence on their own (an AWS key id, a PEM header, a JWT, a Slack /
 # GitHub / Stripe token, a Slack webhook). The ASSIGNED branch — `password=…`, `apikey: …` — is where the
@@ -811,9 +991,162 @@ def _secret_real(raw: str, rx: "re.Pattern[str]", url_public: set[str], placehol
 _ENCODED_CMD = re.compile(r"powershell(\.exe)?[^\n]*\s-(?:e|en|enc|enco|encod|encode|encoded|encodedcommand)\s+[A-Za-z0-9+/=]{24,}"
                           r"|FromBase64String\s*\(|certutil(\.exe)?[^\n]*-decode|base64\s+(?:-d|--decode)[^\n]*\|\s*(?:ba|z)?sh"
                           r"|\[Convert\]::FromBase64String|echo\s+[A-Za-z0-9+/=]{40,}\s*\|\s*base64\s+(?:-d|--decode)", re.I)
-_RANSOM = re.compile(r"\b(READ_?ME|HOW[_ ]?TO[_ ]?DECRYPT|DECRYPT[_-]?(FILES|INSTRUCTION)|RECOVER[_-]?(FILES|YOUR)|RESTORE[-_]?FILES|"
-                     r"YOUR[_-]?FILES[_-]?ARE[_-]?ENCRYPTED)[^\n]{0,40}\.(txt|html|hta)\b"
-                     r"|\.(locky|crypt|cryptolocker|encrypted|enc|lockbit|conti|ryuk|revil|sodinokibi|djvu|wannacry|wncry|onion|makop|phobos|cerber)\b", re.I)
+# The ransomware indicator, and the three GROUPS `_ransom_real` reads to decide whether a match means
+# anything. Measured before this shape existed: 24 of 27 lines of an ORDINARY corpus fired it at
+# `critical` — every README.txt a package ships, every `.enc` ansible-vault/sops/openssl writes, a
+# scanned `.djvu` document, a `.onion` address in a proxy log. The regex cannot tell those from
+# evidence; the surrounding line can, exactly as `_secret_real` does for SIGMA-APP-0070.
+#   note    — a ransom-note file name. Strong unless the stem is the GENERIC "README", which is in
+#             every software distribution on earth.
+#   verdict — a security product's own ransomware signature name (the Microsoft `Ransom:Win32/…`
+#             shape). Deliberately narrow: "ransomware" as a word appears in every advisory.
+#   doc/ext — an encrypted-file extension. `ext` splits into FAMILY names, which fire alone, and
+#             AMBIGUOUS ones (enc, crypt, encrypted, locked, djvu, onion, aes) which do not: those
+#             need the line to corroborate, or the extension to be appended to a USER DOCUMENT
+#             (`payroll.xlsx.encrypted`) — backup tools append to archives and databases, ransomware
+#             appends to the things people opened.
+_RANSOM = re.compile(r"(?P<note>(?<![A-Za-z0-9])(?:READ[_ -]?ME|HOW[_ -]?TO[_ -]?DECRYPT|DECRYPT[_-]?(?:FILES|INSTRUCTION|INFO)"
+                     r"|RECOVER[_-]?(?:FILES|YOUR|DATA)|RESTORE[-_]?(?:FILES|MY[-_]?FILES)"
+                     r"|YOUR[_-]?FILES[_-]?ARE[_-]?ENCRYPTED)[^\n]{0,40}\.(?:txt|html|hta)\b)"
+                     r"|(?P<verdict>\bRansom(?:ware)?[:/](?:Win32|Win64|MSIL|Script|Linux|Android|O97M|HTML|Generic)[/.])"
+                     r"|(?P<doc>\.(?:docx?|xlsx?|pptx?|pdf|jpe?g|png|gif|bmp|tiff?|rtf|csv|odt|ods|odp|psd|dwg|eml|msg|pst|txt|vsdx?))?"
+                     r"\.(?P<ext>cryptolocker|crypt(?:ed)?|encrypted|encrypt|enc|locky|lockbit|locked|conti|ryuk|revil"
+                     r"|sodinokibi|djvu|wannacry|wncry|onion|makop|phobos|cerber|darkside|blackcat|blackbasta|akira"
+                     r"|avoslocker|hellokitty|blacksuit|nokoyawa|mallox|netwalker|egregor|clop|aes)\b", re.I)
+# Extensions that are a ransomware family and nothing else: they fire on their own.
+_RANSOM_FAMILY = ("locky, lockbit, cryptolocker, conti, ryuk, revil, sodinokibi, wannacry, wncry, makop, "
+                  "phobos, cerber, darkside, blackcat, blackbasta, akira, avoslocker, hellokitty, "
+                  "blacksuit, nokoyawa, mallox, netwalker, egregor, clop")
+# Extensions that ordinary software writes all day. They need the LINE to say something else.
+_RANSOM_AMBIGUOUS = "enc, encrypt, encrypted, crypt, crypted, locked, djvu, onion, aes"
+# Note stems that are not a ransom note by themselves. README.txt is the single biggest source of
+# false positives this rule had.
+_RANSOM_GENERIC_NOTES = "readme"
+# What a line must say for an AMBIGUOUS extension or a generic note name to mean anything. NOT a bare
+# "decrypt": `ansible-vault decrypt secrets.enc` is a normal line and it would corroborate itself.
+# NOT a bare ".onion" either, for the same reason — that IS the ambiguous match in a proxy log.
+_RANSOM_CONTEXT = re.compile(r"\bransom(?:ware|ed)?\b|decryptor|decryption\s+(?:key|tool|id|software)"
+                             r"|how[ _-]?to[ _-]?decrypt|(?:your|all)\s+(?:files|data|documents)\s+"
+                             r"(?:have\s+been|has\s+been|are|were)\s+encrypted|all\s+your\s+(?:files|data)"
+                             r"|bitcoin|monero|\bxmr\b|\bbtc\s+(?:wallet|address)|tor\s+browser"
+                             r"|(?:restore|recover)[ _-]?(?:your[ _-]?)?files", re.I)
+# Words that mean a security product STOPPED it. The finding is real and the claim is different:
+# "this was blocked" is not "the encryption has already started", and calling both critical is how an
+# analyst learns to skim the rule.
+_RANSOM_BLOCKED = ("blocked, quarantined, quarantine, cleaned, removed, prevented, remediated, "
+                   "contained, not allowed, denied, deleted, no action needed")
+# --- the ransom note's TEXT (SIGMA-APP-0085). A file NAME is a guess about what a file holds; the
+#     note's own words are the thing itself, and they survive every rename.
+_RANSOM_CLAIM = re.compile(r"(?:all\s+)?your\s+(?:files|data|documents|network|company|servers)\s+"
+                           r"(?:have\s+been|has\s+been|are|were|is)\s+(?:been\s+)?(?:encrypted|locked|stolen)"
+                           r"|we\s+have\s+(?:encrypted|locked)\s+(?:all\s+)?your"
+                           r"|all\s+of\s+your\s+files\s+(?:are|have\s+been)\s+encrypted"
+                           r"|your\s+(?:important\s+)?files\s+(?:are|have\s+been)\s+encrypted", re.I)
+_RANSOM_MARKERS = re.compile(r"decryptor|decryption\s+(?:key|tool|id|software)|\.onion\b|tor\s+browser"
+                             r"|bitcoin|monero|\bxmr\b|\bbtc\b|\bransom\b|personal\s+id|your\s+unique\s+id"
+                             r"|do\s+not\s+(?:rename|modify|try\s+to)|permanently\s+(?:lost|deleted)"
+                             r"|(?:leak|publish)(?:ed)?\s+(?:site|on\s+our)|contact\s+us", re.I)
+
+
+# The trailing file path in front of a match, so an ambiguous extension can be asked the one
+# question that separates ransomware from a backup job: was the SAME file renamed in place?
+_FNAME_TAIL = re.compile(r"[A-Za-z0-9_.\-/\\:]{3,120}$")
+# Characters a ransom note decorates its name with. `_readme.txt` (STOP/Djvu) and `!!!README!!!.txt`
+# are notes; `/usr/share/doc/openssl/README.txt` is a package.
+_NOTE_DECORATION = "_!#+@$~"
+
+
+def _rename_in_place(raw: str, start: int) -> bool:
+    """`payroll.xlsx -> payroll.xlsx.lockbit` / `renamed backup.sql to backup.sql.encrypted`.
+
+    Ransomware renames the file it found; a backup or secrets tool WRITES A NEW ONE. So the same
+    base name appearing twice before the extension is the shape that tells them apart, and it needs
+    no vocabulary at all. The base must itself carry a dot, or `cp secrets secrets.enc` would look
+    like a rename.
+    """
+    head = raw[:start]
+    m = _FNAME_TAIL.search(head)
+    if not m:
+        return False
+    name = re.split(r"[/\\]", m.group(0))[-1]
+    return len(name) >= 4 and "." in name and head.count(name) >= 2
+
+
+def _ransom_real(raw: str, rx: "re.Pattern[str]", family: set[str], ambiguous: set[str],
+                 generic_notes: set[str], context: "re.Pattern[str]") -> bool:
+    """Does `raw` describe ransomware, or only contain a string that a ransomware family also uses?
+
+    The same second-opinion shape as `_secret_real`, and for the same reason: the pattern is a claim
+    about a SUBSTRING and the evidence is the LINE. Measured on a 27-line corpus of ordinary evidence
+    (package logs, a web access log, ansible-vault, borg, a scanned .djvu, a Tor proxy row) the
+    pattern alone fired on 24 of them, every one at `critical`.
+
+    A match is STRONG when it is a specific ransom-note name, a security product's own ransomware
+    signature, a family extension, or an ambiguous extension appended to a USER DOCUMENT
+    (`payroll.xlsx.encrypted` — backup tools append to archives and databases, not to the things
+    people opened). It is WEAK when it is a bare `README.txt` or a bare ambiguous extension.
+
+    One strong match anywhere on the line is enough, exactly like `_secret_real`. A weak one needs the
+    line to corroborate it (`_RANSOM_CONTEXT`) — including via another match on the same line, which
+    is why the strong scan happens first. An analyst override with none of the named groups is
+    treated as all-strong: a gate derived from groups nobody has seen says nothing.
+    """
+    weak = False
+    for m in rx.finditer(raw):
+        gd = m.groupdict()
+        if not gd or ("note" not in gd and "ext" not in gd and "verdict" not in gd):
+            return True                                  # an override without the groups
+        if gd.get("verdict"):
+            return True
+        note = gd.get("note")
+        if note:
+            start = m.start("note")
+            if start > 0 and raw[start - 1] in _NOTE_DECORATION:
+                return True                              # _readme.txt, !!!README!!!.txt
+            stem = re.sub(r"[^a-z0-9]+", "", note.lower().rsplit(".", 1)[0])
+            if stem in generic_notes:
+                weak = True
+                continue
+            return True
+        ext = (gd.get("ext") or "").lower()
+        if not ext:
+            continue
+        if ext in family:
+            return True
+        if ext in ambiguous:
+            if gd.get("doc"):                            # …xlsx.encrypted, …pdf.enc
+                return True
+            if _rename_in_place(raw, m.start()):
+                return True
+            weak = True
+    return bool(weak and context.search(raw))
+
+
+def _ransom_blocked(raw: str, markers: Iterable[str]) -> bool:
+    """Did a security product say it STOPPED this? Then the claim is containment, not encryption."""
+    low = raw.lower()
+    return any(m in low for m in markers)
+
+
+def _ransom_note_text(raw: str, claim: "re.Pattern[str]", markers: "re.Pattern[str]", need: int) -> bool:
+    """A ransom NOTE, judged by its own words: the encryption claim plus `need` distinct markers.
+
+    The claim is mandatory. On its own it is a sentence an advisory could also contain, so the note
+    has to carry the rest of what a note carries — a decryptor offer, a wallet, an onion address, a
+    personal id, a threat. Distinct MATCHED TEXT, not occurrences: a note repeating the word bitcoin
+    nine times has said one thing.
+    """
+    if not claim.search(raw):
+        return False
+    if need <= 0:
+        return True
+    seen: set[str] = set()
+    for m in markers.finditer(raw):
+        seen.add(m.group(0).lower())
+        if len(seen) >= need:
+            return True
+    return False
+
 
 # ---- regexes for the Windows / Azure / Microsoft 365 tranche. Same rule as every other pattern here:
 #      each is the SHIPPED DEFAULT of a regex Param, never a bare constant read by run_rules.
@@ -831,6 +1164,40 @@ _FORWARDING = re.compile(r"ForwardingSmtpAddress|ForwardingAddress|DeliverToMail
                          r"\bForwardTo\b|\bRedirectTo\b|BlindCopyTo", re.I)
 _THREAT_VERDICT = re.compile(r"\b(phish|malware|spam|malicious|highconfidencephish|ransomware|"
                              r"blocked|quarantined|zap|replaced|delivered\s*to\s*junk)\b", re.I)
+
+# ---- the fourth tranche. Same rule again: each is the SHIPPED DEFAULT of a regex Param.
+# A program that OPENS documents and a program that RUNS commands. Neither list contains
+# explorer.exe or services.exe, which spawn shells legitimately all day.
+_PARENT_APP = re.compile(r"\\(?:winword|excel|powerpnt|outlook|msaccess|visio|onenote|mspub|"
+                         r"acrord32|acrobat|wordpad|equnedt32|chrome|msedge|firefox|iexplore|"
+                         r"opera|brave|thunderbird)\.exe$", re.I)
+_CHILD_SHELL = re.compile(r"\\(?:cmd|powershell|pwsh|wscript|cscript|mshta|rundll32|regsvr32|certutil|"
+                          r"bitsadmin|curl|wget|schtasks|bash|wsl|installutil|msbuild|msiexec|"
+                          r"forfiles|hh)\.exe$", re.I)
+# curl|sh — the download that never touches disk. `[^\n|;]` on the first alternative keeps the match
+# inside one command rather than letting a later pipe in a long line satisfy it.
+_PIPE_TO_SHELL = re.compile(r"\b(?:curl|wget|fetch)\b[^\n|;]{0,200}\|\s*(?:sudo\s+)?(?:/usr)?(?:/bin/)?"
+                            r"(?:ba|z|k|da)?sh\b"
+                            r"|\b(?:curl|wget|fetch)\b[^\n|;]{0,200}\|\s*(?:sudo\s+)?"
+                            r"(?:python[0-9.]*|perl|ruby|node|php)\b"
+                            r"|\b(?:curl|wget)\b[^\n]{0,200}\|\s*(?:sudo\s+)?tee\b[^\n]{0,60}\|\s*(?:ba|z)?sh\b", re.I)
+# A shell being EXECUTED, in the spellings auditd, sudo and the shell's own logs use.
+_SHELL_EXEC = re.compile(r"exe=\"?/(?:usr/)?bin/(?:ba|z|k|da|t?c)?sh\"?|COMMAND=/(?:usr/)?bin/(?:ba|z|k|da)?sh\b"
+                         r"|\bargc=\d+\s+a0=\"?/(?:usr/)?bin/(?:ba|z|da)?sh|\b/bin/(?:ba|z|da|k)?sh\s+-[ic]\b"
+                         r"|\bnew\s+shell\b|\bspawned\s+/bin/", re.I)
+# The log itself being destroyed, on either platform. `> /var/log/x` is deliberately NOT here: an
+# ordinary service command line redirects into /var/log and it would fire on every one of them.
+_LOG_DESTROY = re.compile(r"journalctl[^\n]*--vacuum|\brm\s+(?:-[rfvi]+\s+)*/var/log|\bshred\b[^\n]*/var/log"
+                          r"|\btruncate\s+-s\s*0+\s+/var/log|\bcat\s+/dev/null\s*>\s*/var/log"
+                          r"|\bauditctl\s+-D\b|\bsystemctl\s+(?:stop|disable|mask)\s+(?:rsyslog|syslog-ng|auditd|systemd-journald)"
+                          r"|\bservice\s+(?:rsyslog|syslog-ng|auditd)\s+stop\b|\bsetenforce\s+0\b"
+                          r"|wevtutil(?:\.exe)?\s+cl\b|Clear-EventLog|Remove-EventLog", re.I)
+# invoice.pdf.exe — what the reader sees, then what Windows does with it. U+202E (right-to-left
+# override) is allowed between the two because that is the other half of the same trick.
+_DOUBLE_EXT = re.compile(r"\.(?:pdf|docx?|xlsx?|pptx?|txt|rtf|csv|jpe?g|png|gif|bmp|mp[34]|avi|zip|rar|7z|"
+                         r"htm|html|xml|json|log)[ \t‮]{0,40}\."
+                         r"(?:exe|scr|pif|com|bat|cmd|ps1|vbs|vbe|js|jse|jar|hta|msi|msp|cpl|lnk|wsf|dll|"
+                         r"iso|img|reg|inf|sct)\b", re.I)
 
 # ------------------------------------------------------------ editable condition parameters
 # Every constant that decides whether a built-in fires lives here rather than inline in run_rules, so
@@ -852,6 +1219,10 @@ PARAMS: dict[str, tuple[Param, ...]] = {
     "SIGMA-AUTH-0203": (
         P("prefixes", "Service account prefixes", "values", "svc_, svc-, sa_, sa-", "user", "Username prefixes treated as service accounts (prefix match)."),
         P("loginPath", "Login path", "regex", _LOGIN_PATH.pattern, "http.path", "Which request paths count as an interactive login."),
+        P("eventId", "Windows event ID", "text", "4624", "EventID", "Windows Security event id for a successful logon."),
+        P("logonTypes", "Interactive logon types", "values", "2, 10, 11", "LogonType",
+          "Windows logon types that mean a PERSON sat down at a session. Type 3 (network) and type 5 "
+          "(service) are deliberately absent: those are what a service account is FOR."),
     ),
     "SIGMA-WEB-0050": (
         P("pattern", "Scanner user-agent", "regex", _SCANNER_UA.pattern, "user_agent", "Matched against the user-agent of every web request."),
@@ -892,6 +1263,10 @@ PARAMS: dict[str, tuple[Param, ...]] = {
         P("eventId", "Event ID", "text", "4624", "EventID", "Windows Security event id."),
         P("logonTypes", "Logon types", "values", "3", "LogonType", "Logon types that count (prefix match, so 3 covers 3.x)."),
         P("packages", "Auth packages", "values", "NTLM", "AuthenticationPackageName", "Authentication packages that count (substring, case-insensitive)."),
+        P("ignoreAccounts", "Ignored accounts", "values", "-, anonymous logon", "TargetUserName",
+          "Accounts never flagged. COMPUTER accounts (trailing $) are always ignored: a machine "
+          "authenticating to another machine over NTLM is what a Windows domain does all day, and it "
+          "was drowning the account logons this rule exists to surface."),
     ),
     "SIGMA-WIN-0091": (
         P("eventId", "Event ID", "text", "4672", "EventID", "Windows Security event id."),
@@ -1041,6 +1416,10 @@ PARAMS: dict[str, tuple[Param, ...]] = {
     "SIGMA-LNX-0065": (
         P("pattern", "Persistence path", "regex", _CRON_PERSIST.pattern, "raw", "Matched against the raw line of every syslog event."),
         P("programs", "Scheduler programs", "values", "cron, crontab, systemd, anacron", "program", "syslog programs whose lines are checked against the pattern."),
+        P("ignorePattern", "Routine package activity", "regex", _PERSIST_ROUTINE.pattern, "raw",
+          "A line matching this is the package manager or the systemd generator doing its job - every "
+          "install writes a unit and a cron job. Empty this (set it to something that matches nothing) "
+          "to see those lines again, for instance when investigating a supply-chain compromise."),
     ),
     "SIGMA-LNX-0070": (
         P("pattern", "SUID change", "regex", _SUID.pattern, "raw", "Matched against the raw line of every syslog event."),
@@ -1125,7 +1504,38 @@ PARAMS: dict[str, tuple[Param, ...]] = {
         P("pattern", "Encoded command", "regex", _ENCODED_CMD.pattern, "raw", "Matched against the raw line of every event, whatever its source."),
     ),
     "SIGMA-APP-0080": (
-        P("pattern", "Ransomware indicator", "regex", _RANSOM.pattern, "raw", "Matched against the raw line of every event, whatever its source."),
+        P("pattern", "Ransomware indicator", "regex", _RANSOM.pattern, "raw",
+          "Matched against the raw line of every event, whatever its source. Keep the (?P<note>…) / "
+          "(?P<verdict>…) / (?P<doc>…) / (?P<ext>…) groups: they are what the checks below read. A "
+          "pattern without them is treated as all-real."),
+        P("familyExtensions", "Family extensions", "values", _RANSOM_FAMILY, "raw",
+          "Extensions that name a ransomware family and nothing else. These fire on their own."),
+        P("ambiguousExtensions", "Extensions needing corroboration", "values", _RANSOM_AMBIGUOUS, "raw",
+          "Extensions ordinary software writes constantly (backup archives, ansible-vault/sops secrets, "
+          "scanned documents, Tor addresses). One of these only fires when the line corroborates it, or "
+          "when it is appended to a user document."),
+        P("genericNotes", "Generic note names", "values", _RANSOM_GENERIC_NOTES, "raw",
+          "Note stems that are not a ransom note by themselves - README.txt ships with almost every "
+          "piece of software. Corroboration required, same as an ambiguous extension. Separators are "
+          "ignored when comparing, so 'readme' also covers READ_ME, read-me and READ ME; a name that "
+          "is DECORATED (_readme.txt, !!!README!!!.txt) is never treated as generic."),
+        P("corroboration", "Corroborating text", "regex", _RANSOM_CONTEXT.pattern, "raw",
+          "What a line must also say for a generic note name or an ambiguous extension to count. "
+          "Deliberately excludes a bare 'decrypt' and a bare '.onion' - both corroborate themselves."),
+        P("blockedMarkers", "Containment markers", "values", _RANSOM_BLOCKED, "raw",
+          "Words that mean a security product stopped it. Present, the hit is reported at high rather "
+          "than critical: blocked is a different claim from encrypted."),
+    ),
+    "SIGMA-APP-0085": (
+        P("pattern", "Encryption claim", "regex", _RANSOM_CLAIM.pattern, "raw",
+          "The sentence a ransom note always contains. Mandatory: matched against the raw line of every "
+          "event, whatever its source."),
+        P("markers", "Corroborating markers", "regex", _RANSOM_MARKERS.pattern, "raw",
+          "The rest of what a note carries - a decryptor offer, a wallet, an onion address, a personal "
+          "id, a do-not-rename threat."),
+        P("minMarkers", "Distinct markers needed", "int", "1", "raw",
+          "How many DIFFERENT markers must appear alongside the claim. Distinct matched text, not "
+          "occurrences: a note repeating 'bitcoin' nine times has said one thing."),
     ),
     "SIGMA-AUTH-0240": (
         P("window", "Time window", "seconds", "3600", "", "Length of the sliding window the addresses are counted in."),
@@ -1270,11 +1680,117 @@ PARAMS: dict[str, tuple[Param, ...]] = {
           "Matched against the threat/verdict/delivery fields of a mail security event."),
         P("fields", "Verdict fields", "values", "ThreatType, Verdict, DeliveryAction, DetectionMethod, PhishConfidenceLevel",
           "ThreatType", "Fields a mail security product publishes its verdict in."),
+        P("containedValues", "Verdicts meaning it was stopped", "values",
+          "blocked, quarantined, zap, replaced, delivered to junk, filtered as spam", "DeliveryAction",
+          "A message the platform stopped is reported at medium rather than high. It is still on the "
+          "timeline and it still names the sender - what changes is the claim, because 'somebody aimed "
+          "this at the tenant and it was blocked' is not 'this was delivered'."),
     ),
     "SIGMA-M365-0038": (
         P("operations", "Audit operations", "values",
           "Set-AdminAuditLogConfig, Set-MailboxAuditBypassAssociation, Set-Mailbox -AuditEnabled, Remove-UnifiedAuditLogRetentionPolicy",
           "Operation", "Operations that switch audit logging off or narrow it."),
+    ),
+    "SIGMA-WIN-0191": (
+        P("eventId", "Event ID", "text", "4768", "EventID", "Windows Security event id for a Kerberos TGT request."),
+        P("preAuthValues", "PreAuthType values", "values", "0", "PreAuthType",
+          "Values of PreAuthType that mean pre-authentication was not required. 0 is 'none'; every other "
+          "documented value is a real pre-auth type."),
+    ),
+    "SIGMA-WIN-0192": (
+        P("eventId", "Event ID", "text", "4662", "EventID", "Windows Security event id for an operation on a directory object."),
+        P("replicationGuids", "Replication rights", "values",
+          "1131f6aa-9c07-11d1-f79f-00c04fc2dcd2, 1131f6ad-9c07-11d1-f79f-00c04fc2dcd2, 89e95b76-444d-4c62-991a-0facbeda640c",
+          "Properties", "The control access rights that mean directory replication: Get-Changes, "
+          "Get-Changes-All and Get-Changes-In-Filtered-Set. Matched against Properties and the raw body."),
+        P("ignoreAccounts", "Accounts ignored", "values", "system, local service, network service, -, msol_", "SubjectUserName",
+          "Subjects that replicate legitimately. Computer accounts (trailing $) are always ignored - that "
+          "is what a domain controller replicating to another domain controller looks like, and it is the "
+          "entire normal volume of this event. Prefix match, so 'msol_' covers the AD Connect accounts."),
+    ),
+    "SIGMA-WIN-0195": (
+        P("eventId", "Event ID", "text", "4624", "EventID", "Windows Security event id for a successful logon."),
+        P("logonTypes", "Logon types", "values", "2, 3, 7, 10, 11", "LogonType",
+          "Logon types counted as a usable session. Type 5 (service) and 4 (batch) are absent: those are "
+          "the machine starting its own work, not somebody arriving."),
+        P("reasons", "Source reputations that count", "values",
+          "401 burst, 403 burst, scanner, ssh brute force, 4625 burst, password spray, port scan, "
+          "webshell request, jndi injection", "src.reputation",
+          "Which of the reputations this run assigns mean the address was ATTACKING. 'remote desktop "
+          "logon' is deliberately absent: SIGMA-WIN-0225 marks an address for having logged in over "
+          "RDP, so counting it here would make every public RDP session report itself as a successful "
+          "brute force."),
+    ),
+    "SIGMA-WIN-0245": (
+        P("eventIds", "Event IDs", "values", "4688, 1", "EventID",
+          "Process-creation event ids: 4688 on the Security channel, 1 on the Sysmon channel."),
+        P("parents", "Parent processes", "regex", _PARENT_APP.pattern, "ParentProcessName",
+          "Programs that open documents and should never start a command interpreter. Matched against "
+          "ParentProcessName / ParentImage."),
+        P("children", "Child processes", "regex", _CHILD_SHELL.pattern, "NewProcessName",
+          "Command interpreters and download tools. Matched against NewProcessName / Image."),
+    ),
+    "SIGMA-LNX-0080": (
+        P("pattern", "Pipe to shell", "regex", _PIPE_TO_SHELL.pattern, "raw",
+          "Matched against the raw line of every syslog event."),
+    ),
+    "SIGMA-LNX-0085": (
+        P("accounts", "Service accounts", "values",
+          "www-data, apache, httpd, nginx, tomcat, jetty, jboss, jenkins, postgres, mysql, mongodb, redis, "
+          "elasticsearch, nobody, daemon, git, node",
+          "user", "Accounts that exist to run one program. A shell under one of them is command execution "
+          "through whatever that program exposes."),
+        P("pattern", "Shell execution", "regex", _SHELL_EXEC.pattern, "raw",
+          "Matched against the raw line: how auditd, sudo and the shell itself each spell 'a shell ran'."),
+        P("userFields", "Account fields", "values", "user, acct, auid, uid_name, USER", "user",
+          "Fields the account can be published in, in addition to the event's own user."),
+    ),
+    "SIGMA-LNX-0090": (
+        P("pattern", "Log destruction", "regex", _LOG_DESTROY.pattern, "raw",
+          "Matched against the raw line of every syslog event."),
+    ),
+    "SIGMA-AZURE-0050": (
+        P("protocolFields", "Protocol fields", "values",
+          "authenticationProtocol, AuthenticationProtocol, properties.authenticationProtocol, originalTransferMethod",
+          "authenticationProtocol", "Fields the sign-in log names the grant type in."),
+        P("protocols", "Device-code protocols", "values", "devicecode, device code, deviceCodeFlow", "authenticationProtocol",
+          "Values that mean the device code grant was used."),
+        P("resultTypes", "Result codes", "values", "50199, 70016", "resultType",
+          "Entra ID result codes raised during a device code sign-in."),
+    ),
+    "SIGMA-AZURE-0054": (
+        P("resultTypes", "MFA denial codes", "values", "500121, 50074, 50076, 50072, 50158", "resultType",
+          "Result codes that mean a second factor was prompted for and not satisfied."),
+        P("window", "Time window", "seconds", "600", "", "Length of the sliding window the prompts are counted in."),
+        P("threshold", "Events to fire", "int", "5", "", "How many denied prompts against one identity inside one window."),
+    ),
+    "SIGMA-MAIL-0018": (
+        P("mismatchField", "Mismatch field", "text", "reply_to_mismatch", "reply_to_mismatch",
+          "Field the mail parser sets when Reply-To resolves to a different domain from From."),
+        P("ignoreDomains", "Domains ignored", "values", "-", "from_domain",
+          "Sender domains never flagged - a mailing list or a ticketing system legitimately redirects "
+          "replies. Substring match on the From domain."),
+    ),
+    "SIGMA-MAIL-0022": (
+        P("pattern", "Double extension", "regex", _DOUBLE_EXT.pattern, "attachments",
+          "Matched against the attachment names of every message."),
+    ),
+    "SIGMA-K8S-0040": (
+        P("resource", "Resource", "text", "pods", "resource", "Audit resource that must match."),
+        P("verb", "Verb", "text", "create", "verb", "Audit verb that must match."),
+        P("markers", "Host-namespace markers", "values",
+          '"hostNetwork":true, "hostPID":true, "hostIPC":true, "shareProcessNamespace":true', "raw",
+          "Any of these in the raw request means the pod shares a namespace with its node. Whitespace is "
+          "stripped before comparing."),
+    ),
+    "SIGMA-AWS-0100": (
+        P("identityType", "Identity type equals", "text", "AssumedRole", "userIdentity.type",
+          "Only role SESSIONS are checked - a user's own key is not an instance credential."),
+        P("sessionPrefix", "Instance session prefix", "text", "i-", "userIdentity.arn",
+          "How an EC2 instance names its role session. The arn ends assumed-role/<role>/<session>, and for "
+          "an instance the session name is the instance id."),
+        P("ignoreIps", "Addresses ignored", "values", "amazonaws.com, -", "sourceIPAddress",
+          "Callers that are AWS itself. A service principal appears here as a DNS name, not an address."),
     ),
 }
 del P
@@ -1736,12 +2252,21 @@ _SECRET_LITERALS = ("akia", "asia", "-----begin", "eyj", "password", "passwd", "
                     "api_key", "api-key", "secret", "token", "xox", "gho_", "ghp_", "ghr_", "ghs_",
                     "ghu_", "github_pat_", "sk_live_", "hooks.slack.com")
 _ENCODED_LITERALS = ("powershell", "certutil", "base64")
-_RANSOM_LITERALS = ("read_me", "readme", "decrypt", "recover", "restore", "encrypted", ".locky",
-                    ".crypt", ".enc", ".lockbit", ".conti", ".ryuk", ".revil", ".sodinokibi",
-                    ".djvu", ".wannacry", ".wncry", ".onion", ".makop", ".phobos", ".cerber")
+_RANSOM_LITERALS = ("read_me", "read me", "read-me", "readme", "decrypt", "recover", "restore",
+                    "encrypted", "ransom",
+                    # one per extension alternative, as a common PREFIX where several share one:
+                    # ".crypt" covers crypt/crypted/cryptolocker, ".enc" covers enc/encrypt/encrypted,
+                    # ".lock" covers locky/lockbit/locked, ".black" covers blackcat/blackbasta/blacksuit.
+                    ".crypt", ".enc", ".lock", ".black", ".conti", ".ryuk", ".revil", ".sodinokibi",
+                    ".djvu", ".wannacry", ".wncry", ".onion", ".makop", ".phobos", ".cerber",
+                    ".darkside", ".akira", ".avoslocker", ".hellokitty", ".nokoyawa", ".mallox",
+                    ".netwalker", ".egregor", ".clop", ".aes")
+# Every alternative of the encryption claim ends in one of these three words.
+_RANSOM_TEXT_LITERALS = ("encrypted", "locked", "stolen")
 _GATE_LITERALS = {_SECRET.pattern: _SECRET_LITERALS,
                   _ENCODED_CMD.pattern: _ENCODED_LITERALS,
-                  _RANSOM.pattern: _RANSOM_LITERALS}
+                  _RANSOM.pattern: _RANSOM_LITERALS,
+                  _RANSOM_CLAIM.pattern: _RANSOM_TEXT_LITERALS}
 _GATE_CACHE: dict[tuple, "Optional[re.Pattern[str]]"] = {}
 
 
@@ -1861,7 +2386,7 @@ CORRECTION_RULE_IDS: frozenset[str] = frozenset({
     "SIGMA-LNX-0045", "SIGMA-K8S-0025", "SIGMA-APP-0061", "SIGMA-NET-0019", "SIGMA-NET-0022",
     "SIGMA-NET-0027", "SIGMA-WEB-0071", "SIGMA-WIN-0170", "SIGMA-WIN-0190", "SIGMA-AWS-0085",
     "SIGMA-PCAP-0014", "SIGMA-PCAP-0026", "SIGMA-AZURE-0026", "SIGMA-AZURE-0042", "SIGMA-M365-0030",
-    "SIGMA-AUTH-0240",
+    "SIGMA-AUTH-0240", "SIGMA-AZURE-0054", "SIGMA-WIN-0195",
 })
 
 
@@ -2059,6 +2584,8 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     # --- Windows
     win = fam_of["windows.evtx"]
     w88_id, w88_types, w88_pkgs = _pt("SIGMA-WIN-0088", "eventId"), _pl("SIGMA-WIN-0088", "logonTypes", lower=False), _pl("SIGMA-WIN-0088", "packages")
+    w88_ignore = set(_pl("SIGMA-WIN-0088", "ignoreAccounts"))
+    a203_win_id, a203_win_types = _pt("SIGMA-AUTH-0203", "eventId"), _pl("SIGMA-AUTH-0203", "logonTypes", lower=False)
     w91_id, w91_privs = _pt("SIGMA-WIN-0091", "eventId"), _pl("SIGMA-WIN-0091", "privileges", lower=False)
     w91_ignore = set(_pl("SIGMA-WIN-0091", "ignoreAccounts")) | _SYSTEM_ACCOUNTS
     w104_id, w120_id = _pt("SIGMA-WIN-0104", "eventId"), _pt("SIGMA-WIN-0120", "eventId")
@@ -2074,7 +2601,9 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
         if eid == w88_id:
             lt = e.fields.get("LogonType", "")
             pkg = (e.fields.get("AuthenticationPackageName", "") + " " + e.fields.get("LmPackageName", "")).lower()
-            if any(lt.startswith(t) for t in w88_types) and any(p in pkg for p in w88_pkgs):
+            who = e.fields.get("TargetUserName", "")
+            if any(lt.startswith(t) for t in w88_types) and any(p in pkg for p in w88_pkgs) \
+                    and not who.endswith("$") and who.lower() not in w88_ignore:
                 _tag(e, R["WIN-0088"])
                 e.set_field("AuthPackage", "NTLM")
         if eid == w91_id:
@@ -2094,6 +2623,12 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
             grp = e.fields.get("TargetUserName", "").lower()
             if any(g in grp for g in w150_groups):
                 _tag(e, R["WIN-0150"])
+        # A service account signing in INTERACTIVELY on Windows is the same finding AUTH-0203 already
+        # makes for the web tier and for the AWS console, and it was the one place it could not see.
+        if eid == a203_win_id and a203_prefixes \
+                and any(e.fields.get("LogonType", "").startswith(t) for t in a203_win_types) \
+                and e.fields.get("TargetUserName", "").lower().startswith(a203_prefixes):
+            _tag(e, R["AUTH-0203"])
     w140_id = _pt("SIGMA-WIN-0140", "eventId")
     for key, anchor, count, first in find_bursts(
         (i for i in win if events[i].fields.get("EventID") == w140_id), ts,
@@ -2296,6 +2831,13 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     w180_ids = _pl("SIGMA-WIN-0180", "eventIds", lower=False)
     w185_id = _pt("SIGMA-WIN-0185", "eventId")
     rx_recovery = _prx("SIGMA-WIN-0185", "pattern", _RECOVERY_DESTROY)
+    w191_id, w191_values = _pt("SIGMA-WIN-0191", "eventId"), _pl("SIGMA-WIN-0191", "preAuthValues")
+    w192_id, w192_guids = _pt("SIGMA-WIN-0192", "eventId"), _pl("SIGMA-WIN-0192", "replicationGuids")
+    w192_ignore = set(_pl("SIGMA-WIN-0192", "ignoreAccounts")) | _SYSTEM_ACCOUNTS
+    w192_prefixes = tuple(p for p in w192_ignore if p.endswith("_"))
+    w245_ids = _pl("SIGMA-WIN-0245", "eventIds", lower=False)
+    rx_parent = _prx("SIGMA-WIN-0245", "parents", _PARENT_APP)
+    rx_child = _prx("SIGMA-WIN-0245", "children", _CHILD_SHELL)
     a230_win_id = "4624"
     for i in (win if full else ()):
         e = events[i]
@@ -2314,6 +2856,26 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
         if eid == a230_win_id and any(e.fields.get("LogonType", "").startswith(t) for t in a230_types) and _outside_hours(i):
             _tag(e, R["AUTH-0230"])
             e.set_field("signin.hour", f"{int((float(ts[i]) // 3600) % 24):02d}:00 UTC")
+        if eid == w191_id and e.fields.get("PreAuthType", "").strip().lower() in w191_values \
+                and not e.fields.get("TargetUserName", "").endswith("$"):
+            _tag(e, R["WIN-0191"])
+            e.set_field_default("tactic", "credential access")
+        if eid == w192_id:
+            # A DC replicating to another DC is a computer account, and it is the entire normal volume
+            # of 4662. Anything else asking for these rights is asking for every password in the domain.
+            who = e.fields.get("SubjectUserName", "").lower()
+            if who and not who.endswith("$") and who not in w192_ignore \
+                    and not (w192_prefixes and who.startswith(w192_prefixes)):
+                props = (e.fields.get("Properties", "") + " " + e.raw).lower()
+                if any(g in props for g in w192_guids):
+                    _tag(e, R["WIN-0192"])
+                    e.set_field("tactic", "credential access")
+        if eid in w245_ids:
+            parent = e.fields.get("ParentProcessName") or e.fields.get("ParentImage", "")
+            child = e.fields.get("NewProcessName") or e.fields.get("Image", "")
+            if parent and child and rx_parent.search(parent) and rx_child.search(child):
+                _tag(e, R["WIN-0245"])
+                e.set_field_default("tactic", "execution")
     w170_id = _pt("SIGMA-WIN-0170", "eventId")
     for ip, anchor, count, first in find_distinct_bursts(
         (i for i in win if events[i].fields.get("EventID") == w170_id), ts,
@@ -2339,16 +2901,45 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     lnx = fam_of["syslog"]
     rx_revshell = _prx("SIGMA-LNX-0060", "pattern", _REVERSE_SHELL)
     rx_persist = _prx("SIGMA-LNX-0065", "pattern", _CRON_PERSIST)
+    rx_persist_routine = _prx("SIGMA-LNX-0065", "ignorePattern", _PERSIST_ROUTINE)
     l65_progs = _pl("SIGMA-LNX-0065", "programs")
     rx_suid = _prx("SIGMA-LNX-0070", "pattern", _SUID)
     rx_kmod = _prx("SIGMA-LNX-0075", "pattern", _KERNEL_MODULE)
+    rx_pipe_shell = _prx("SIGMA-LNX-0080", "pattern", _PIPE_TO_SHELL)
+    l85_accounts = set(_pl("SIGMA-LNX-0085", "accounts"))
+    l85_fields = _pl("SIGMA-LNX-0085", "userFields", lower=False)
+    rx_shell_exec = _prx("SIGMA-LNX-0085", "pattern", _SHELL_EXEC)
+    rx_log_destroy = _prx("SIGMA-LNX-0090", "pattern", _LOG_DESTROY)
     for i in (lnx if full else ()):
         e = events[i]
         raw = e.raw
+        if rx_pipe_shell.search(raw):
+            _tag(e, R["LNX-0080"])
+            e.set_field_default("tactic", "execution")
+        if rx_log_destroy.search(raw):
+            _tag(e, R["LNX-0090"])
+            e.set_field_default("tactic", "defense evasion")
+        # The account test FIRST: it is a handful of dict lookups against a small set, and it dismisses
+        # every line that is not about a service account before the shell regex is ever compiled against
+        # it. The other order would run a regex over every syslog line in the pool.
+        if l85_accounts:
+            who = e.user.lower()
+            if who not in l85_accounts:
+                who = ""
+                for fk in l85_fields:
+                    v = e.fields.get(fk, "")
+                    if v and v.lower() in l85_accounts:
+                        who = v.lower()
+                        break
+            if who and rx_shell_exec.search(raw):
+                _tag(e, R["LNX-0085"])
+                e.set_field("tactic", "execution")
+                e.set_field_default("shell.account", who)
         if rx_revshell.search(raw):
             _tag(e, R["LNX-0060"])
             e.set_field("tactic", "command and control")
-        if rx_persist.search(raw) or e.fields.get("program", "").lower() in l65_progs and rx_persist.search(e.msg):
+        if (rx_persist.search(raw) or e.fields.get("program", "").lower() in l65_progs and rx_persist.search(e.msg)) \
+                and not rx_persist_routine.search(raw):
             _tag(e, R["LNX-0065"])
             e.set_field_default("tactic", "persistence")
         if rx_suid.search(raw):
@@ -2361,11 +2952,23 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     a80_names, a80_markers = _pl("SIGMA-AWS-0080", "eventNames"), _pl("SIGMA-AWS-0080", "publicMarkers", lower=False)
     a90_names, a90_markers = _pl("SIGMA-AWS-0090", "eventNames"), _pl("SIGMA-AWS-0090", "shareMarkers", lower=False)
     a95_names = _pl("SIGMA-AWS-0095", "eventNames")
+    a100_type = _pt("SIGMA-AWS-0100", "identityType").lower()
+    a100_prefix = _pt("SIGMA-AWS-0100", "sessionPrefix").lower()
+    a100_ignore = _pl("SIGMA-AWS-0100", "ignoreIps")
     a230_ct_name = "ConsoleLogin"
     for i in (ct if full else ()):
         e = events[i]
         name = e.fields.get("eventName", "")
         lname = name.lower()
+        if a100_prefix and e.fields.get("userIdentity.type", "").lower() == a100_type:
+            arn = e.fields.get("userIdentity.arn", "").lower()
+            session = arn.rpartition("/")[2]
+            if arn.find("assumed-role/") >= 0 and session.startswith(a100_prefix):
+                caller = e.fields.get("sourceIPAddress", "")
+                if caller and not any(x in caller.lower() for x in a100_ignore) and is_public_ip(caller):
+                    _tag(e, R["AWS-0100"])
+                    e.set_field("tactic", "credential access")
+                    e.set_field_default("instance.session", session)
         if lname in a80_names and any(m in e.raw for m in a80_markers):
             _tag(e, R["AWS-0080"])
             e.set_field("exposure", "public")
@@ -2388,8 +2991,13 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     # --- Kubernetes (continued)
     k30_res, k30_verbs, k30_roles = _pl("SIGMA-K8S-0030", "resources"), _pl("SIGMA-K8S-0030", "verbs"), _pl("SIGMA-K8S-0030", "roles")
     k35_users, k35_groups = _pl("SIGMA-K8S-0035", "users"), _pl("SIGMA-K8S-0035", "groups")
+    k40_res, k40_verb, k40_markers = _pt("SIGMA-K8S-0040", "resource"), _pt("SIGMA-K8S-0040", "verb"), _pl("SIGMA-K8S-0040", "markers", lower=False)
     for i in (k8s if full else ()):
         e = events[i]
+        if e.fields.get("resource", "") == k40_res and e.fields.get("verb", "") == k40_verb \
+                and any(m.replace(" ", "") in e.raw.replace(" ", "") for m in k40_markers):
+            _tag(e, R["K8S-0040"])
+            e.set_field_default("tactic", "privilege escalation")
         if e.fields.get("resource", "").lower() in k30_res and e.fields.get("verb", "").lower() in k30_verbs \
                 and any(r in e.raw.lower() for r in k30_roles):
             _tag(e, R["K8S-0030"])
@@ -2401,8 +3009,16 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     mail = fam_of["mail.message"]
     m10_fields, m10_fails = _pl("SIGMA-MAIL-0010", "verdictFields", lower=False), _pl("SIGMA-MAIL-0010", "failValues")
     rx_attach = _prx("SIGMA-MAIL-0014", "pattern", _ATTACHMENT_BAD)
+    m18_field, m18_ignore = _pt("SIGMA-MAIL-0018", "mismatchField"), _pl("SIGMA-MAIL-0018", "ignoreDomains")
+    rx_double_ext = _prx("SIGMA-MAIL-0022", "pattern", _DOUBLE_EXT)
     for i in (mail if full else ()):
         e = events[i]
+        if e.fields.get(m18_field, "").lower() in ("yes", "true", "1"):
+            dom = e.fields.get("from_domain", "").lower()
+            if not (dom and any(x and x in dom for x in m18_ignore)):
+                _tag(e, R["MAIL-0018"])
+                e.set_field_default("tactic", "initial access")
+                e.set_field_default("reply.domain", e.fields.get("reply_to", "")[:80])
         for f in m10_fields:
             v = e.fields.get(f, "").lower()
             if v and any(x in v for x in m10_fails):
@@ -2412,6 +3028,9 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
         names = e.fields.get("attachments") or e.fields.get("attachment_names") or e.fields.get("attachment", "")
         if names and rx_attach.search(names):
             _tag(e, R["MAIL-0014"])
+            e.set_field_default("tactic", "initial access")
+        if names and rx_double_ext.search(names):
+            _tag(e, R["MAIL-0022"])
             e.set_field_default("tactic", "initial access")
 
     # --- packet captures
@@ -2468,13 +3087,25 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     s70_placeholders = set(_pl("SIGMA-APP-0070", "placeholders"))
     rx_encoded = _prx("SIGMA-APP-0075", "pattern", _ENCODED_CMD)
     rx_ransom = _prx("SIGMA-APP-0080", "pattern", _RANSOM)
+    s80_family = set(_pl("SIGMA-APP-0080", "familyExtensions"))
+    s80_ambiguous = set(_pl("SIGMA-APP-0080", "ambiguousExtensions"))
+    # cleaned the same way `_ransom_real` cleans the matched stem, so READ_ME / read-me / READ ME are
+    # one value and an analyst can write whichever spelling they think in
+    s80_generic = {re.sub(r"[^a-z0-9]+", "", x) for x in _pl("SIGMA-APP-0080", "genericNotes")}
+    rx_ransom_ctx = _prx("SIGMA-APP-0080", "corroboration", _RANSOM_CONTEXT)
+    s80_blocked = _pl("SIGMA-APP-0080", "blockedMarkers")
+    rx_note_claim = _prx("SIGMA-APP-0085", "pattern", _RANSOM_CLAIM)
+    rx_note_markers = _prx("SIGMA-APP-0085", "markers", _RANSOM_MARKERS)
+    s85_min = _pn("SIGMA-APP-0085", "minMarkers")
     universal = [(rx_secret, R["APP-0070"], "credential exposure"),
                  (rx_encoded, R["APP-0075"], "defense evasion"),
-                 (rx_ransom, R["APP-0080"], "impact")]
+                 (rx_ransom, R["APP-0080"], "impact"),
+                 (rx_note_claim, R["APP-0085"], "impact")]
     universal = [u for u in universal if u[1].id not in _DISABLED]
     if universal and full:
         screen = _screen([u[0] for u in universal])
         gate = _literal_gate([u[0] for u in universal])
+        a70_rule, a80_rule, a85_rule = R["APP-0070"], R["APP-0080"], R["APP-0085"]
         if screen is not None:
             for e in events:
                 raw = e.raw
@@ -2487,11 +3118,23 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
                 for rx, rule, tactic in universal:
                     if not rx.search(raw):
                         continue
-                    # the secret rule alone has a second opinion: shape is not enough - see _secret_real
-                    if rule is R["APP-0070"] and not _secret_real(raw, rx, s70_public, s70_placeholders):
+                    # Shape is not enough for any of the three any-source rules: each has a second
+                    # opinion that reads the LINE. See _secret_real / _ransom_real / _ransom_note_text.
+                    level = None
+                    if rule is a70_rule:
+                        if not _secret_real(raw, rx, s70_public, s70_placeholders):
+                            continue
+                    elif rule is a80_rule:
+                        if not _ransom_real(raw, rx, s80_family, s80_ambiguous, s80_generic, rx_ransom_ctx):
+                            continue
+                        if _ransom_blocked(raw, s80_blocked):
+                            level = "high"
+                    elif rule is a85_rule and not _ransom_note_text(raw, rx, rx_note_markers, s85_min):
                         continue
-                    _tag(e, rule)
+                    _tag(e, rule, level)
                     e.set_field_default("tactic", tactic)
+                    if level == "high":
+                        e.set_field_default("containment", "reported blocked by a security product")
 
 
     _tick(80.0)
@@ -2525,8 +3168,13 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
                 attackers.setdefault(f.get("IpAddress", ""), "remote desktop logon")
             continue
         eid = f.get("EventID", "")
+        # 4648 is "ran something AS somebody else", and the commonest 4648 on any Windows box has the
+        # SAME account on both sides — a service or a scheduled task re-authenticating as itself.
+        # That is not "logon with explicit credentials" in the sense the rule describes, and it is
+        # most of the volume.
         if eid == w200_id and f.get("SubjectUserName", "").lower() not in w200_ignore \
-                and not f.get("SubjectUserName", "").endswith("$"):
+                and not f.get("SubjectUserName", "").endswith("$") \
+                and f.get("TargetUserName", "").lower() != f.get("SubjectUserName", "").lower():
             _tag(e, R["WIN-0200"])
         if eid == w205_id:
             _tag(e, R["WIN-0205"])
@@ -2564,6 +3212,9 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     az34_ops, az34_roles = _pl("SIGMA-AZURE-0034", "operations"), _pl("SIGMA-AZURE-0034", "roles")
     az38_ops = _pl("SIGMA-AZURE-0038", "operations")
     az46_ops = _pl("SIGMA-AZURE-0046", "operations")
+    az50_fields = _pl("SIGMA-AZURE-0050", "protocolFields", lower=False)
+    az50_protocols = _pl("SIGMA-AZURE-0050", "protocols")
+    az50_results = _pl("SIGMA-AZURE-0050", "resultTypes")
     m10_sev_field, m10_sevs, m10_markers = (_pt("SIGMA-M365-0010", "severityField"),
                                             _pl("SIGMA-M365-0010", "severities"),
                                             _pl("SIGMA-M365-0010", "markers", lower=False))
@@ -2573,6 +3224,7 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
     m22_ops = _pl("SIGMA-M365-0022", "operations")
     m26_ops = _pl("SIGMA-M365-0026", "operations")
     m34_fields = _pl("SIGMA-M365-0034", "fields", lower=False)
+    m34_contained = _pl("SIGMA-M365-0034", "containedValues")
     rx_verdict = _prx("SIGMA-M365-0034", "pattern", _THREAT_VERDICT)
     m38_ops = _pl("SIGMA-M365-0038", "operations")
     for i in (cloud if full else ()):
@@ -2622,6 +3274,12 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
         if _cloud_get(f, "conditionalAccessStatus", "ConditionalAccessStatus").lower() in az22_status \
                 or (result and result in az22_results):
             _tag(e, R["AZURE-0022"])
+        if az50_protocols:
+            proto = _cloud_get(f, *az50_fields).lower().replace("_", "").replace("-", "")
+            if (proto and any(p.replace(" ", "").replace("_", "").replace("-", "") in proto.replace(" ", "")
+                              for p in az50_protocols)) or (result and result in az50_results):
+                _tag(e, R["AZURE-0050"])
+                e.set_field_default("tactic", "initial access")
         if any(f.get(m) for m in m10_markers):
             sev = (f.get(m10_sev_field) or f.get(m10_sev_field.lower()) or "").lower()
             if sev in m10_sevs:
@@ -2629,8 +3287,13 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
         for vf in m34_fields:
             v = f.get(vf, "")
             if v and rx_verdict.search(v):
-                _tag(e, R["M365-0034"])
+                # A verdict the platform ACTED on is a different claim from one it merely recorded.
+                blocked = any(c in " ".join(f.get(x, "") for x in m34_fields).lower()
+                              for c in m34_contained)
+                _tag(e, R["M365-0034"], "medium" if blocked else None)
                 e.set_field_default("verdict", v[:60])
+                if blocked:
+                    e.set_field_default("containment", "stopped by the mail platform")
                 break
     # Azure sign-in failure burst, distinct countries, and bulk file operations.
     az26_ok = _pt("SIGMA-AZURE-0026", "successResult")
@@ -2650,6 +3313,17 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
         _tag(ev, R["AZURE-0042"])
         ev.set_field("signin.countries", str(count))
         ev.msg = f"{who} signed in from {count} different countries"
+    # MFA prompt bombing: the password is already right, so each of these is the attacker asking the
+    # owner to approve. One is a mistyped phone; five in ten minutes is somebody waiting for fatigue.
+    az54_results = _pl("SIGMA-AZURE-0054", "resultTypes")
+    for _, anchor, count, first in find_bursts(
+        (i for i in cloud
+         if _cloud_get(events[i].fields, "resultType", "ResultType", "properties.resultType") in az54_results), ts,
+            lambda i: _cloud_identity(events[i]), _pn("SIGMA-AZURE-0054", "window"), _pn("SIGMA-AZURE-0054", "threshold")):
+        ev = events[anchor]
+        _tag(ev, R["AZURE-0054"])
+        ev.set_field("mfa.prompts", str(count))
+        ev.msg = f"{_cloud_identity(ev) or 'account'} denied {count} second-factor prompts in one window"
     m30_ops = _pl("SIGMA-M365-0030", "operations")
     for _, anchor, count, first in find_bursts(
         (i for i in cloud
@@ -2658,6 +3332,30 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
         _tag(events[anchor], R["M365-0030"])
         events[anchor].set_field("burst.count", str(count))
         events[anchor].set_field_default("tactic", "exfiltration")
+
+    # --- WIN-0195: the Windows half of SIGMA-AUTH-0111. Its own loop, AFTER every rule that can put an
+    # address into `attackers` — a 401 burst, a scanner, an SSH brute force, a 4625 burst, a spray, a
+    # port scan, an RDP logon from outside. Folding it into the loop above would ask the question while
+    # the map was still being filled, so whether it fired would depend on event ORDER.
+    w195_id, w195_types = _pt("SIGMA-WIN-0195", "eventId"), _pl("SIGMA-WIN-0195", "logonTypes", lower=False)
+    w195_reasons = set(_pl("SIGMA-WIN-0195", "reasons"))
+    if attackers:
+        for i in win:
+            e = events[i]
+            f = e.fields
+            if f.get("EventID", "") != w195_id:
+                continue
+            ip = f.get("IpAddress", "")
+            why = attackers.get(ip)
+            # The reputation has to mean the address was ATTACKING. SIGMA-WIN-0225 marks an address
+            # for having logged in over RDP from outside, and without this filter every one of those
+            # sessions came back as "the brute force worked" — a claim about itself.
+            if not why or why.lower() not in w195_reasons \
+                    or not any(f.get("LogonType", "").startswith(t) for t in w195_types):
+                continue
+            _tag(e, R["WIN-0195"])
+            e.set_field("src.reputation", why)
+            e.msg = f"{f.get('TargetUserName', 'account')} logged on from {ip} — the source of a {why}"
 
     # --- one account, many addresses. Deliberately across EVERY family that carries an authentication:
     # a credential in two pairs of hands rarely shows up in one log, and the whole point of a workspace

@@ -300,6 +300,29 @@ def suggestions() -> list[ExclusionSuggestion]:
                 "are the loudest thing in an audit log and almost never the finding.",
             conditions=[C(field="user", op="starts_with", value="system:")]),
         ExclusionSuggestion(
+            name="Malware sample and test corpora",
+            why="A file named report.wncry or HOW_TO_DECRYPT.txt under a samples, testdata or "
+                "quarantine directory is a copy somebody kept on purpose, not an encryption in "
+                "progress. SIGMA-APP-0080 cannot tell the two apart from the line alone and should "
+                "not try — where your samples live is something only you know. Scoped to the "
+                "any-source rules, so the same names elsewhere still fire.",
+            conditions=[C(field="raw", op="regex",
+                          value=r"(?i)[/\\](malware[-_]?samples?|samples?|testdata|test[-_]?data|"
+                                r"quarantine|virus[-_]?share|corpus)[/\\]")],
+            ruleIds=["SIGMA-APP-0070", "SIGMA-APP-0075", "SIGMA-APP-0080", "SIGMA-APP-0085"]),
+        ExclusionSuggestion(
+            name="Vulnerability scanners you run yourself",
+            why="An authenticated scanner walks every path, tries every injection and collects "
+                "thousands of 403s and 401s, which is indistinguishable from an attacker doing the "
+                "same thing — because it IS the same thing, with permission. Only you know which "
+                "addresses are yours, so edit the list before adding this: shipped as-is it would "
+                "suppress a real scanner using the same product.",
+            conditions=[C(field="user_agent", op="regex",
+                          value=r"(?i)(Nessus|Qualys|Nexpose|Rapid7|Tenable|OpenVAS|Nikto/|"
+                                r"InsightVM|AppScan|WebInspect)")],
+            ruleIds=["SIGMA-WEB-0050", "SIGMA-WEB-0058", "SIGMA-WEB-0071", "SIGMA-WEB-0075",
+                     "SIGMA-WEB-0084", "SIGMA-NET-0027"]),
+        ExclusionSuggestion(
             name="Monitoring and health checks",
             why="Uptime probes hit the same path from the same few addresses forever, which looks like "
                 "scanning to a rule that counts requests.",

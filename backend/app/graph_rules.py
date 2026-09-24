@@ -22,10 +22,24 @@ of its events, and stamping an arbitrary "representative" event with it would pu
 does not support it — the exact silent-evidence bug this project keeps fighting. They are served on
 their own endpoint and shown in their own section.
 
-Cost: one pass over nodes and one over edges of an ALREADY-BUILT graph — no extraction, no walk of the
-pool. Measured on the analyst's 18k-node / 221k-relation graph: ~40 ms. It is never allowed to trigger a
-graph build (see `routers/graph.graph_anomalies`), because a rule roll-up must not be the thing that
-starts a 90-second extraction.
+Cost: passes over the nodes and the edges of an ALREADY-BUILT graph — no extraction, no walk of the
+pool. It is never allowed to trigger a graph build (see `routers/graph.graph_anomalies`), because a
+rule roll-up must not be the thing that starts a 90-second extraction, and `graph_findings` memoises
+the result per (graph, rule catalogue, exclusion list) so it is paid once per graph rather than once
+per request.
+
+Measured here on a synthetic graph of the size CLAUDE.md records for the analyst's workspace
+(18,429 nodes / 221,239 relations), best of five, warm:
+
+    the ten fan-out / edge rules                      897 ms
+    plus SIGMA-GRAPH-0050 (bridges) and -0054       1,704 ms
+
+The structural rules cost what they cost: a bridge is a global property, so finding one needs the
+undirected adjacency (`_adjacency`, one walk of the edge keys) and a Tarjan low-link pass over it.
+Both are O(nodes + relations) — the same order as `_neighbours_by_type`, which the module already
+pays for — and `SIGMA-GRAPH-0050.maxNodes` is the bound that keeps it from growing without limit on
+a graph nobody sized for. Disabling either rule removes its cost entirely; nothing here is built
+speculatively.
 """
 from __future__ import annotations
 
@@ -137,8 +151,27 @@ GRAPH_RULES: tuple[Rule, ...] = (
          description="An entity that both fired detections and connects to many others. This is where an "
                      "investigation starts: the detections say something happened, the links say how far it "
                      "reaches.",
-         trigger="A node whose events carry at least the detection threshold AND whose degree (distinct "
-                 "neighbours) is at least the connection threshold.",
+         trigger="A node of one of the reported types whose events carry at least the detection threshold "
+                 "AND whose degree (distinct neighbours) is at least the connection threshold.",
+         mechanism="graph"),
+    Rule("SIGMA-GRAPH-0050", "The only link between two groups", "medium",
+         description="One relation holds two otherwise separate parts of the picture together. Cut it and "
+                     "the graph falls into two pieces. That is where an investigation should look first: "
+                     "whatever crossed between those groups crossed HERE, and nowhere else. It is the jump "
+                     "host, the shared account, the one file that travelled - and it is a property of the "
+                     "PAIR, which is why the finding names both ends and cites the relation's own events.",
+         trigger="A bridge in the undirected graph (Tarjan low-link) whose removal separates two groups, "
+                 "each holding at least the minimum number of entities. Skipped entirely above the node "
+                 "cap, because this runs on the request thread.",
+         mechanism="graph"),
+    Rule("SIGMA-GRAPH-0054", "Outside address reaching into the estate through one account", "high",
+         description="A public address used an account a handful of times, and that account is on several "
+                     "machines. Read forwards it is the shape of an intrusion: something outside, a "
+                     "credential, then the estate. Read backwards it is the question worth asking about any "
+                     "external login - what does that account actually reach?",
+         trigger="A PUBLIC ip node linked to a user node by an authentication relation whose event count is "
+                 "at or below the rare threshold, where that user is also linked to at least the minimum "
+                 "number of host nodes. The peer is the account; the related entities are the hosts.",
          mechanism="graph"),
 )
 
@@ -148,6 +181,18 @@ GRAPH_PARAMS: dict[str, tuple[Param, ...]] = {
           "Relation types that count as this address acting as this account."),
         P("distinctUsers", "Distinct accounts to fire", "int", "6", "user",
           "How many DIFFERENT accounts one address must be linked to."),
+        P("outlierMultiplier", "Outlier multiple", "int", "3", "",
+          "The address must ALSO reach this many times the 90th-percentile fan-out of the other "
+          "addresses in this graph. A domain controller, a VPN concentrator and a proxy all make this "
+          "shape and all of them are the norm in their own workspace. Set to 1 to use the fixed "
+          "threshold alone."),
+        P("minPopulation", "Comparable entities needed", "int", "40", "",
+          "Below this many addresses the distribution describes nothing and only the fixed threshold "
+          "applies - a small graph must not invent outliers out of four data points."),
+        P("burstHours", "Hours that count as compressed", "int", "1", "",
+          "An address whose whole life in the logs fits inside this many hours is reported CRITICAL: "
+          "forty accounts over three weeks is a shared bastion, forty accounts in four minutes is a "
+          "spray, and they are the same shape. Set to 0 to report every one at the shipped severity."),
     ),
     "SIGMA-GRAPH-0014": (
         P("relations", "Authentication relations", "values", "auth_from, session, on_host", "relation",
@@ -160,6 +205,16 @@ GRAPH_PARAMS: dict[str, tuple[Param, ...]] = {
           "Relation types that count as this host reaching out."),
         P("distinctIps", "Distinct addresses to fire", "int", "25", "ip",
           "How many DIFFERENT public addresses one host must reach."),
+        P("outlierMultiplier", "Outlier multiple", "int", "3", "",
+          "The host must ALSO reach this many times the 90th-percentile external fan-out of the other "
+          "hosts here. Any workstation with a browser passes a fixed 25 in a minute; what is worth "
+          "reporting is the one reaching further than its neighbours. Set to 1 for the fixed threshold "
+          "alone."),
+        P("minPopulation", "Comparable entities needed", "int", "40", "",
+          "Below this many hosts the distribution describes nothing and only the fixed threshold applies."),
+        P("burstHours", "Hours that count as compressed", "int", "1", "",
+          "A host whose whole life in the logs fits inside this many hours is reported CRITICAL - that "
+          "is a scan or a beacon walking its fallbacks, not a day of browsing. 0 disables the escalation."),
     ),
     "SIGMA-GRAPH-0022": (
         P("nodeTypes", "Entity types", "values", "hash, file", "type",
@@ -184,6 +239,15 @@ GRAPH_PARAMS: dict[str, tuple[Param, ...]] = {
           "Relation types that count as a name answering with an address."),
         P("distinctIps", "Distinct addresses to fire", "int", "8", "ip",
           "How many DIFFERENT addresses one name must resolve to."),
+        P("outlierMultiplier", "Outlier multiple", "int", "3", "",
+          "The name must ALSO resolve to this many times the 90th-percentile address count of the "
+          "other names here. Every CDN-hosted name answers with a pool; fast flux is the one that "
+          "answers with far more than its neighbours. Set to 1 for the fixed threshold alone."),
+        P("minPopulation", "Comparable entities needed", "int", "40", "",
+          "Below this many names the distribution describes nothing and only the fixed threshold applies."),
+        P("burstHours", "Hours that count as compressed", "int", "1", "",
+          "A name whose whole life in the logs fits inside this many hours is reported CRITICAL: a "
+          "long-lived CDN name does not appear and vanish inside an hour. 0 disables the escalation."),
     ),
     "SIGMA-GRAPH-0038": (
         P("distinctHosts", "Distinct hosts to fire", "int", "5", "host",
@@ -200,6 +264,29 @@ GRAPH_PARAMS: dict[str, tuple[Param, ...]] = {
           "How many of the entity's events must have fired a rule."),
         P("minDegree", "Connections to fire", "int", "4", "",
           "How many DIFFERENT neighbours the entity must have."),
+        P("nodeTypes", "Entity types", "values", "ip, user, host, domain, hash, file, process", "type",
+          "Types worth reporting. Without this the rule fired on INFRASTRUCTURE nodes - port:443 has "
+          "a detection on nearly every event that mentions it and a degree in the thousands, so it "
+          "was reported `critical` as the most connected entity carrying rule hits in the workspace, "
+          "which is true and says nothing."),
+    ),
+    "SIGMA-GRAPH-0050": (
+        P("minSide", "Entities each side must hold", "int", "3", "",
+          "How many entities the SMALLER of the two groups must contain. Every leaf's single relation "
+          "is technically a bridge; this is what separates 'the only way between two parts of the "
+          "picture' from 'a node with one link'."),
+        P("maxNodes", "Largest graph to analyse", "int", "20000", "",
+          "The bridge pass is linear in nodes+relations but it runs on the request thread. Above this "
+          "the rule reports nothing rather than making the Anomalies screen wait."),
+    ),
+    "SIGMA-GRAPH-0054": (
+        P("relations", "Authentication relations", "values", "auth_from, session, on_host", "relation",
+          "Relation types that count as this address being used as this account."),
+        P("rareCount", "Events that count as a first use", "int", "3", "",
+          "The address-to-account relation must be at most this many events. A busy relation is the "
+          "person who works remotely; a handful is a first use."),
+        P("minHosts", "Hosts the account must reach", "int", "2", "host",
+          "How far into the estate the account goes. One host is a login; several is a path."),
     ),
 }
 
@@ -347,6 +434,11 @@ def _neighbours_by_type(builder: Any) -> dict[str, dict[str, dict[str, set[str]]
     Built in ONE pass over the deduplicated edge keys (not over edge occurrences), because every rule
     below asks the same question in a different shape: "how many distinct X is this node linked to?".
     Six independent scans of the edge table would cost six times as much and answer the same thing.
+
+    Folding `_adjacency`'s undirected sets into this same pass was TRIED and measured SLOWER — this
+    body is the hot loop of the whole module and the extra branch plus two set writes per relation
+    cost 608 ms at 221,239 relations, against 254 ms for the separate tight loop. A shared walk is
+    usually the cheaper shape; here it is not, so the two stay apart.
     """
     out: dict[str, dict[str, dict[str, set[str]]]] = {}
     for (src, dst, rel) in builder.edges:
@@ -375,6 +467,172 @@ def _linked(index: dict[str, dict[str, dict[str, set[str]]]], node_id: str, want
 
 def _values(ids: Iterable[str]) -> list[str]:
     return [i.partition(":")[2] for i in ids]
+
+
+# --------------------------------------------------------------------------- context, not thresholds
+def _outlier_floor(values: list[int], multiplier: int, min_population: int) -> int:
+    """A threshold read off THIS graph rather than fixed in Python.
+
+    Every fan-out rule here answers "is this a lot?", and a fixed number cannot: 25 external
+    addresses is a quiet afternoon for a workstation with a browser and an extraordinary number for
+    a database server. So the rule keeps its shipped floor — which is what protects a small graph,
+    where a distribution means nothing — and ALSO requires the node to stand out against the other
+    nodes of its own type in the same workspace.
+
+    p90 rather than the median, because the interesting population is not "every address" but
+    "addresses that do a lot of this", and a distribution of mostly-ones has a median of one. Returns
+    0 (no additional floor) when the multiplier is off or the population is too small to describe.
+    """
+    if multiplier <= 1 or len(values) < min_population:
+        return 0
+    s = sorted(values)
+    return s[min(len(s) - 1, int(len(s) * 0.9))] * multiplier
+
+
+_MONTH_DAYS = (0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334)
+
+
+def _epoch(iso: str) -> Optional[float]:
+    """`2026-05-01T10:00:00Z` -> seconds. Hand-parsed for the same reason `store._iso_to_epoch` is:
+    `strptime` is microseconds per call and this is asked for every finding that survives the cut."""
+    try:
+        y, mo, d = int(iso[0:4]), int(iso[5:7]), int(iso[8:10])
+        h, mi, s = int(iso[11:13]), int(iso[14:16]), int(iso[17:19])
+    except (ValueError, IndexError):
+        return None
+    if not (1970 <= y <= 2200 and 1 <= mo <= 12 and 1 <= d <= 31):
+        return None
+    days = (y - 1970) * 365 + (y - 1969) // 4 - (y - 1901) // 100 + (y - 1601) // 400
+    days += _MONTH_DAYS[mo - 1] + (d - 1)
+    if mo > 2 and (y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)):
+        days += 1
+    return days * 86400.0 + h * 3600 + mi * 60 + s
+
+
+def _compressed(first: str, last: str, hours: int) -> bool:
+    """Did the whole of this entity's life happen inside `hours`?
+
+    This is the single cheapest thing that separates a SPRAY from a JUMP BOX, and both make the same
+    shape. Forty accounts from one address over three weeks is a shared bastion; forty accounts from
+    one address in four minutes is an attack. The rule reports both - it has to, the second one is
+    real evidence - but it says which it is looking at, and it raises the severity for the one that
+    could not be routine.
+    """
+    if hours <= 0 or not first or not last:
+        return False
+    a, b = _epoch(first), _epoch(last)
+    if a is None or b is None:
+        return False
+    return 0 <= (b - a) <= hours * 3600.0
+
+
+def _adjacency(builder: Any) -> dict[str, set[str]]:
+    """The graph as an UNDIRECTED simple graph, which is what the structural rules need.
+
+    Built separately from `_neighbours_by_type` and only when a rule that needs it is enabled: it is
+    a second pass over the edge keys, and six of the ten rules never look at it.
+    """
+    out: dict[str, set[str]] = {}
+    for (src, dst, _rel) in builder.edges:
+        if src == dst:
+            continue
+        out.setdefault(src, set()).add(dst)
+        out.setdefault(dst, set()).add(src)
+    return out
+
+
+def _bridges(adj: dict[str, set[str]], max_nodes: int) -> list[tuple[str, str, int]]:
+    """Every relation whose removal splits the graph, with the size of the SMALLER side.
+
+    An iterative Tarjan low-link pass, O(nodes + relations). Iterative and not recursive on purpose:
+    a chain of entities is exactly the shape that makes a graph deep, and Python's recursion limit
+    would turn the most interesting graph into a RecursionError.
+
+    `max_nodes` is a real bound, not a nicety. `graph_findings.ready()` runs this on the REQUEST
+    thread, so a pass that grows without limit would put an unbounded wait in front of the Anomalies
+    screen. Over the cap the rule reports nothing rather than reporting slowly - and says so through
+    its parameter, which is the analyst's to raise.
+
+    Returns (a, b, smaller_side). The leaf case - every pendant node's single edge is a bridge - is
+    left to the caller's `minSide`, because it is the caller that knows what 'a group' means.
+    """
+    if not adj or len(adj) > max_nodes:
+        return []
+    disc: dict[str, int] = {}
+    low: dict[str, int] = {}
+    size: dict[str, int] = {}
+    out: list[tuple[str, str, int]] = []
+    timer = 0
+    for root in adj:
+        if root in disc:
+            continue
+        disc[root] = low[root] = timer
+        timer += 1
+        size[root] = 1
+        seen_in_component = 1
+        component_bridges: list[tuple[str, str, str]] = []   # (a, b, subtree root)
+        stack = [(root, iter(adj[root]), "")]
+        while stack:
+            u, it, pu = stack[-1]
+            descended = False
+            for v in it:
+                if v == pu:
+                    continue                    # a simple graph, so the parent appears once
+                if v in disc:
+                    if disc[v] < low[u]:
+                        low[u] = disc[v]
+                else:
+                    disc[v] = low[v] = timer
+                    timer += 1
+                    size[v] = 1
+                    seen_in_component += 1
+                    stack.append((v, iter(adj[v]), u))
+                    descended = True
+                    break
+            if descended:
+                continue
+            stack.pop()
+            if pu:
+                if low[u] < low[pu]:
+                    low[pu] = low[u]
+                size[pu] += size[u]
+                if low[u] > disc[pu]:
+                    component_bridges.append((pu, u, u))
+        for a, b, sub in component_bridges:
+            side = size[sub]
+            out.append((a, b, min(side, seen_in_component - side)))
+    return out
+
+
+def _pair_index(builder: Any, wanted: Optional[set[tuple[str, str]]] = None
+                ) -> dict[tuple[str, str], tuple[Any, str]]:
+    """{unordered pair -> (strongest edge, its relation)}, in ONE pass over the edge table.
+
+    A finding about a pair has to cite THAT PAIR's events (`_cite_edge`), so it needs the edge
+    object; looking it up by scanning the edges per pair would be O(relations) per finding, which on
+    a 221k-relation graph is the whole budget several times over. "Strongest" is the event count, so
+    the citation comes from the relation that actually carries the evidence rather than from
+    whichever key happened to be inserted first.
+
+    `wanted` is the set of pairs the caller will actually ask about. Measured at 221,239 relations:
+    building the whole index costs 510 ms of dict writes, and the structural rules ask about a few
+    hundred pairs. With `wanted` the pass is a membership test per relation and the writes disappear.
+    """
+    out: dict[tuple[str, str], tuple[Any, str]] = {}
+    for (src, dst, rel), ed in builder.edges.items():
+        if src == dst:
+            continue
+        k = (src, dst) if src <= dst else (dst, src)
+        if wanted is not None and k not in wanted:
+            continue
+        cur = out.get(k)
+        if cur is None or ed.count > cur[0].count:
+            out[k] = (ed, rel)
+    return out
+
+
+def _pair(index: dict[tuple[str, str], tuple[Any, str]], a: str, b: str) -> tuple[Any, str]:
+    return index.get((a, b) if a <= b else (b, a), (None, ""))
 
 
 # --------------------------------------------------------------------------- evaluation
@@ -436,6 +694,19 @@ def evaluate(builder: Any) -> list[GraphFinding]:
     a38_min = tune.n("SIGMA-GRAPH-0038", "distinctHosts")
     a46_det = tune.n("SIGMA-GRAPH-0046", "minDetections")
     a46_deg = tune.n("SIGMA-GRAPH-0046", "minDegree")
+    a46_types = set(tune.l("SIGMA-GRAPH-0046", "nodeTypes"))
+    # The three rules whose shape is ALSO the shape of ordinary infrastructure. Each keeps its fixed
+    # floor and gains a second one read off this graph (see `_outlier_floor`), plus a severity
+    # escalation when the whole fan-out is compressed into a short window (see `_compressed`).
+    a10_mult, a10_pop = tune.n("SIGMA-GRAPH-0010", "outlierMultiplier"), tune.n("SIGMA-GRAPH-0010", "minPopulation")
+    a18_mult, a18_pop = tune.n("SIGMA-GRAPH-0018", "outlierMultiplier"), tune.n("SIGMA-GRAPH-0018", "minPopulation")
+    a34_mult, a34_pop = tune.n("SIGMA-GRAPH-0034", "outlierMultiplier"), tune.n("SIGMA-GRAPH-0034", "minPopulation")
+    a10_burst = tune.n("SIGMA-GRAPH-0010", "burstHours")
+    a18_burst = tune.n("SIGMA-GRAPH-0018", "burstHours")
+    a34_burst = tune.n("SIGMA-GRAPH-0034", "burstHours")
+    dist10: list[int] = []
+    dist18: list[int] = []
+    dist34: list[int] = []
 
     # (metric, node id, node, …whatever that rule's sentence needs). Nothing here formats a string,
     # sorts a neighbour list or touches the pool.
@@ -452,6 +723,8 @@ def evaluate(builder: Any) -> list[GraphFinding]:
         ntype = node.type
         if r10 and ntype == "ip":
             users = _linked(index, node_id, "user", a10_rels)
+            if users:
+                dist10.append(len(users))
             if len(users) >= a10_min:
                 rows10.append((len(users), node_id, node, users))
         if r14 and ntype == "user":
@@ -460,6 +733,8 @@ def evaluate(builder: Any) -> list[GraphFinding]:
                 rows14.append((len(ips), node_id, node, ips))
         if r18 and ntype == "host":
             ips = {i for i in _linked(index, node_id, "ip", a18_rels) if _is_public(i.partition(':')[2])}
+            if ips:
+                dist18.append(len(ips))
             if len(ips) >= a18_min:
                 rows18.append((len(ips), node_id, node, ips))
         if r22 and ntype in a22_types:
@@ -472,24 +747,29 @@ def evaluate(builder: Any) -> list[GraphFinding]:
                 rows26.append((files, node_id, node))
         if r34 and ntype == "domain":
             ips = _linked(index, node_id, "ip", a34_rels)
+            if ips:
+                dist34.append(len(ips))
             if len(ips) >= a34_min:
                 rows34.append((len(ips), node_id, node, ips))
         if r38 and ntype == "user":
             hosts = _linked(index, node_id, "host")
             if len(hosts) >= a38_min:
                 rows38.append((len(hosts), node_id, node, hosts))
-        if r46 and node.detections >= a46_det:
+        if r46 and ntype in a46_types and node.detections >= a46_det:
             deg = builder.degree(node_id)
             if deg >= a46_deg:
                 rows46.append((node.detections, node_id, node, deg))
 
     def make10(r: tuple) -> GraphFinding:
         n, node_id, node, users = r
+        fast = _compressed(node.first, node.last, a10_burst)
         return _finding(r10, node_id, node,
                         f"{node.value} authenticated as {n} different accounts "
                         f"({', '.join(sorted(_values(users))[:5])}"
-                        f"{', …' if n > 5 else ''})",
-                        n, "accounts", sorted(users), builder, overrides=ovs)
+                        f"{', …' if n > 5 else ''})"
+                        + (f" — all of it inside {a10_burst}h" if fast else ""),
+                        n, "accounts", sorted(users), builder,
+                        sev="critical" if fast else None, overrides=ovs)
 
     def make14(r: tuple) -> GraphFinding:
         n, node_id, node, ips = r
@@ -499,9 +779,12 @@ def evaluate(builder: Any) -> list[GraphFinding]:
 
     def make18(r: tuple) -> GraphFinding:
         n, node_id, node, ips = r
+        fast = _compressed(node.first, node.last, a18_burst)
         return _finding(r18, node_id, node,
-                        f"{node.value} reached {n} different public addresses",
-                        n, "external addresses", sorted(ips), builder, overrides=ovs)
+                        f"{node.value} reached {n} different public addresses"
+                        + (f" — all of it inside {a18_burst}h" if fast else ""),
+                        n, "external addresses", sorted(ips), builder,
+                        sev="critical" if fast else None, overrides=ovs)
 
     def make22(r: tuple) -> GraphFinding:
         n, node_id, node, hosts = r
@@ -521,9 +804,12 @@ def evaluate(builder: Any) -> list[GraphFinding]:
 
     def make34(r: tuple) -> GraphFinding:
         n, node_id, node, ips = r
+        fast = _compressed(node.first, node.last, a34_burst)
         return _finding(r34, node_id, node,
-                        f"{node.value} resolved to {n} different addresses",
-                        n, "addresses", sorted(ips), builder, overrides=ovs)
+                        f"{node.value} resolved to {n} different addresses"
+                        + (f" — all of it inside {a34_burst}h" if fast else ""),
+                        n, "addresses", sorted(ips), builder,
+                        sev="critical" if fast else None, overrides=ovs)
 
     def make38(r: tuple) -> GraphFinding:
         n, node_id, node, hosts = r
@@ -541,6 +827,18 @@ def evaluate(builder: Any) -> list[GraphFinding]:
                         dets, "detections", [], builder,
                         sev=node.sev if node.sev in ("critical", "high") else None,
                         overrides=ovs)
+
+    # The second floor, read off this graph. Applied to the CANDIDATE ROWS rather than inside the
+    # node loop because it cannot be known until every node of the type has been counted.
+    f10 = _outlier_floor(dist10, a10_mult, a10_pop)
+    f18 = _outlier_floor(dist18, a18_mult, a18_pop)
+    f34 = _outlier_floor(dist34, a34_mult, a34_pop)
+    if f10:
+        rows10 = [r for r in rows10 if r[0] >= f10]
+    if f18:
+        rows18 = [r for r in rows18 if r[0] >= f18]
+    if f34:
+        rows34 = [r for r in rows34 if r[0] >= f34]
 
     for rows, make in ((rows10, make10), (rows14, make14), (rows18, make18), (rows22, make22),
                        (rows26, make26), (rows34, make34), (rows38, make38), (rows46, make46)):
@@ -598,6 +896,89 @@ def evaluate(builder: Any) -> list[GraphFinding]:
 
     emit(rows30, make30)
     emit(rows42, make42)
+
+    # ---- structural rules: about a PAIR or a PATH rather than about a node's fan-out, so each one
+    # names its peer and cites the relation's own events.
+    #
+    # Both need the EDGE OBJECT behind a pair, and the edge table is the biggest thing here. So the
+    # candidates are collected FIRST, their pairs are gathered into one set, and the edge table is
+    # walked ONCE keeping only those. Building the whole pair index instead measured 510 ms at
+    # 221,239 relations, to answer a few hundred questions.
+    r50 = rules.get("SIGMA-GRAPH-0050")
+    r54 = rules.get("SIGMA-GRAPH-0054")
+    wanted: set[tuple[str, str]] = set()
+    cand50: list[tuple] = []
+    cand54: list[tuple] = []
+
+    def want(a: str, b: str) -> None:
+        wanted.add((a, b) if a <= b else (b, a))
+
+    if r50:
+        a50_side = tune.n("SIGMA-GRAPH-0050", "minSide")
+        a50_max = tune.n("SIGMA-GRAPH-0050", "maxNodes")
+        for a, b, side in _bridges(_adjacency(builder), a50_max):
+            if side < a50_side:
+                continue
+            node, peer = builder.nodes.get(a), builder.nodes.get(b)
+            if node is None or peer is None:
+                continue
+            cand50.append((side, a, node, b, peer))
+            want(a, b)
+    if r54:
+        a54_rels = tune.l("SIGMA-GRAPH-0054", "relations") or _AUTH_DEFAULT
+        a54_rare = tune.n("SIGMA-GRAPH-0054", "rareCount")
+        a54_hosts = tune.n("SIGMA-GRAPH-0054", "minHosts")
+        # Memoised: an account reached from twelve outside addresses asked the SAME question about
+        # its hosts twelve times, and `_linked` walks that node's whole relation index each time —
+        # measured as 35,000 extra calls and ~0.4 s on an 18k-node graph.
+        hosts_of: dict[str, set[str]] = {}
+        for node_id, node in builder.nodes.items():
+            if node.type != "ip" or not _is_public(node.value):
+                continue
+            for user_id in _linked(index, node_id, "user", a54_rels):
+                hosts = hosts_of.get(user_id)
+                if hosts is None:
+                    hosts = hosts_of[user_id] = _linked(index, user_id, "host")
+                if len(hosts) < a54_hosts:
+                    continue
+                user = builder.nodes.get(user_id)
+                if user is not None:
+                    cand54.append((len(hosts), node_id, node, user_id, user, hosts))
+                    want(node_id, user_id)
+
+    pairs = _pair_index(builder, wanted) if wanted else {}
+
+    if r50:
+        rows50 = [(side, a, node, b, peer) + _pair(pairs, a, b) for side, a, node, b, peer in cand50]
+
+        def make50(r: tuple) -> GraphFinding:
+            side, a, node, b, peer, ed, rel = r
+            return _finding(r50, a, node,
+                            f"{node.value} → {peer.value} is the ONLY link between two groups of "
+                            f"entities; the smaller side holds {side}"
+                            + (f" ({rel.replace('_', ' ')})" if rel else ""),
+                            side, "entities cut off", [b], builder, overrides=ovs, peer=b, edge=ed)
+
+        emit(rows50, make50)
+
+    if r54:
+        rows54: list[tuple] = []
+        for n, node_id, node, user_id, user, hosts in cand54:
+            ed, _rel = _pair(pairs, node_id, user_id)
+            if ed is None or ed.count > a54_rare:
+                continue
+            rows54.append((n, node_id, node, user_id, user, ed.count, hosts, ed))
+
+        def make54(r: tuple) -> GraphFinding:
+            n, node_id, node, user_id, user, count, hosts, ed = r
+            return _finding(r54, node_id, node,
+                            f"{node.value} used {user.value} {count} time(s), and that account "
+                            f"reaches {n} hosts ({', '.join(sorted(_values(hosts))[:5])}"
+                            f"{', …' if n > 5 else ''})",
+                            n, "hosts reached", sorted(hosts), builder, overrides=ovs,
+                            peer=user_id, edge=ed)
+
+        emit(rows54, make54)
 
     # Exclusions apply here too, but ONLY the ones that can be evaluated against a node — a node has a
     # type and a value and no fields, so an exclusion reading `dst_port` cannot be checked against one.
