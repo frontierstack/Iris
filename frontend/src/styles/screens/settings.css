@@ -989,6 +989,13 @@
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
+/* Phone width: two theme cards a row. Three left each card ~100px wide, so the miniature (the only
+   way to judge a theme at a glance) shrank to a thumbnail and every description wrapped to six lines. */
+@media (max-width: 520px) {
+  .themes {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
 @media (max-width: 720px) {
   .res-grid {
     grid-template-columns: minmax(0, 1fr);

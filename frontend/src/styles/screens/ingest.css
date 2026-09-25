@@ -62,6 +62,20 @@
   color: var(--muted);
   font-size: var(--fs-sm);
 }
+/* Phone width: the head's right-hand block (figures + the line saying what the region is for) drops
+   UNDER the title instead of squeezing beside it - at 390px the caption was a two-word-wide column
+   next to a title that had itself wrapped onto two lines. The Sources table keeps its columns and
+   scrolls inside `.table` (overflow-x: auto there); the file column is widened for it, because it
+   was truncating every name to "auth_eve…" and the name is what the row is for. */
+@media (max-width: 899px) {
+  .ingest .sec { flex-wrap: wrap; align-items: flex-start; gap: 6px 12px; }
+  .ingest .sec__hint { flex-basis: 100%; align-items: flex-start; margin-left: 0; }
+  .ingest .sec__actions { flex-wrap: wrap; }
+  .ingest .sources-grid {
+    grid-template-columns: minmax(250px, 1.7fr) minmax(110px, 0.9fr) minmax(66px, 0.7fr) minmax(72px, 0.6fr) minmax(110px, 1.1fr) minmax(96px, 0.7fr) minmax(84px, 0.6fr) minmax(150px, 1.1fr) 56px;
+    min-width: 1070px;
+  }
+}
 /* The count beside a section title is a FIGURE, not a second title: mono, tabular, quiet. */
 .sec__count {
   font-family: var(--font-mono);

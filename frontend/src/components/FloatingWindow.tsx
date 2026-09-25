@@ -61,6 +61,10 @@ function readBox(key: string, fallback: WinBox, min: Mins): WinBox {
 
 type Mode = null | { kind: 'move'; dx: number; dy: number } | { kind: 'resize'; edge: string; start: WinBox; px: number; py: number };
 
+/** Below 900px a detached window is pinned to the whole viewport by CSS; dragging or resizing it there
+ *  would only move a box the stylesheet then ignores. */
+const phoneWidth = () => typeof window !== 'undefined' && window.matchMedia('(max-width: 899px)').matches;
+
 export function FloatingWindow({
   title, sub, actions, head, className, onClose, children, storageKey, defaultBox,
   flush = false, ariaLabel, closeOnEscape = true, minW = MIN_W, minH = MIN_H,
@@ -180,6 +184,7 @@ export function FloatingWindow({
 
   const startMove = (e: React.PointerEvent) => {
     if ((e.target as HTMLElement).closest('button')) return;   // the close/dock buttons are not a handle
+    if (phoneWidth()) return;                                   // pinned full-screen on a phone (components.css)
     mode.current = { kind: 'move', dx: e.clientX - box.x, dy: e.clientY - box.y };
     setDragging(true);
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
@@ -187,6 +192,7 @@ export function FloatingWindow({
   };
 
   const startResize = (edge: string) => (e: React.PointerEvent) => {
+    if (phoneWidth()) return;
     mode.current = { kind: 'resize', edge, start: box, px: e.clientX, py: e.clientY };
     setDragging(true);
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);

@@ -1857,3 +1857,91 @@ button.header__ctx:hover {
 }
 .sec__state svg { width: 12px; height: 12px; }
 .sec-card > .sec--card:hover .sec__state { border-color: var(--accent-border); color: var(--text-bright); }
+
+/* ───────── Mobile (phone width, below 900px) ─────────
+   The shell's half of "fix the mobile width overflow". A 216px fixed rail plus a 1100px body floor
+   made every screen ~700px wider than a 390px phone. Below 900px the rail is an off-canvas DRAWER
+   (the header's menu button slides it in; a route change, Escape or a tap on the scrim closes it),
+   the header keeps only what fits, and each screen collapses its own grids in its own
+   @media (max-width: 899px) block. `visibility` is transitioned with a delay on the way OUT so a
+   closed drawer's links cannot take keyboard focus while it is off screen. */
+.header__menu { display: none; }
+.nav-scrim { display: none; }
+@media (max-width: 899px) {
+  :root { --page-pad: 16px; }
+  .sidebar-slot { width: 0; flex: 0 0 0; }
+  .sidebar {
+    width: min(280px, 84vw);
+    z-index: 47;
+    transform: translateX(-100%);
+    visibility: hidden;
+    transition: transform var(--t-med), visibility 0s linear 200ms;
+  }
+  .sidebar--open {
+    transform: none;
+    visibility: visible;
+    box-shadow: var(--shadow-lg);
+    transition: transform var(--t-med), visibility 0s;
+  }
+  .nav-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 46;
+    background: var(--overlay);
+    animation: fadeIn var(--t-med);
+  }
+  .header { padding: 0 10px; gap: 8px; }
+  .header__menu { display: inline-flex; flex: 0 0 auto; }
+  .header__back { margin-right: 0; }
+  .header__crumbs { flex: 1 1 auto; min-width: 0; gap: 6px; }
+  .header__crumb, .header__crumb-sep, .header__sub, .header__utc, .header__sep { display: none; }
+  .header__title { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-3xl); }
+  .header__ctx { max-width: 28vw; margin-left: 2px; flex: 0 1 auto; }
+  .header__right { gap: 6px; }
+  .header__ai-label { display: none; }
+}
+
+/* ───────── Mobile: shared overlays and controls (below 900px) ─────────
+   Everything here is the phone half of a desktop rule above; nothing at 900px and wider changes.
+   - A drawer is the whole width: 560-640px capped at 92vw left a sliver of page that could not be used
+     and made every drawer row wrap into a 360px column anyway.
+   - A modal scrolls ITSELF when its box is taller than the screen, and the box is centred with auto
+     margins rather than align-items:center, which would push the top of a tall box off screen where
+     it can never be scrolled back to.
+   - A detached window (FloatingWindow) is pinned to the viewport. Its geometry is an INLINE style, which
+     beats any stylesheet, hence !important - the one place in this file that needs it. FloatingWindow
+     also stops starting drags and resizes at this width, so the remembered desktop geometry is kept.
+   - Tables already scroll sideways inside their own box (.table overflow-x: auto); max-width keeps the
+     box itself from growing past the page. */
+@media (max-width: 899px) {
+  .drawer, .drawer--wide { width: 100vw; max-width: 100vw; border-left: 0; }
+  .drawer__head { padding: 12px 14px; flex-wrap: wrap; row-gap: 8px; }
+  .drawer__head > * { min-width: 0; }
+  .drawer__body { padding: 14px; min-width: 0; }
+  .drawer__foot { padding: 12px 14px; flex-wrap: wrap; }
+  .modal { padding: 16px; overflow-y: auto; align-items: flex-start; }
+  .modal__box { margin: auto 0; width: 100%; }
+  .modal__body { padding: 16px; }
+  .modal__foot { padding: 12px 16px; flex-wrap: wrap; }
+  .modal__text, .modal__extra { overflow-wrap: anywhere; }
+  .toasts { left: 16px; right: 16px; bottom: 16px; max-width: none; }
+  .table { max-width: 100%; }
+  .sec { flex-wrap: wrap; gap: 10px; }
+  .sec__actions, .sec__right { flex-wrap: wrap; flex: 1 1 auto; min-width: 0; }
+  .card__head { flex-wrap: wrap; }
+  .segbar { max-width: 100%; overflow-x: auto; flex: 0 1 auto; }
+  .state { min-width: 0; overflow-wrap: anywhere; }
+  .floatwin {
+    left: 0 !important;
+    top: 0 !important;
+    width: 100vw !important;
+    height: 100dvh !important;
+    min-width: 0 !important;
+    min-height: 0 !important;
+    border: 0;
+    border-radius: 0;
+  }
+  .floatwin__head { cursor: default; }
+  .floatwin__edge, .floatwin__corner, .floatwin__grip { display: none; }
+}

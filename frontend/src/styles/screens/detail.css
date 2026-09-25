@@ -379,3 +379,20 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* ── phone width ──
+   One column, the identity block's actions under the facts, and the correlated-event row as time +
+   message with its reason on a line of its own. The DOUBLED class is load-bearing: responsive.css is
+   imported last and pins `.detail` to `1fr 300px` at <=1280px, which beat this file's own one-column
+   rule - on a 390px phone that left the main column ~20px wide, one character per line. */
+@media (max-width: 899px) {
+  .detail.detail { grid-template-columns: minmax(0, 1fr); }
+  .detail .detail__head { flex-wrap: wrap; padding: 12px; }
+  .detail .detail__actions { flex-basis: 100%; justify-content: flex-start; }
+  .detail .detail__title { font-size: var(--fs-3xl); }
+  .detail .detail__fact { max-width: 100%; }
+  .detail .detail__fact--file { max-width: 100%; }
+  .detail .fields-grid { grid-template-columns: minmax(0, 1fr); padding: 12px; }
+  .detail .corr-grid { grid-template-columns: 64px minmax(0, 1fr); }
+  .detail .corr__reason { grid-column: 1 / -1; justify-content: flex-start; }
+}

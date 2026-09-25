@@ -765,6 +765,14 @@ export function SearchScreen() {
   const gridStyle = useMemo(
     () => ({ gridTemplateColumns: `22px ${colDefs.map((c) => c.width).join(' ')} 84px` }) as React.CSSProperties,
     [colDefs]);
+  // The narrowest the grid can be drawn: every column's own minimum (each width starts with one), plus
+  // a little for the gaps. On a phone the list scrolls sideways at this width inside its own frame
+  // rather than crushing the message to nothing (search.css, max-width 899px); desktop never reads it.
+  const rowsMin = useMemo(
+    // + 40: the row's own side padding (measured: 30px short without it, and the rows then scrolled
+    // sideways on their own, apart from the head)
+    () => 22 + 84 + 40 + colDefs.reduce((n, c) => n + parseInt(/(\d+)px/.exec(c.width)?.[1] ?? '90', 10) + 12, 0),
+    [colDefs]);
 
   return (
     <div className="page search">
@@ -926,7 +934,7 @@ export function SearchScreen() {
           {query.isError ? (
             <div className="search__error"><ErrorState title="Search failed" error={query.error} onRetry={() => void query.refetch()} /></div>
           ) : (
-            <div className="search__results" style={{ opacity: query.isFetching && !query.isFetchingNextPage && rows.length ? 0.6 : 1, transition: 'opacity var(--t-fast)' }}>
+            <div className="search__results" style={{ opacity: query.isFetching && !query.isFetchingNextPage && rows.length ? 0.6 : 1, transition: 'opacity var(--t-fast)', ['--rows-min' as string]: `${rowsMin}px` }}>
               <div className="table__head results-grid" style={gridStyle}>
                 <div />
                 {colDefs.map((col) => (col.kind === 'ts' ? (

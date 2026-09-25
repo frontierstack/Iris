@@ -58,7 +58,9 @@ function applyOrder(items: NavDef[], saved: string[] | undefined): NavDef[] {
   return [...items].sort((a, b) => (rank.get(a.to) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.to) ?? Number.MAX_SAFE_INTEGER));
 }
 
-export function Sidebar() {
+/** `open`/`onClose` matter only on a PHONE-WIDTH window, where the rail is an off-canvas drawer the
+ *  header's menu button slides in (see "Mobile" in components.css). On a desktop both are inert. */
+export function Sidebar({ open = false, onClose }: { open?: boolean; onClose?: () => void }) {
   const c = useCase();
   const cases = useCases();
   const anomalies = useAnomalyCount();
@@ -152,7 +154,7 @@ export function Sidebar() {
   const online = !health.isError;
   return (
     <div className="sidebar-slot">
-    <aside className="sidebar">
+    <aside className={cx('sidebar', open && 'sidebar--open')} id="iris-nav">
       {/* THE BRAND IS THE WORDMARK ALONE. The template puts a rotated accent lozenge beside its
           wordmark and that was transcribed; it went the same way the eye glyph did, on sight
           ("Remove this Iris icon, sidebar__mark"). What is left is the row's height — exactly the
@@ -203,6 +205,7 @@ export function Sidebar() {
                     onDragOver={reorderable ? onItemDragOver(grp.id, n.to) : undefined}
                     onDrop={reorderable ? (e) => { e.preventDefault(); endDrag(); } : undefined}
                     onDragEnd={reorderable ? endDrag : undefined}
+                    onClick={onClose}
                   >
                     {reorderable && <Icon.Grip className="nav-item__grip" aria-hidden />}
                     <span className="nav-item__label">{n.label}</span>
@@ -289,7 +292,7 @@ function ComputeBadge() {
   );
 }
 
-export function Header() {
+export function Header({ navOpen = false, onMenu }: { navOpen?: boolean; onMenu?: () => void }) {
   const meta = useScreenMeta();
   const c = useCase();
   const nav = useNavigate();
@@ -303,6 +306,17 @@ export function Header() {
   return (
     <header className="header">
       <div className="header__crumbs">
+        {/* Phone width only (CSS hides it otherwise): the rail becomes a drawer, and this opens it. */}
+        <button
+          className="btn btn--sm btn--icon header__menu"
+          onClick={onMenu}
+          aria-label={navOpen ? 'Close navigation' : 'Open navigation'}
+          aria-expanded={navOpen}
+          aria-controls="iris-nav"
+          title="Screens"
+        >
+          <Icon.PanelLeft />
+        </button>
         <button
           className="btn btn--sm btn--icon header__back"
           onClick={() => (canGoBack ? nav(-1) : nav('/ingest'))}
@@ -335,9 +349,9 @@ export function Header() {
         <span className="header__utc" title="Coordinated Universal Time"><b>{clock}</b> UTC</span>
         <ComputeBadge />
         <span className="header__sep" />
-        <button className="btn btn--sm btn--field" onClick={() => ai.open({ scope: 'case', label: c.data?.name ?? 'Active case' })} title="Ask the AI assistant about this case (Shift+A)">
+        <button className="btn btn--sm btn--field header__ai" onClick={() => ai.open({ scope: 'case', label: c.data?.name ?? 'Active case' })} title="Ask the AI assistant about this case (Shift+A)" aria-label="Assistant">
           <Icon.Sparkle />
-          Assistant
+          <span className="header__ai-label">Assistant</span>
         </button>
       </div>
     </header>
@@ -349,9 +363,18 @@ export function AppShell({ children }: { children?: ReactNode }) {
   const nav = useNavigate();
   const ai = useAiPanel();
   const c = useCase();
+  // Phone width: the nav drawer. Closed by any navigation, by Escape, and by a tap on the scrim.
+  const [navOpen, setNavOpen] = useState(false);
   useEffect(() => {
     window.scrollTo({ top: 0 });
+    setNavOpen(false);
   }, [pathname]);
+  useEffect(() => {
+    if (!navOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setNavOpen(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [navOpen]);
   // "/" anywhere jumps to search (the Search screen itself focuses the input)
   useHotkey('/', (e) => {
     if (pathname.startsWith('/search')) return;
@@ -375,9 +398,10 @@ export function AppShell({ children }: { children?: ReactNode }) {
   });
   return (
     <div className="app">
-      <Sidebar />
+      <Sidebar open={navOpen} onClose={() => setNavOpen(false)} />
+      {navOpen && <div className="nav-scrim" onClick={() => setNavOpen(false)} aria-hidden />}
       <main className="main">
-        <Header />
+        <Header navOpen={navOpen} onMenu={() => setNavOpen((o) => !o)} />
         {/* Two-phase ingest: while sources are still raw, every derived screen is answering over part
             of the corpus. The strip removes itself the moment nothing is outstanding — a `skipped`
             source is a decision, not an omission, and never keeps it alive. */}

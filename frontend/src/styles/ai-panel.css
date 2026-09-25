@@ -1625,3 +1625,19 @@ a.aic__pill { display: inline-block; text-decoration: none; }
 /* one step can carry several dispatches (a write always goes out on its own): one call line each */
 .nlog__dispatch { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .nlog__calls--bad svg, .nlog__calls--bad .nlog__got { color: var(--bad); }
+
+/* ══════════════════ phone width (below 900px) ══════════════════
+   The docked slide-over is the whole screen: 96vw of a 390px phone left a 16px strip of page that did
+   nothing but look broken. The composer's bar wraps (prompt picker on one line, Send on the next if it
+   must), the keyboard hint goes - there is no keyboard shortcut on a phone - and the textarea is 16px,
+   because iOS zooms the whole page into any input set smaller than that. */
+@media (max-width: 899px) {
+  .ai-panel { width: 100vw; max-width: 100vw; border-left: 0; }
+  .aic__head { padding: 0 8px 0 12px; gap: 8px; min-width: 0; }
+  .aic__head > * { min-width: 0; }
+  .aic-comp { border-radius: 16px; padding: 10px 10px 8px; }
+  .aic-comp__bar { flex-wrap: wrap; row-gap: 6px; }
+  .aic-comp__hint { display: none; }
+  .aic-comp__input { font-size: 16px; }
+  .ppick__menu { width: min(360px, calc(100vw - 40px)); max-width: calc(100vw - 40px); }
+}

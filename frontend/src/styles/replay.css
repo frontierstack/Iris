@@ -517,3 +517,30 @@
 @media (max-width: 720px) {
   .rps-grid { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* ── phone width (below 900px) ──
+   The console's speed row carried a native <select> whose widest OPTION ("… · whole span in ~1 min")
+   set its width, and nothing let the row wrap: 486px of controls in a 390px phone. Below 900px the
+   row wraps, the select is a fixed short control (the options still list in full when opened), the
+   seek bar's touch targets grow, and the axis line wraps instead of pushing the zoom off screen.
+   The map may scroll sideways INSIDE its own frame when it cannot reflow; the page never does. */
+@media (max-width: 899px) {
+  /* sticky on a desktop, where it is a strip; on a phone it wraps to ~330px and, stuck to the top,
+     covered the stream it narrates */
+  .rp-console { position: static; }
+  .rp-console__top { gap: 10px 12px; padding: 10px 10px 6px; }
+  .rp-transport { flex-wrap: wrap; }
+  .rp-speeds { flex-wrap: wrap; max-width: 100%; min-width: 0; }
+  .rp-speeds button { padding: 7px 10px; }
+  .rp-speeds select { width: 6.5em; min-width: 0; height: 30px; }
+  .rp-skip { min-height: 32px; }
+  .rp-scrub { padding: 4px 10px 12px; }
+  .rp-axis { flex-wrap: wrap; row-gap: 6px; }
+  .rp-axis__mid { flex: 1 1 100%; white-space: normal; }
+  .rp-zoom { margin-left: auto; }
+  .rp-zoom__b, .rp-zoom__fit { min-width: 32px; min-height: 30px; }
+  .rp-mapwrap, .rp-mapview { max-width: 100%; }
+  .rp-mapview { overflow-x: auto; }
+  .rp-stats { grid-template-columns: minmax(0, 1fr); }
+  .rp-stage, .rp-stage--2 { grid-template-columns: minmax(0, 1fr); }
+}

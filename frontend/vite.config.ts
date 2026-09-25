@@ -10,7 +10,9 @@ export default defineConfig({
       // the IPv4 loopback only, so every proxied request waits for the IPv6 attempt to time out
       // (measured elsewhere in this project at ~2 s a request against 5 ms). See CLAUDE.md,
       // "Never address this app as localhost".
-      '/api': { target: 'http://127.0.0.1:8000', changeOrigin: true },
+      // IRIS_API points the dev server at another backend - a throwaway instance with its own data dir,
+      // so a UI change can be checked against synthetic evidence instead of the analyst's.
+      '/api': { target: process.env.IRIS_API || 'http://127.0.0.1:8000', changeOrigin: true },
     },
   },
   build: { outDir: 'dist', sourcemap: false },

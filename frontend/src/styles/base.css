@@ -113,8 +113,14 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
-  min-width: 1100px;
   overflow-x: auto;
+}
+/* A desktop window narrower than the layout scrolls sideways rather than squashing it. Below 900px the
+   PHONE layout takes over instead (the rail becomes a drawer, screens stack - see "Mobile" in
+   components.css and each screen's own @media (max-width: 899px) block), and a 1100px floor there was
+   what made every screen overflow a 390px phone by ~700px. */
+@media (min-width: 900px) {
+  body { min-width: 1100px; }
 }
 
 #root {

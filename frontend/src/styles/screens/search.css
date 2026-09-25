@@ -817,3 +817,32 @@
 }
 
 .detail__backrow { display: flex; gap: 6px; margin-bottom: 12px; }
+
+/* ═══════ SEARCH · phone width ═══════
+   The console frame (a fixed-height window with the result list scrolling inside it) does not survive
+   a phone: toolbar, scoping strip, histogram and a stacked fields rail left the list ~20px tall. Below
+   900px the PAGE scrolls instead; the list keeps its own bounded scroller so the column head stays
+   put, and it scrolls SIDEWAYS inside its frame at the grid's own minimum width (`--rows-min`, set by
+   SearchScreen from the chosen columns) rather than crushing the message column to nothing. The
+   head and the rows share that one horizontal scroller, so they cannot drift apart. */
+@media (max-width: 899px) {
+  .page.search {
+    height: auto;
+    min-height: calc(100dvh - var(--header-h));
+    overflow: visible;
+  }
+  .search-layout { flex: none; }
+  .qbar { flex-wrap: wrap; padding: 10px var(--page-pad); }
+  .qbar .qbox { order: -1; flex: 1 1 100%; }
+  .qbar .qbox .kbd { display: none; }
+  .qbar .srcpick { flex: 1 1 auto; min-width: 0; }
+  .qbar--sub { flex-wrap: wrap; row-gap: 6px; padding: 6px var(--page-pad); }
+  .qbar--sub .qbar__gap { display: none; }
+  .search .search__colmenu { max-width: calc(100vw - 2 * var(--page-pad)); }
+  .range-pop { max-width: calc(100vw - 2 * var(--page-pad)); }
+  .search__results { flex: none; overflow-x: auto; }
+  .search__results > .table__head,
+  .search__results > .search__rows { min-width: var(--rows-min, 760px); }
+  .search__rows { flex: none; max-height: 70dvh; }
+  .search__statusbar { position: sticky; left: 0; flex-wrap: wrap; }
+}

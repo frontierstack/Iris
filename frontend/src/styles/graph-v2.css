@@ -522,3 +522,20 @@ button.link-item__name:hover { color: var(--accent); }
 }
 .graph__note svg { flex: none; color: var(--warn); margin-top: 2px; }
 .graph__note b { color: var(--text-bright); }
+
+/* ── phone width (below 900px) ──
+   The desktop screen is pinned to the window and never scrolls, so the canvas cannot be scrolled out
+   from under a node drag. On a phone that pin is what broke it: the filter panel takes most of an
+   844px screen, the canvas was squeezed under it and the inspector below was clipped - unreachable.
+   Below 900px the PAGE scrolls, the canvas is a fixed-height frame (touch-action: none still keeps a
+   drag on it from scrolling the page - the page scrolls only from outside the canvas), and the side
+   panel follows at its natural height. */
+@media (max-width: 899px) {
+  .page.graph { height: auto; overflow: visible; }
+  .graph__body { grid-template-columns: minmax(0, 1fr); flex: none; }
+  .graph__canvas { height: 62vh; min-height: 340px; }
+  .graph__side { overflow: visible; min-height: auto; }
+  .graph__querybar > * { min-width: 0; }
+  .graph__q { flex: 1 1 100%; }
+  .graph__filters { overflow-x: auto; }
+}
