@@ -165,4 +165,20 @@ export const Icon = {
   Doc: (p: P) => (
     <svg {...base} {...p}><path d="M4.4 2.6h5.2l2.6 2.6v8.2H4.4z" /><path d="M9.6 2.6v2.6h2.6M6.2 8h3.6M6.2 10.4h3.6" /></svg>
   ),
+  /* Transport controls for the timeline replay: outlined, the same weight as every other glyph */
+  Play: (p: P) => (
+    <svg {...base} {...p}><path d="M5 3.2v9.6L12.6 8z" /></svg>
+  ),
+  Pause: (p: P) => (
+    <svg {...base} {...p}><path d="M5.4 3.4v9.2M10.6 3.4v9.2" /></svg>
+  ),
+  StepBack: (p: P) => (
+    <svg {...base} {...p}><path d="M4 3.4v9.2M12.4 3.6v8.8L6.2 8z" /></svg>
+  ),
+  StepFwd: (p: P) => (
+    <svg {...base} {...p}><path d="M12 3.4v9.2M3.6 3.6v8.8L9.8 8z" /></svg>
+  ),
+  Restart: (p: P) => (
+    <svg {...base} {...p}><path d="M3.2 8a4.8 4.8 0 1 0 1.5-3.5" /><path d="M3.2 2.8v2.6h2.6" /></svg>
+  ),
 };

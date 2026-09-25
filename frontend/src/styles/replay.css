@@ -1,0 +1,258 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+   The case timeline REPLAY (components/TimelineReplay.tsx).
+   Transport + incident clock · the progression chart (lanes by phase, time proportional) · the
+   story, where each moment FADES IN as it happens. Motion is limited to what the replay is: the
+   playhead moving, and events arriving with a plain opacity fade — no lift, no pulse, no glow.
+   Reduced motion collapses the fades through base.css. Every value is a token, so it follows all
+   eighteen themes.
+   ───────────────────────────────────────────────────────────────────────────── */
+@keyframes rp-fade { from { opacity: 0; } to { opacity: 1; } }
+
+.rp {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  padding: 12px 14px 14px;
+}
+
+/* ── transport · clock · options ── */
+.rp-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 18px; }
+.rp-transport { display: inline-flex; align-items: center; gap: 4px; }
+.rp-play { min-width: 78px; justify-content: center; gap: 6px; }
+.rp-clock { display: flex; flex-direction: column; line-height: 1.15; min-width: 0; }
+.rp-clock__time {
+  font-size: 24px;
+  font-weight: 500;
+  color: var(--text-bright);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+.rp-clock__ms { font-size: 15px; color: var(--text-3); margin-left: 1px; }
+.rp-clock__sub { font-size: var(--fs-xs); color: var(--muted-2); font-variant-numeric: tabular-nums; }
+.rp-progress {
+  display: inline-flex; align-items: baseline; gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-inset);
+}
+.rp-progress__n { font-size: 15px; color: var(--text-bright); font-variant-numeric: tabular-nums; }
+.rp-progress__of { font-size: var(--fs-sm); color: var(--muted-2); }
+.rp-opt { display: inline-flex; align-items: center; gap: 7px; font-size: var(--fs-sm); color: var(--text-3); }
+.rp-opt__lbl { color: var(--muted-2); }
+.rp-opt select { height: 26px; padding: 0 6px; }
+.rp-opt--check { cursor: pointer; user-select: none; }
+
+/* ── the progression chart ── */
+.rp-chart {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--panel-inset);
+  overflow: clip;
+}
+.rp-lanes { border-right: 1px solid var(--border); }
+.rp-lanelbl {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px 0 12px;
+  font-size: var(--fs-sm);
+  color: var(--muted-3);
+  border-top: 1px solid transparent;
+  transition: color 300ms linear;
+}
+.rp-lanelbl__name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rp-lanelbl__n { flex: 0 0 auto; font-size: var(--fs-xs); color: var(--muted-3); font-variant-numeric: tabular-nums; }
+.rp-lanelbl--on { color: var(--text-2); }
+.rp-lanelbl--now { color: var(--text-bright); box-shadow: inset 2px 0 0 var(--accent); }
+.rp-lanelbl--now .rp-lanelbl__n { color: var(--accent-soft); }
+
+.rp-plot { position: relative; cursor: pointer; touch-action: none; min-width: 0; }
+.rp-plot:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.rp-svg { display: block; overflow: visible; }
+.rp-lane { fill: transparent; }
+.rp-lane--alt { fill: var(--panel); opacity: 0.55; }
+.rp-grid { stroke: var(--border); stroke-width: 1; }
+.rp-ticklbl { fill: var(--muted-2); font-family: var(--font-mono); font-size: 10px; }
+.rp-pastfill { fill: var(--accent-bg); opacity: 0.55; }
+.rp-prog {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.75;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  opacity: 0.9;
+}
+.rp-wire { stroke: var(--accent); stroke-width: 1.25; stroke-dasharray: 3 4; opacity: 0.55; }
+.rp-node { fill: var(--rp-sev); transition: opacity 600ms linear; }
+.rp-node--future { fill: transparent; stroke: var(--muted-3); stroke-width: 1.25; opacity: 0.6; }
+.rp-node--past { stroke: var(--panel-inset); stroke-width: 1.5; animation: rp-fade .6s linear both; }
+.rp-node-ring { fill: none; stroke: var(--accent); stroke-width: 1.5; animation: rp-fade .6s linear both; }
+.rp-head { stroke: var(--accent); stroke-width: 2; }
+.rp-head__grip { fill: var(--accent); }
+
+/* ── what comes next ── */
+.rp-status {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.rp-status > span { flex: 0 0 auto; white-space: nowrap; }
+.rp-status__k { color: var(--muted-2); }
+.rp-status__dim { color: var(--muted-3); }
+.rp-status > .rp-status__what { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-2); }
+.rp-status__span { color: var(--muted-3); font-size: var(--fs-xs); }
+
+/* ── the story: a spine, each moment fading in on it ── */
+.rp-story {
+  list-style: none;
+  margin: 0;
+  padding: 4px 4px 4px 0;
+  max-height: 560px;
+  overflow-y: auto;
+  position: relative;            /* offsetTop of a moment is measured against this */
+}
+.rp-story--idle {
+  padding: 18px 12px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  color: var(--muted-2);
+  font-size: var(--fs-base);
+  text-align: center;
+}
+.rp-mo { animation: rp-fade .7s linear both; }
+.rp-mo__gap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 0 124px;           /* sits on the spine, between two moments */
+  padding: 5px 0 5px 20px;
+  border-left: 2px solid var(--border-strong);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--muted-3);
+  font-variant-numeric: tabular-nums;
+}
+/* A long quiet stretch is part of the story too: it gets a dashed spine and a brighter label. */
+.rp-mo__gap--long { border-left-style: dashed; color: var(--text-3); padding-top: 9px; padding-bottom: 9px; }
+.rp-mo__skip {
+  padding: 0 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-3);
+}
+.rp-mo__row {
+  display: grid;
+  grid-template-columns: 116px 18px minmax(0, 1fr);
+  column-gap: 8px;
+  align-items: start;
+}
+.rp-mo__when {
+  display: flex; flex-direction: column; align-items: flex-end;
+  padding: 9px 0 0;
+  background: none; border: 0; color: inherit; font: inherit; cursor: pointer; text-align: right;
+}
+.rp-mo__when:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-sm); }
+.rp-mo__clock { font-size: var(--fs-base); color: var(--text-2); font-variant-numeric: tabular-nums; }
+.rp-mo__ms { color: var(--muted-2); font-size: var(--fs-sm); }
+.rp-mo__off { font-size: var(--fs-xs); color: var(--muted-3); font-variant-numeric: tabular-nums; }
+.rp-mo__when:hover .rp-mo__clock { color: var(--text-bright); }
+.rp-mo__dot {
+  justify-self: center;
+  margin-top: 12px;
+  width: 11px; height: 11px;
+  border-radius: 50%;
+  background: var(--rp-sev);
+  box-shadow: 0 0 0 3px var(--panel);
+}
+.rp-mo__body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 9px 12px 11px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--rp-sev);
+  border-radius: var(--radius-md);
+  background: var(--panel-2);
+  transition: border-color 400ms linear, background 400ms linear;
+}
+.rp-mo--now .rp-mo__body { border-color: var(--border-strong); border-left-color: var(--rp-sev); background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--accent-border, var(--border-strong)); }
+.rp-mo--now .rp-mo__clock { color: var(--text-bright); }
+.rp-mo__head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 22px; }
+.rp-mo__said { font-size: var(--fs-2xl); line-height: 1.5; color: var(--text); overflow-wrap: anywhere; }
+.rp-mo--now .rp-mo__said { color: var(--text-bright); }
+.rp-mo__said--log { font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--text-3); }
+.rp-mo__facts { display: flex; flex-wrap: wrap; gap: 3px 14px; font-size: var(--fs-xs); color: var(--muted-2); min-width: 0; }
+.rp-mo__facts > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rp-mo__raw {
+  margin: 0;
+  max-height: 92px;
+  overflow: auto;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-inset);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  color: var(--text-3);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-variant-ligatures: none;
+  font-feature-settings: 'calt' 0, 'liga' 0;   /* evidence: `->` stays two characters */
+  animation: rp-fade .5s linear both;
+}
+.rp-mo__more {
+  margin: 8px 0 0 124px;
+  padding: 6px 0 2px 20px;
+  border-left: 2px dotted var(--border-strong);
+  font-size: var(--fs-xs);
+  color: var(--muted-3);
+}
+
+/* ── beats: what changed at this moment ── */
+.rp-beats { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.rp-beat { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: var(--fs-sm); line-height: 1.45; }
+.rp-beat__tag {
+  flex: 0 0 86px;
+  padding: 0 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xxs);
+  line-height: 16px;
+  text-align: center;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rp-beat__text { min-width: 0; color: var(--text-2); overflow-wrap: anywhere; }
+.rp-beat--accent .rp-beat__tag { border-color: var(--accent-border, var(--accent)); color: var(--accent-soft); background: var(--accent-bg); }
+.rp-beat--accent .rp-beat__text { color: var(--text); }
+.rp-beat--warn .rp-beat__tag { border-color: var(--sev-medium); color: var(--sev-medium); }
+.rp-beat--bad .rp-beat__tag { border-color: var(--sev-high); color: var(--sev-high); }
+.rp-beat--bad .rp-beat__text { color: var(--text-bright); }
+.rp-beat--muted .rp-beat__tag { border-style: dashed; color: var(--muted-2); }
+.rp-beat--muted .rp-beat__text { color: var(--text-3); }
+
+.rp-foot { display: flex; flex-direction: column; gap: 3px; }
+.rp-foot:empty { display: none; }
+
+@media (max-width: 720px) {
+  .rp-chart { grid-template-columns: 96px minmax(0, 1fr); }
+  .rp-clock__time { font-size: 19px; }
+  .rp-mo__row { grid-template-columns: 78px 14px minmax(0, 1fr); }
+  .rp-mo__gap, .rp-mo__more { margin-left: 84px; }
+  .rp-mo__off { display: none; }
+  .rp-beat__tag { flex-basis: 70px; }
+}

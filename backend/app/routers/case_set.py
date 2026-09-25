@@ -29,6 +29,17 @@ def list_case_set() -> CaseSetResponse:
     return CaseSetResponse(entries=entries, events=STORE.stamp_membership(events), labels=STORE.case_labels())
 
 
+@router.get("/replay")
+def replay() -> dict:
+    """What the timeline replay shows at each moment: the exact instant (milliseconds recovered from
+    the log when the normalised stamp dropped them) and the observations for that event, including
+    first sightings checked against the whole pool. See app/replay.py. Read-only."""
+    from .. import replay as replay_mod
+    with STORE.lock:
+        entries = list(STORE.case_set.values())
+    return replay_mod.build(entries)
+
+
 @router.post("/{eid}", response_model=CaseSetEntry)
 def add(eid: str, body: Optional[CaseSetBody] = None) -> CaseSetEntry:
     b = body or CaseSetBody()

@@ -750,6 +750,22 @@ export interface CaseSummary {
 /* ───── Case set: the curated events that ARE the case (replaces pins) ───── */
 export interface CaseSetEntry { eventId: string; labels: string[]; note: string; addedAt: string }
 export interface CaseSetResponse { entries: CaseSetEntry[]; events: Event[]; labels: string[] }
+
+/* ───── Timeline replay (GET /api/case-set/replay) ─────
+   `tMs` is the event's instant in epoch MILLISECONDS — recovered from the log line when the
+   normalised `ts` dropped the fraction (`precision: 'ms'`), else the whole second (`'s'`).
+   A beat is one observation about that moment. `first` = the earliest event in the whole pool
+   carrying `value`; `earlier` = the value was already active before this event, since `firstTs`. */
+export type ReplayBeatKind = 'first' | 'earlier' | 'detection' | 'download' | 'process' | 'command'
+  | 'file' | 'signature' | 'library' | 'network' | 'registry' | 'persistence' | 'access' | 'auth-fail'
+  | 'privilege' | 'account' | 'anti-forensics' | 'execution' | 'web' | 'dns';
+export interface ReplayBeat {
+  kind: ReplayBeatKind; text: string;
+  role?: string; value?: string; sev?: Severity;
+  firstTs?: string; firstFile?: string; firstId?: string;
+}
+export interface ReplayEvent { eventId: string; tMs: number | null; precision: 'ms' | 's' | ''; beats: ReplayBeat[] }
+export interface ReplayContext { events: ReplayEvent[]; valuesChecked: number; valuesCapped: boolean; note: string }
 /** 'all' = every ingested event; 'case' = re-run the analysis over only the case set. */
 export type Scope = 'all' | 'case';
 

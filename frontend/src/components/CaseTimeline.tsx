@@ -23,7 +23,7 @@
  * Several entries can be open at once. Comparing two moments of a chronology side by side is the whole
  * reason to open them, and an accordion that shuts one to open the next forbids exactly that.
  */
-import { Fragment, useCallback, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
@@ -31,8 +31,10 @@ import type { CaseSetEntry, Event, Source } from '../api/types';
 import { useAddToCase, useCaseSet, useRemoveFromCase } from '../hooks/queries';
 import { useToast } from '../hooks/useToast';
 import { useArrivals, useTypewriter } from '../hooks/useArrivals';
-import { cx, fmtClock, fmtDay, fmtInt, fmtTs, humanizeStamps, sevVar } from '../utils/format';
-import { inlineMd, renderMarkdown, unescapeBreaks } from '../utils/markdown';
+import { cx, fmtClock, fmtDay, fmtInt, fmtTs, sevVar } from '../utils/format';
+import { inlineMd } from '../utils/markdown';
+import { gapLabel, noteLine, WhyBlocks } from './timelineText';
+import { TimelineReplay } from './TimelineReplay';
 import { LabelEditor } from './CaseSet';
 import { Icon } from './icons';
 import { Drawer, EmptyState, Loading, SevTag } from './ui';
@@ -115,49 +117,6 @@ function AddFromSource({ sources, inSet }: { sources: Source[]; inSet: Set<strin
 /** localStorage: '1' = newest first. Oldest first is the default — a timeline reads forward. */
 const SORT_KEY = 'iris.timeline.newestFirst';
 
-/** The marker that splits a note into its two views. The assistant is told to write it exactly
- *  (`prompts.TIMELINE_NOTE_RULE`); an analyst's hand-written `Why it matters:` line, with or without
- *  the bold and with a dash instead of a colon, splits the same way. */
-const WHY_RE = /(?:^|\n)[ \t]*(?:[-*]\s*)?\*{0,2}why it matters\*{0,2}\s*[:\u2014\u2013-]\s*/i;
-
-/** A note split into what happened (the technical view) and what it means (the high-level one). */
-function splitWhy(note: string): { what: string; matters: string } {
-  const src = unescapeBreaks(note);
-  const m = WHY_RE.exec(src);
-  if (!m) return { what: src, matters: '' };
-  return { what: src.slice(0, m.index).trim(), matters: src.slice(m.index + m[0].length).trim() };
-}
-
-/** The pace of the sequence: how long after the entry that happened just before it in time this
- *  one happened (`older` is the neighbouring row — above when oldest-first, below when newest-first).
- *  A chronology whose entries are four seconds apart and one whose entries are four days apart look
- *  identical in a list of timestamps, and the difference is usually the finding. */
-function gapLabel(older: string | undefined, cur: string | undefined): string {
-  if (!older || !cur) return '';
-  const ms = Date.parse(cur) - Date.parse(older);
-  if (!Number.isFinite(ms) || ms <= 0) return '';
-  const s = Math.round(ms / 1000);
-  if (s < 60) return `+${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `+${m}m${s % 60 ? ` ${s % 60}s` : ''}`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `+${h}h${m % 60 ? ` ${m % 60}m` : ''}`;
-  const d = Math.floor(h / 24);
-  return `+${d}d${h % 24 ? ` ${h % 24}h` : ''}`;
-}
-
-/** The row's one-line summary of a note. It goes through the same `unescapeBreaks` repair the renderer
- *  uses — a model that double-escapes its tool arguments writes the two characters backslash-n where it
- *  means a line break, and every AI-written note on disk is stored that way — and then its first real
- *  line is taken, with heading and bullet markers stripped, because `## Finding` is not a sentence. */
-function noteLine(note: string): string {
-  const first = unescapeBreaks(note).split('\n').map((l) => l.trim()).find(Boolean) ?? '';
-  const bare = first.replace(/^#{1,6}\s+/, '').replace(/^[-*+]\s+/, '').replace(/^>\s*/, '');
-  // The same stamp repair the renderer applies, and with the same exception: text between backticks
-  // is a quoted value and keeps the form the log gave it.
-  return bare.split('`').map((seg, i) => (i % 2 === 0 ? humanizeStamps(seg) : seg)).join('`');
-}
-
 /** The row's sentence. Its own component because an ARRIVING row (the assistant just annotated
  *  it while the timeline was on screen) is revealed as if being written — hooks/useArrivals.ts —
  *  and a hook has to live in a component, not in a `.map`. */
@@ -189,27 +148,6 @@ function RowSaid({ said, summary, arriving, id }: { said: string; summary: strin
  *  Deliberately NOT a second copy of the event detail page: no correlations (an O(pool) derived
  *  structure — see CLAUDE.md on why event detail itself must stay a dictionary lookup) and no file
  *  context. The page is one button away for those. */
-/** The note as TWO reading surfaces, side by side where there is room: the technical view (why this
- *  line is on the timeline — actor, action, time, outcome, log) and the high-level one (why it
- *  matters to the incident). They answer different readers and used to share one paragraph, with
- *  the second buried as a bullet under the first. A note without the marker is one block. */
-function WhyBlocks({ note }: { note: string }) {
-  const { what, matters } = useMemo(() => splitWhy(note), [note]);
-  if (!matters) return <div className="tl__note md tlx__why-one">{renderMarkdown(what)}</div>;
-  return (
-    <div className="tlx__why">
-      <div className="tlx__whycol">
-        <div className="tlx__whylbl">What happened</div>
-        <div className="tl__note md">{renderMarkdown(what)}</div>
-      </div>
-      <div className="tlx__whycol tlx__whycol--matters">
-        <div className="tlx__whylbl">Why it matters</div>
-        <div className="tl__note md">{renderMarkdown(matters)}</div>
-      </div>
-    </div>
-  );
-}
-
 function EntryDetail({ en, e, editing, onEdit, onDone }: {
   en: CaseSetEntry; e: Event | undefined; editing: boolean; onEdit: () => void; onDone: () => void;
 }) {
@@ -379,15 +317,43 @@ export function CaseTimeline({ sources }: { sources: Source[] }) {
   }, [chronological, byId]);
   const annotated = useMemo(() => ordered.filter((en) => en.note || en.labels.length).length, [ordered]);
 
+  /* LIST or REPLAY. Not remembered: a replay is something you ask to watch, and landing on a
+     sequence that starts playing by itself every time the case opens would be the wrong default. */
+  const [view, setView] = useState<'list' | 'replay'>('list');
+  // "Open entry" from the replay: back to the list, with that entry open and scrolled to.
+  const [reveal, setReveal] = useState<string | null>(null);
+  const openFromReplay = useCallback((id: string) => {
+    setExpanded((cur) => (cur.has(id) ? cur : new Set(cur).add(id)));
+    setView('list');
+    setReveal(id);
+  }, []);
+  useEffect(() => {
+    if (view !== 'list' || !reveal) return;
+    const el = document.querySelector(`[data-tl-entry="${CSS.escape(reveal)}"]`);
+    el?.scrollIntoView({ block: 'center' });
+    setReveal(null);
+  }, [view, reveal]);
+
   const drop = (en: CaseSetEntry, e?: Event) =>
     remove.mutate(en.eventId, { onSuccess: () => toast.info('Removed from the timeline', e?.msg ?? en.eventId) });
 
   const actions = (
     <>
-      <button className="btn btn--sm" onClick={toggleSort} aria-pressed={newestFirst}
+      {ordered.length > 0 && (
+        <div className="segbar" role="group" aria-label="Timeline view">
+          <button type="button" className={cx('seg', view === 'list' && 'seg--on')} aria-pressed={view === 'list'}
+            onClick={() => setView('list')}>List</button>
+          <button type="button" className={cx('seg', view === 'replay' && 'seg--on')} aria-pressed={view === 'replay'}
+            onClick={() => setView('replay')}
+            title="Watch the events happen again, spaced exactly as far apart as their timestamps">
+            <Icon.Play width={12} height={12} /> Replay
+          </button>
+        </div>
+      )}
+      {view === 'list' && <button className="btn btn--sm" onClick={toggleSort} aria-pressed={newestFirst}
         title={newestFirst ? 'Showing the latest entry first — click for oldest first' : 'Showing the earliest entry first — click for newest first'}>
         {newestFirst ? 'Newest first' : 'Oldest first'}
-      </button>
+      </button>}
       <AddFromSource sources={sources} inSet={inSet} />
       <button className="btn btn--sm" onClick={() => nav('/search')} title="Find events anywhere in the pool and add them">
         <Icon.Search /> Add from search
@@ -419,7 +385,7 @@ export function CaseTimeline({ sources }: { sources: Source[] }) {
     <>
       <div className="tl-head">
         <span className="field__hint">
-          {ordered.length} event{ordered.length === 1 ? '' : 's'} · oldest first
+          {ordered.length} event{ordered.length === 1 ? '' : 's'}{view === 'list' && (newestFirst ? ' · newest first' : ' · oldest first')}
           {span && <> · <span className="mono" title="first and last curated moment (UTC)">{span}</span></>}
           {annotated > 0 && <> · {annotated} annotated</>}
         </span>
@@ -427,6 +393,9 @@ export function CaseTimeline({ sources }: { sources: Source[] }) {
         {actions}
       </div>
       {incomplete}
+      {view === 'replay' ? (
+        <TimelineReplay entries={chronological} byId={byId} onOpen={openFromReplay} />
+      ) : (
       <ol className="tl">
         {ordered.map((en, i) => {
           const e = byId.get(en.eventId);
@@ -463,7 +432,7 @@ export function CaseTimeline({ sources }: { sources: Source[] }) {
                 <span className="tl__day-rule" />
               </li>
             )}
-            <li className={cx('tl__item', open && 'tl__item--open', arrivals.has(`${en.eventId}\u0001${en.note ? 'n' : ''}`) && 'tl__item--arriving')}>
+            <li data-tl-entry={en.eventId} className={cx('tl__item', open && 'tl__item--open', arrivals.has(`${en.eventId}\u0001${en.note ? 'n' : ''}`) && 'tl__item--arriving')}>
               <div className="tl__rail" aria-hidden><span className={cx('tl__dot', e && `tl__dot--${e.sev}`)} /></div>
               <div className="tl__body">
                 <div className="tl__row">
@@ -505,6 +474,7 @@ export function CaseTimeline({ sources }: { sources: Source[] }) {
           );
         })}
       </ol>
+      )}
     </>
   );
 }

@@ -801,6 +801,17 @@ interface CaseSetResponse { entries:CaseSetEntry[]; events:Event[] /*resolved, s
 - `POST   /api/case-set/{eventId}` body `{labels?:string[]; note?:string}` → CaseSetEntry (idempotent; 404 if the event isn't in the active case)
 - `PATCH  /api/case-set/{eventId}` body `{labels?:string[]; note?:string}` → CaseSetEntry (only the given fields change)
 - `DELETE /api/case-set/{eventId}` → `{ok:true}`
+- `GET    /api/case-set/replay` → ReplayContext — read-only, drives the case timeline's Replay view.
+  `{events: ReplayEvent[]; valuesChecked; valuesCapped; note}`, one `ReplayEvent` per stamped entry:
+  `{eventId; tMs: number|null; precision: 'ms'|'s'|''; beats: ReplayBeat[]}`. `tMs` is the instant in epoch
+  milliseconds — the fraction the normalised `ts` dropped is recovered from the event's own timestamp field
+  or raw line, only when the MM:SS beside it match the stamp (`precision:'ms'`), else the whole second.
+  `ReplayBeat {kind; text; role?; value?; sev?; firstTs?; firstFile?; firstId?}`: the action read from typed
+  fields (download, process, file, library, network, registry, persistence, access, auth-fail, privilege,
+  account, anti-forensics, execution, web, dns), each detection, and first sightings over the WHOLE pool —
+  `first` when this event is the earliest carrying `value`, `earlier` (once per value) when it was already
+  active before, with when and where. A sighting found by free text must be confirmed by a word-bounded
+  match or no claim is made. At most `MAX_VALUES` (80) values are checked per request (`valuesCapped`).
 - `Case.caseSet: CaseSetEntry[]` replaces `Case.pinned`; `Event.inCase:boolean` + `Event.labels:string[]` are set on
   every event the case set contains, so lists can render membership without a second request.
 
