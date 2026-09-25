@@ -216,6 +216,74 @@ including ones that have nothing to do with Iris. That is why `-Restart` is opt-
 > The setting an earlier version wrote, `sysctl.vm.compact_memory=0`, is a **no-op** — `compact_memory` is a
 > write-only trigger, not a tunable. If your `.wslconfig` still has it, `wsl.ps1` will report the drift.
 
+## `update.*` — updating from GitHub
+
+```powershell
+.\update.ps1                   # check GitHub, show exactly what would change, ask, then update + refresh the install
+.\update.ps1 -Action check     # the diff check only: nothing is changed (exit 0 = up to date, 10 = update available)
+.\update.ps1 -Yes              # update without asking
+.\update.ps1 -Diff             # also print the full patch;  -DiffPath backend\app  scopes it to a path
+.\update.ps1 -Action rollback  # back to the version before the last update (run it again to return)
+.\update.ps1 -Mode docker      # how to refresh afterwards: auto (default) | docker | local | none
+.\update.ps1 -Stash            # set your local edits aside, update, then put them back
+.\update.ps1 -NoRestart        # update the code only; rebuild/restart yourself later
+.\update.ps1 -Branch main -Remote origin -Port 8000
+.\update.ps1 -Adopt            # a copy downloaded as a zip (no .git): connect it to GitHub first
+```
+
+```bash
+./update.sh                    # the same, on Linux / WSL / macOS
+./update.sh check | rollback
+./update.sh --yes | -y
+./update.sh --diff  | --diff=backend/app
+./update.sh --mode=auto|docker|local|none
+./update.sh --stash
+./update.sh --no-restart
+./update.sh --branch=main --remote=origin --port=8000
+./update.sh --adopt
+./update.sh --help | -h
+```
+
+**The diff check comes first, every time**, and it is what `check` prints on its own:
+
+- this copy's version and GitHub's, and the incoming commits;
+- the changed files **by area** (backend, UI, dependencies, Docker image, scripts, docs) with line counts;
+- **what the change means for your install**: new Python or UI dependencies (installed during the
+  update), a changed image definition (a full rebuild), a parser change (the library is **re-parsed once**
+  on the next start — expect that to take a while on a big library), a detection change (the search index
+  and entity graph rebuild once, in the background);
+- your **local edits**, and which of them GitHub also changed.
+
+**Then it updates the install it finds.** A Docker install is recognised by the folder Docker Compose
+recorded on the `iris` container, so a second copy of the repo on the same machine can never rebuild
+the one you are running. Docker: `start.* --build` (new image, container recreated, health checked,
+the old image removed). Local: changed Python dependencies are installed into `.venv`, `npm ci` runs
+when the lockfile changed, the UI is rebuilt, and if an Iris is answering on the port you are told to
+restart it (a running local server is not killed for you). `--mode` / `-Mode` overrides the detection.
+
+What it will not do, each on purpose:
+
+- **Touch the evidence.** `backend/data` and `.env` are not part of the repository; an update whose
+  changes would reach either is refused outright.
+- **Discard your edits.** Edits to files the update does not touch are simply kept. An edit to a file it
+  *does* change stops the update, naming the file, unless you pass `--stash` / `-Stash` (set aside, update,
+  put back; if they clash, they stay in `git stash` and you are told). A file GitHub adds that already
+  exists untracked also stops it.
+- **Rewrite history.** It only ever fast-forwards. A copy with commits of its own is refused, with the
+  two commands that keep or drop them.
+- **Answer for you.** Run without a terminal and without `--yes` / `-Yes`, it declines.
+
+`rollback` returns to the version before the last update (`git reset --keep`, which refuses rather than
+overwrite a local edit) and refreshes the install the same way; running it again goes forward. The
+record of versions is kept inside `.git/iris-update/` (`previous`, `history`), so it is never committed.
+
+**A copy downloaded as a zip** has no git history, so `--adopt` / `-Adopt` connects it to GitHub first,
+compares every file with GitHub's version, and says plainly that each file it lists will be **replaced**,
+including any you edited yourself. From then on it is an ordinary checkout.
+
+Exit codes: `0` done / up to date, `10` update available (`check`), `1` error, `2` bad argument, `3`
+refused or declined — so `check` can drive a scheduled job.
+
 ## `uninstall.*` — removing Iris
 
 ```powershell

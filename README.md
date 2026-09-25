@@ -91,6 +91,17 @@ that changed, and recreates the container so a running one cannot stay on its ol
 also refuses to start when something else is already serving that port: otherwise the health probe succeeds
 against the *old* process and your browser opens onto the previous build.
 
+### Updating
+
+```bash
+./update.sh                 # Windows: .\update.ps1   -   add: check | rollback | --yes | --diff
+```
+
+Pulls the latest Iris from GitHub, but first shows exactly what would change: the incoming commits, the
+files by area, and what it means for your install (new dependencies, a one-time re-parse or index
+rebuild). Then it refreshes the install it finds, Docker or local. Your evidence and `.env` are never
+touched, conflicting local edits stop it (or pass `--stash`), and `rollback` goes back. Details in HOWTO.
+
 ### Uninstall
 
 ```bash
