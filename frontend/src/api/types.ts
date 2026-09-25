@@ -771,8 +771,15 @@ export interface ReplayAction { kind: string; verb: string; object: string; acto
 export interface ReplayEvent {
   eventId: string; tMs: number | null; precision: 'ms' | 's' | ''; beats: ReplayBeat[];
   action?: ReplayAction; entities?: { role: string; value: string }[];
+  /** false = the event's source is still RAW (phase 1): no typed fields, so no actor and only the
+   *  addresses/hashes written in the raw line. */
+  interpreted?: boolean;
 }
-export interface ReplayContext { events: ReplayEvent[]; valuesChecked: number; valuesCapped: boolean; note: string }
+export interface ReplayContext {
+  events: ReplayEvent[]; valuesChecked: number; valuesCapped: boolean; note: string;
+  /** The pool version this was built at; `complete` false = it will change (loading / raw / missing). */
+  version?: number; missing?: number; rawEvents?: number; awaiting?: number; poolLoading?: boolean; complete?: boolean;
+}
 /** 'all' = every ingested event; 'case' = re-run the analysis over only the case set. */
 export type Scope = 'all' | 'case';
 

@@ -816,7 +816,14 @@ interface CaseSetResponse { entries:CaseSetEntry[]; events:Event[] /*resolved, s
   execution, library, file, delete, download, web, dns, network, registry, access, account, auth-fail,
   privilege, persistence, anti-forensics, cloud, or `event` when nothing typed says more), because the
   replay draws every event — and `entities {role, value}[]`, every value the event carries, not only the
-  ones a beat reported.
+  ones a beat reported. `interpreted:false` marks an event whose source is still RAW (phase 1 only — the
+  state every source is in after a restart until phase 2 runs): its `entities` are then only the
+  addresses and hashes written in the raw line, and it has no `actor`. Events are ordered by `tMs`, then
+  curation order — the order the screen plays them in.
+  Top level also carries `version` (the pool version it was built at), `missing` (entries whose event is
+  not in the pool yet), `rawEvents`, `awaiting` (raw events whose source is queued/enriching right now),
+  `poolLoading`, and `complete` (`!poolLoading && !missing && !rawEvents`) — while it is false the answer
+  will change and the screen asks again.
 - `Case.caseSet: CaseSetEntry[]` replaces `Case.pinned`; `Event.inCase:boolean` + `Event.labels:string[]` are set on
   every event the case set contains, so lists can render membership without a second request.
 

@@ -351,10 +351,11 @@ export function CaseTimeline({ sources }: { sources: Source[] }) {
           </button>
         </div>
       )}
-      {view === 'list' && <button className="btn btn--sm" onClick={toggleSort} aria-pressed={newestFirst}
+      {/* One order for BOTH views: the list, and the replay's live stream and phase list follow it. */}
+      <button className="btn btn--sm" onClick={toggleSort} aria-pressed={newestFirst}
         title={newestFirst ? 'Showing the latest entry first — click for oldest first' : 'Showing the earliest entry first — click for newest first'}>
         {newestFirst ? 'Newest first' : 'Oldest first'}
-      </button>}
+      </button>
       <AddFromSource sources={sources} inSet={inSet} />
       <button className="btn btn--sm" onClick={() => nav('/search')} title="Find events anywhere in the pool and add them">
         <Icon.Search /> Add from search
@@ -395,7 +396,7 @@ export function CaseTimeline({ sources }: { sources: Source[] }) {
       </div>
       {incomplete}
       {view === 'replay' ? (
-        <TimelineReplay entries={chronological} byId={byId} onOpen={openFromReplay} />
+        <TimelineReplay entries={chronological} byId={byId} onOpen={openFromReplay} newestFirst={newestFirst} />
       ) : (
       <ol className="tl">
         {ordered.map((en, i) => {

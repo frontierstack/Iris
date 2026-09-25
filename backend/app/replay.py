@@ -517,12 +517,54 @@ def _first_seen(value: str) -> Optional[dict[str, Any]]:
             "totalExact": bool(res.get("totalExact", True)), "how": how}
 
 
+# ───────────────────────── what a RAW line can give ─────────────────────────
+# After a restart a source is re-read RAW until phase 2 runs: no fields, no entities. That was why the
+# replay's map drew no links after a restart ("the connected lines are not drawing") - every link is
+# built from an event's actor or entities, and a raw event had neither. A raw line still honestly
+# carries the addresses and hashes written in it, so those are read here (word-bounded, the same guard
+# `_candidates` uses against version strings). What it cannot give is WHICH PROCESS did something:
+# that needs the parser, and the response says so rather than drawing nothing in silence.
+_RAW_IP = re.compile(r"(?<![\w.\-])((?:\d{1,3}\.){3}\d{1,3})(?![\w\-]|\.\w)")
+_RAW_SHA = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{64})(?![0-9a-fA-F])")
+
+
+def _raw_candidates(e: Any) -> list[tuple[str, str]]:
+    text = (e.raw or "")[:4000]
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for rx, role in ((_RAW_IP, "ip"), (_RAW_SHA, "hash")):
+        for v in rx.findall(text):
+            if v.lower() in seen or (role == "ip" and (not plausible_ip(v) or v in ("0.0.0.0", "127.0.0.1"))):
+                continue
+            seen.add(v.lower())
+            out.append((v, role))
+    return out
+
+
+def _interpreted(e: Any) -> bool:
+    """Has this event's source been through phase 2? A raw event has no fields to read an action,
+    an actor or a typed value from."""
+    src = STORE.sources.get(getattr(e, "sourceId", "") or "")
+    if src is not None:
+        return getattr(src, "enrich", "enriched") == "enriched"
+    return bool(e.fields or e.entities)
+
+
 def build(entries: list[Any]) -> dict[str, Any]:
+    order = {en.eventId: i for i, en in enumerate(entries)}
     events = [(en, STORE.event(en.eventId)) for en in entries]
+    missing = sum(1 for _, e in events if e is None)
     stamped = [(en, e) for en, e in events if e is not None and e.ts]
-    stamped.sort(key=lambda p: p[1].ts)
+    # ONE order, the screen's: the exact instant (milliseconds recovered from the line), then the
+    # timeline's own order. Sorting on the whole-second `ts` put two events of one second in curation
+    # order, so "first seen" could land on the one that happened 800 ms LATER.
+    instants = {en.eventId: precise_ms(e)[0] or 0 for en, e in stamped}
+    stamped.sort(key=lambda p: (instants[p[0].eventId], order[p[0].eventId]))
+    srcs = sorted({e.sourceId for _, e in stamped if getattr(e, "sourceId", "")})
+    enrich_state = tuple((s, getattr(STORE.sources.get(s), "enrich", "")) for s in srcs)
     key = (STORE.version, STORE.case_set_rev, tuple(en.eventId for en, _ in stamped),
-           tuple(len(en.note or "") for en, _ in stamped))
+           tuple(len(en.note or "") for en, _ in stamped), enrich_state, missing,
+           bool(getattr(STORE, "pool_loading", False)))
     with _cache_lock:
         hit = _cache.get(key)
     if hit is not None:
@@ -532,11 +574,22 @@ def build(entries: list[Any]) -> dict[str, Any]:
     checked = 0
     reported: set[str] = set()     # a value's "already active earlier" is said once, on its first timeline event
     out_events: list[dict[str, Any]] = []
+    raw_events = 0
+    awaiting = 0            # raw events whose source is being interpreted right now
     for en, e in stamped:
         t_ms, precision = precise_ms(e)
         beats = action_beats(e)
+        interpreted = _interpreted(e)
+        if not interpreted:
+            raw_events += 1
+            if getattr(STORE.sources.get(e.sourceId), "enrich", "") in ("queued", "enriching"):
+                awaiting += 1
+        cands = _candidates(e)
+        if not interpreted:
+            have = {v.lower() for v, _ in cands}
+            cands += [(v, r) for v, r in _raw_candidates(e) if v.lower() not in have]
         firsts: list[dict[str, Any]] = []
-        for value, role in _candidates(e):
+        for value, role in cands:
             k = value.lower()
             if k not in first_cache:
                 if checked >= MAX_VALUES:
@@ -566,13 +619,19 @@ def build(entries: list[Any]) -> dict[str, Any]:
                                        f"{fs['ts'][:19].replace('T', ' ')} UTC in {fs['file']}"})
         beats = (beats + firsts)[:BEATS_PER_EVENT]
         out_events.append({"eventId": en.eventId, "tMs": t_ms, "precision": precision, "beats": beats,
-                           "action": action_of(e, en.note or ""),
+                           "action": action_of(e, en.note or ""), "interpreted": interpreted,
                            # EVERY value the event carries, not only the ones a beat reported: the map
                            # links events that share a file, process, hash, domain or address, and a
                            # value is reported as a beat only on the first event that carries it.
-                           "entities": [{"role": r, "value": v} for v, r in _candidates(e)]})
+                           "entities": [{"role": r, "value": v} for v, r in cands]})
 
-    result = {"events": out_events, "valuesChecked": checked,
+    pool_loading = bool(getattr(STORE, "pool_loading", False))
+    # `complete` is the screen's cue to ASK AGAIN: while the pool is still loading, an entry's event is
+    # not in it yet, or a source is still raw, the answer will change - and the old screen fetched once
+    # and kept the links-less answer for good.
+    result = {"events": out_events, "valuesChecked": checked, "version": STORE.version,
+              "missing": missing, "rawEvents": raw_events, "awaiting": awaiting, "poolLoading": pool_loading,
+              "complete": not (pool_loading or missing or raw_events),
               "valuesCapped": checked >= MAX_VALUES,
               "note": ("First sightings are checked against every loaded log: exactly for interpreted "
                        "sources, and by a confirmed word match in raw ones. A value that could not be "

@@ -101,18 +101,31 @@
 .rp-clock__ms { font-size: 13px; color: var(--muted-2); }
 .rp-clock__d { font-size: var(--fs-xs); color: var(--muted-2); font-variant-numeric: tabular-nums; }
 
-/* scrub track: the whole span to scale, one tick per event in its phase colour */
+/* scrub track: one tick per event in its phase colour. The bar is PIECEWISE (utils/replayScale.ts):
+   bursts at their real proportions, long quiet gaps compressed to a hatched, labelled break. */
 .rp-scrub { padding: 4px 16px 12px; }
 .rp-track {
   position: relative;
-  height: 26px;
+  height: 44px;
   cursor: pointer;
   touch-action: none;           /* a drag scrubs; it must not scroll the page */
   border-radius: 6px;
 }
 .rp-track:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+/* The window onto the bar. `clip` + a margin lets the thumb hang past either end without a scrollbar. */
+.rp-track__view { position: absolute; inset: 0; overflow: clip; overflow-clip-margin: 9px; }
+/* The whole bar, --rp-zw track-widths wide and shifted by --rp-zl: the zoom. Written by the frame
+   loop, so zooming and panning move this layer without a render. */
+.rp-track__layer {
+  position: absolute; top: 0; bottom: 0;
+  left: calc(var(--rp-zl, 0) * 100%);
+  width: calc(var(--rp-zw, 1) * 100%);
+}
 .rp-track__bar { position: absolute; left: 0; right: 0; top: 11px; height: 4px; border-radius: 4px; background: var(--border); }
-.rp-track__fill { position: absolute; left: 0; top: 11px; height: 4px; border-radius: 4px; background: var(--accent); }
+/* The fill, the thumb, the minimap head and every phase head read ONE custom property, --rp-pu (0..1 of
+   the whole bar), that the replay's animation-frame loop writes each frame - no render, no stutter. */
+.rp-track__fill { position: absolute; left: 0; top: 11px; height: 4px; border-radius: 4px; background: var(--accent);
+  width: calc(var(--rp-pu, 0) * 100%); }
 .rp-tick {
   position: absolute; top: 5px; width: 3px; height: 16px; margin-left: -1.5px; border-radius: 2px;
   opacity: 0.35; transition: opacity 250ms linear; pointer-events: none;
@@ -120,14 +133,60 @@
 .rp-tick--on { opacity: 1; }
 .rp-thumb {
   position: absolute; top: 6px; width: 14px; height: 14px; margin-left: -7px; border-radius: 50%;
+  left: calc(var(--rp-pu, 0) * 100%);
   background: var(--text-bright); border: 3px solid var(--accent); pointer-events: none;
+  transition: transform 150ms ease-out;
 }
+.rp-track:active .rp-thumb { transform: scale(1.15); }
+/* a compressed quiet gap: hatched on the bar, its real length written underneath */
+.rp-break {
+  position: absolute; top: 8px; height: 10px;
+  background: repeating-linear-gradient(135deg, var(--border-strong) 0 2px, transparent 2px 6px);
+  border-left: 1px solid var(--border-strong); border-right: 1px solid var(--border-strong);
+  pointer-events: auto;
+}
+.rp-break span {
+  position: absolute; top: 18px; left: 0; right: 0;
+  font-family: var(--font-mono); font-size: 10px; color: var(--muted-2);
+  text-align: center; white-space: nowrap; overflow: hidden; text-overflow: clip;
+}
+/* the ruler: round times at a density that suits the zoom */
+.rp-rule { position: absolute; top: 22px; width: 1px; height: 5px; background: var(--border-strong); pointer-events: none; }
+.rp-rule i {
+  position: absolute; top: 6px; left: 0; transform: translateX(-50%);
+  font-style: normal; font-family: var(--font-mono); font-size: 10px; color: var(--muted-3);
+  white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+/* the overview when zoomed: the whole timeline, and the window currently on the bar */
+.rp-mini {
+  position: relative; height: 12px; margin-top: 4px;
+  border-radius: 3px; background: var(--panel-inset); cursor: grab; touch-action: none;
+}
+.rp-mini:active { cursor: grabbing; }
+.rp-mini__gap { position: absolute; top: 0; bottom: 0; background: repeating-linear-gradient(135deg, var(--border) 0 1px, transparent 1px 4px); }
+.rp-mini__tick { position: absolute; top: 3px; width: 2px; height: 6px; margin-left: -1px; border-radius: 1px; opacity: 0.8; }
+.rp-mini__win {
+  position: absolute; top: -1px; bottom: -1px;
+  left: calc(var(--rp-v0f, 0) * 100%); width: max(4px, calc(var(--rp-vwf, 1) * 100%));
+  border: 1.5px solid var(--accent); border-radius: 3px; background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.rp-mini__head { position: absolute; top: -2px; bottom: -2px; width: 1.5px; margin-left: -0.75px; left: calc(var(--rp-pu, 0) * 100%); background: var(--text-bright); }
+.rp-zoom { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.rp-zoom__b, .rp-zoom__fit {
+  height: 20px; min-width: 22px; padding: 0 6px;
+  border: 1px solid var(--border); border-radius: 4px; background: var(--panel-2);
+  color: var(--text-2); font: inherit; font-size: var(--fs-xs); cursor: pointer;
+}
+.rp-zoom__b:hover:not(:disabled), .rp-zoom__fit:hover:not(:disabled) { border-color: var(--accent-border, var(--accent)); color: var(--text-bright); }
+.rp-zoom__b:disabled, .rp-zoom__fit:disabled { opacity: 0.4; cursor: default; }
+.rp-zoom__x { min-width: 64px; text-align: center; color: var(--text-3); }
+.rp-axis__gaps { color: var(--muted-3); }
 .rp-axis {
   display: flex; justify-content: space-between; gap: 12px;
   margin-top: 5px;
   font-size: var(--fs-xs); color: var(--muted-2); font-variant-numeric: tabular-nums;
 }
-.rp-axis__mid { color: var(--text-3); text-align: center; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rp-axis__mid { color: var(--text-3); text-align: left; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rp-axis__mid b { color: var(--text-bright); font-weight: 600; }
 
 /* ── three running figures ── */
@@ -173,6 +232,8 @@
 .rp-mapview { overflow-x: hidden; overflow-y: hidden; }
 .rp-mapview--scroll { overflow-x: auto; }
 .rp-map { display: block; overflow: visible; }
+/* The frame EASES to the height of what has been reached; the drawing inside is at its natural size. */
+.rp-mapframe { overflow: hidden; transition: height 450ms cubic-bezier(.3,.7,.3,1); }
 .rp-map__empty { padding: 34px 12px; color: var(--muted-2); font-size: var(--fs-base); text-align: center; }
 .rp-map__wait { min-height: 300px; display: flex; align-items: center; justify-content: center; color: var(--muted-3); font-size: var(--fs-base); text-align: center; padding: 0 16px; }
 .rp-map__more { margin-top: 6px; color: var(--muted-2); font-size: var(--fs-xs); text-align: right; }
@@ -181,9 +242,13 @@
 .rp-zone__dot { fill: var(--c); }
 .rp-zone text { fill: color-mix(in srgb, var(--c) 75%, var(--text)); font-size: 11px; font-weight: 600; letter-spacing: 0.01em; }
 /* A link is a line that draws itself from its source, then a head that lands when the line does.
-   Tinted by the phase it leads INTO; the moment being played is bright, earlier links step back. */
-.rp-link { opacity: 0.5; transition: opacity 400ms linear; }
+   Tinted by the phase it leads INTO. The links of the event in FOCUS (the one being played, or the one
+   under the pointer) are bright and labelled with their reason; the rest step well back, so a busy map
+   still reads as one story at a time. When a node moves, its lines GLIDE to the new route (CSS `d`). */
+.rp-link { opacity: 0.42; transition: opacity 300ms linear; }
 .rp-link--hot { opacity: 1; }
+.rp-link--back { opacity: 0.2; }
+.rp-mapview--chosen .rp-link--back { opacity: 0.08; }
 .rp-edge {
   fill: none;
   stroke: color-mix(in srgb, var(--c) 70%, var(--border-strong));
@@ -191,13 +256,28 @@
   stroke-linecap: round;
   stroke-dasharray: 1;
   animation: rp-draw .8s cubic-bezier(.3,.7,.3,1) both;
+  transition: d 450ms cubic-bezier(.3,.7,.3,1), stroke 300ms linear, stroke-width 300ms linear;
 }
-.rp-link--hot .rp-edge { stroke: var(--c); stroke-width: 2.1; }
-/* "touched the same thing" is weaker than "was done by": thinner, so the causal chain reads first */
-.rp-link--shared .rp-edge { stroke-width: 1.1; }
-.rp-link--shared.rp-link--hot .rp-edge { stroke-width: 1.6; }
-.rp-arrowhead { fill: color-mix(in srgb, var(--c) 80%, var(--border-strong)); animation: rp-fade .25s linear .65s both; }
+.rp-link--hot .rp-edge { stroke: var(--c); stroke-width: 2.2; }
+/* "touched the same thing" is weaker than "was done by": thinner and DASHED, so the causal chain reads
+   first. A dashed line cannot draw itself with the same dash trick, so it fades in instead. */
+.rp-link--shared .rp-edge { stroke-width: 1.2; stroke-dasharray: 5 4; animation: rp-fade .6s linear both; }
+.rp-link--shared.rp-link--hot .rp-edge { stroke-width: 1.7; }
+.rp-arrowhead {
+  fill: color-mix(in srgb, var(--c) 80%, var(--border-strong));
+  animation: rp-fade .25s linear .65s both;
+  transition: d 450ms cubic-bezier(.3,.7,.3,1), fill 300ms linear;
+}
 .rp-link--hot .rp-arrowhead { fill: var(--c); }
+.rp-link--shared .rp-arrowhead { animation-delay: .3s; }
+/* The reason on a focused link: a small plate at the curve's midpoint, above the nodes. */
+.rp-elabel { pointer-events: none; animation: rp-fade .22s linear both; }
+.rp-elabel rect { fill: var(--panel); stroke: color-mix(in srgb, var(--c) 60%, var(--border)); stroke-width: 1; }
+.rp-elabel--shared rect { stroke-dasharray: 3 2; }
+.rp-elabel text { fill: var(--text-bright); font-family: var(--font-mono); font-size: 10px; font-weight: 600; }
+/* A node GLIDES when its zone grows a column, instead of snapping to its new place. */
+.rp-nodepos { cursor: pointer; transition: transform 450ms cubic-bezier(.3,.7,.3,1), opacity 250ms linear; }
+.rp-nodepos--dim { opacity: 0.4; }
 .rp-node { transform-box: fill-box; transform-origin: center; animation: rp-pop .55s cubic-bezier(.2,.8,.2,1) both; }
 .rp-node__box { fill: var(--panel-2); stroke: color-mix(in srgb, var(--c) 40%, var(--border)); stroke-width: 1.2; transition: fill 300ms linear, stroke 300ms linear; }
 .rp-node__badge { fill: color-mix(in srgb, var(--c) 16%, var(--panel-2)); stroke: color-mix(in srgb, var(--c) 70%, transparent); stroke-width: 1.2; }
@@ -206,6 +286,22 @@
 .rp-node__sub { fill: var(--muted-2); font-size: 9.5px; }
 .rp-node--now .rp-node__box { stroke: var(--accent); stroke-width: 2.2; fill: color-mix(in srgb, var(--accent) 9%, var(--panel-2)); }
 .rp-node--now .rp-node__badge { fill: color-mix(in srgb, var(--c) 28%, var(--panel-2)); }
+.rp-node--focus .rp-node__box { stroke: var(--c); stroke-width: 2; }
+/* why the map may hold fewer links than it will: said above it, never left to look like "no links" */
+.rp-mapnote {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 8px 14px; border-bottom: 1px solid var(--border);
+  font-size: var(--fs-sm); color: var(--text-3); background: color-mix(in srgb, var(--sev-medium) 6%, transparent);
+}
+.rp-legend {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px;
+  padding: 8px 14px 10px; border-top: 1px solid var(--border);
+  font-size: var(--fs-xs); color: var(--muted-2);
+}
+.rp-legend__k { display: inline-flex; align-items: center; gap: 7px; }
+.rp-legend__k path { fill: none; stroke: var(--text-3); stroke-width: 2; stroke-linecap: round; }
+.rp-legend__shared { stroke-dasharray: 5 4; stroke-width: 1.4 !important; }
+.rp-legend__hint { margin-left: auto; color: var(--muted-3); }
 
 /* the milestone line: its own row under the card head, so it never covers the map */
 .rp-callout {
@@ -248,11 +344,11 @@
 .rp-phase__ct i { font-style: normal; font-weight: 400; color: var(--muted-2); }
 .rp-phase__ds { margin: 4px 0 0 16px; font-size: var(--fs-sm); color: var(--muted-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rp-phase__bar { margin: 8px 0 0 16px; height: 5px; border-radius: 3px; background: var(--panel-inset); overflow: hidden; }
-.rp-phase__bar span { display: block; height: 100%; border-radius: 3px; background: var(--c); transition: width 350ms cubic-bezier(.3,.7,.3,1); }
+.rp-phase__bar span { display: block; width: 100%; height: 100%; border-radius: 3px; background: var(--c); transform-origin: left center; transition: transform 350ms cubic-bezier(.3,.7,.3,1); }
 .rp-phase__trk { position: relative; margin: 6px 0 0 16px; height: 8px; }
 .rp-phase__tick { position: absolute; top: 1px; width: 2px; height: 6px; margin-left: -1px; border-radius: 1px; background: color-mix(in srgb, var(--c) 30%, transparent); }
 .rp-phase__tick--on { background: var(--c); }
-.rp-phase__head { position: absolute; top: -1px; width: 1.5px; height: 10px; margin-left: -0.75px; background: var(--text-3); opacity: 0.55; }
+.rp-phase__head { position: absolute; top: -1px; left: calc(var(--rp-pu, 0) * 100%); width: 1.5px; height: 10px; margin-left: -0.75px; background: var(--text-3); opacity: 0.55; }
 .rp-phases__ahead {
   padding: 8px 12px;
   border: 1px dashed var(--border-strong);
