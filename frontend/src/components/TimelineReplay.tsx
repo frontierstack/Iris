@@ -147,6 +147,37 @@ function ffRate(t: number, tp: number, tn: number, sp: number): number {
   if (!f || t <= f.lo || t >= f.hi) return sp;
   return Math.min(f.top, sp + (t - f.lo) / f.tau, sp + (f.hi - t) / f.tau);
 }
+/** Advance the clock `dt` screen ms from `t` through a fast-forward, EXACTLY: each ramp is solved in
+ *  closed form (v = sp + distance / tau, so the distance grows or decays as e^(s / tau)) and the frame
+ *  is split across the phases it crosses - ramp up, cruise, ramp down, then the chosen speed from `hi`.
+ *  Stepping it per frame (t += rate x dt) was measured overshooting when the browser dropped a frame
+ *  at the tail of the slow-down: 306x -> 38x in one 18 ms frame, where the curve itself changes ~2x. */
+function ffAdvance(t: number, dt: number, f: { lo: number; hi: number; top: number; tau: number }, sp: number): number {
+  const k = sp * f.tau;
+  const ramp = f.tau * (f.top - sp);                 // incident distance each ramp covers
+  const upEnd = f.lo + ramp;
+  const downAt = Math.max(upEnd, f.hi - ramp);
+  let rem = dt;
+  for (let i = 0; i < 5 && rem > 0; i++) {
+    if (t >= f.hi) return t + rem * sp;
+    if (t >= downAt) {                                // ramp down: x = hi - t decays
+      const x0 = f.hi - t;
+      const s = f.tau * Math.log((x0 + k) / k);       // screen time to reach hi
+      if (rem < s) return f.hi - ((x0 + k) * Math.exp(-rem / f.tau) - k);
+      t = f.hi; rem -= s;
+    } else if (t < upEnd) {                           // ramp up: y = t - lo grows
+      const y0 = Math.max(0, t - f.lo), y1 = Math.min(upEnd, downAt) - f.lo;
+      const s = f.tau * Math.log((y1 + k) / (y0 + k));
+      if (rem < s) return f.lo + (y0 + k) * Math.exp(rem / f.tau) - k;
+      t = f.lo + y1; rem -= s;
+    } else {                                          // cruise at the top rate
+      const s = (downAt - t) / f.top;
+      if (rem < s) return t + rem * f.top;
+      t = downAt; rem -= s;
+    }
+  }
+  return t;
+}
 /** A rate as the indicator says it: 35x, 1,200x. */
 const rateX = (v: number) => `${v < 10 ? v.toFixed(1) : Math.round(v).toLocaleString()}×`;
 
@@ -1017,12 +1048,12 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
           // Integrated, not anchored: this stretch is by definition not real time. It stops at the
           // approach, and from there the anchored clock below takes over at the chosen speed - the
           // anchor written here is exactly where it picks up, so there is no seam.
-          fast = ffPlan(tp0, nx0.t, sp)?.top ?? rate;
-          // The frame that reaches the approach spends the REST of its time at the chosen speed. Cutting
-          // it short at the approach froze the clock for one frame at every handover (measured: the
-          // rate fell from ~1.1x to 0.01x and back to 1x - a visible hitch).
-          const room = nx0.t - ffNear(sp) - tRef.current;
-          nt = rate * dt <= room ? tRef.current + rate * dt : tRef.current + room + (dt - room / rate) * sp;
+          const plan = ffPlan(tp0, nx0.t, sp)!;
+          fast = plan.top;
+          // Exact, phase by phase - and the frame that reaches the approach spends the REST of its time
+          // at the chosen speed: cutting it short there froze the clock for one frame at every handover
+          // (measured: ~1.1x -> 0.01x -> 1x).
+          nt = ffAdvance(tRef.current, dt, plan, sp);
           anchor.current = { wall: now, t: nt };
           if (ffFor.current !== k0) {
             ffFor.current = k0;
