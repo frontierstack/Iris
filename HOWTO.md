@@ -229,6 +229,7 @@ including ones that have nothing to do with Iris. That is why `-Restart` is opt-
 .\update.ps1 -NoRestart        # update the code only; rebuild/restart yourself later
 .\update.ps1 -Branch main -Remote origin -Port 8000
 .\update.ps1 -Adopt            # a copy downloaded as a zip (no .git): connect it to GitHub first
+.\update.ps1 -NoInstall        # never install or change PATH; report what is missing, carry on if it can
 ```
 
 ```bash
@@ -241,10 +242,34 @@ including ones that have nothing to do with Iris. That is why `-Restart` is opt-
 ./update.sh --no-restart
 ./update.sh --branch=main --remote=origin --port=8000
 ./update.sh --adopt
+./update.sh --no-install
 ./update.sh --help | -h
 ```
 
-**The diff check comes first, every time**, and it is what `check` prints on its own:
+**Before anything else, it checks what it needs itself**, prints it, and fixes what it can — every fix
+listed with its exact command, then ONE question (`--yes` / `-Yes` answers it, `--no-install` /
+`-NoInstall` only reports, a run with no terminal declines):
+
+- **git** — installed, on PATH, new enough (2.31+). Windows: a git that is installed but off PATH (found
+  through Git for Windows' registry record, Program Files, the per-user folder, PortableGit or scoop) is
+  used for the run and its `cmd` folder added to your user PATH; a missing one is installed with winget,
+  or with Git for Windows' own silent installer when winget cannot. Linux/macOS: the package manager
+  (`apt`/`dnf`/`yum`/`pacman`/`zypper`/`apk`/`brew`), or `xcode-select --install` on a Mac without brew.
+- **git's PATH entries** (Windows) — an entry that names a FILE (`git-bash.exe`) or a folder that no
+  longer exists is removed from the user PATH; `%VARS%` in the rest of PATH are kept as written. Other
+  gits on the machine are listed, with a warning when an older one shadows a newer one. Only git's own
+  entries are touched.
+- **winget** (Windows) — registered for this user if it is on the machine but not registered, installed
+  through Microsoft's WinGet module (or the App Installer bundle) if it is not, updated when older than
+  1.6, and its alias folder put back on PATH when it is missing from it.
+- **"dubious ownership"** — a checkout owned by another account (an elevated copy, another drive) makes
+  every git call fail; the updater names it and offers the `safe.directory` entry instead of reporting
+  "not a git checkout".
+- **A local install**: Node.js is installed or upgraded when it is missing or older than 18, and a
+  `.venv` whose Python no longer starts (that Python was upgraded or removed) is rebuilt by running
+  `setup.* local` — offered, not silent.
+
+**The diff check comes next, every time**, and it is what `check` prints on its own:
 
 - this copy's version and GitHub's, and the incoming commits;
 - the changed files **by area** (backend, UI, dependencies, Docker image, scripts, docs) with line counts;

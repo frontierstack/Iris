@@ -11,7 +11,11 @@
 #   ./update.sh --no-restart   # update the code only; do not rebuild or restart anything
 #   ./update.sh --branch=B --remote=R --port=N
 #   ./update.sh --adopt        # connect a copy that was downloaded as a zip (not a git checkout) to GitHub
+#   ./update.sh --no-install   # never install or change anything on this machine; report what is missing
 #
+# What it needs is checked FIRST: git (installed through this machine's package manager when missing,
+# found and put back on PATH when it is installed but invisible), and for a local install Node / npm and
+# a working .venv. Every fix is shown with its exact command and ONE question covers them all.
 # What it will not do: touch the evidence (backend/data is not in the repository, and the update refuses
 # if an incoming change would reach it), discard your edits (a conflicting edit stops the update unless
 # --stash), or rewrite history (fast-forward only; a copy with commits of its own is refused, with the fix).
@@ -48,6 +52,7 @@ BRANCH=""
 REMOTE=origin
 PORT="${IRIS_PORT:-8000}"
 ADOPT=0
+NO_INSTALL=0
 
 for arg in "$@"; do
   case "$arg" in
@@ -62,7 +67,8 @@ for arg in "$@"; do
     --remote=*)       REMOTE="${arg#*=}" ;;
     --port=*)         PORT="${arg#*=}" ;;
     --adopt)          ADOPT=1 ;;
-    -h|--help)        sed -n '2,21p' "$ROOT/update.sh"; exit 0 ;;
+    --no-install)     NO_INSTALL=1 ;;
+    -h|--help)        sed -n '2,22p' "$ROOT/update.sh"; exit 0 ;;
     *) echo "[iris] unknown argument: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -107,9 +113,191 @@ healthy() {
   else return 1; fi
 }
 
+# ── 0. what the updater needs ────────────────────────────────────────────────
+# The updater runs on machines that have moved on since setup: git removed, a PATH that lost the folder
+# it lives in (Homebrew's /opt/homebrew/bin in a non-login shell is the usual one), a distro git too old.
+# Everything it needs is checked HERE, every fix is printed with its exact command, and ONE question
+# covers them all (--yes answers it; --no-install only reports; a non-interactive run declines). The
+# package-manager helpers are setup.sh's, copied: this script has to work on a machine setup never saw.
+GIT_MIN="2.31"      # GIT_CONFIG_COUNT (the per-process config at the top) needs 2.31
+NODE_MIN=18         # Vite 5
+GIT_DIRS="/usr/bin /usr/local/bin /opt/homebrew/bin /home/linuxbrew/.linuxbrew/bin /opt/local/bin /Library/Developer/CommandLineTools/usr/bin"
+OS="$(uname -s 2>/dev/null || echo unknown)"
+ENV_KIND=linux
+case "$OS" in
+  Darwin*)              ENV_KIND=macos ;;
+  MINGW*|MSYS*|CYGWIN*) ENV_KIND=windows-gitbash ;;
+  Linux*)               grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null && ENV_KIND=wsl ;;
+esac
+
+PKG_MGR=""
+detect_pkg_mgr() {
+  [ -n "$PKG_MGR" ] && { echo "$PKG_MGR"; return 0; }
+  if   [ "$ENV_KIND" = macos ] && command -v brew >/dev/null 2>&1; then PKG_MGR=brew
+  elif command -v apt-get >/dev/null 2>&1; then PKG_MGR=apt
+  elif command -v dnf     >/dev/null 2>&1; then PKG_MGR=dnf
+  elif command -v yum     >/dev/null 2>&1; then PKG_MGR=yum
+  elif command -v pacman  >/dev/null 2>&1; then PKG_MGR=pacman
+  elif command -v zypper  >/dev/null 2>&1; then PKG_MGR=zypper
+  elif command -v apk     >/dev/null 2>&1; then PKG_MGR=apk
+  elif command -v brew    >/dev/null 2>&1; then PKG_MGR=brew
+  else PKG_MGR=none; fi
+  echo "$PKG_MGR"
+}
+SUDO=""
+need_sudo() {
+  # brew refuses to run as root; everything else needs it unless we already are root.
+  [ "$(detect_pkg_mgr)" = brew ] && { SUDO=""; return 0; }
+  if [ "$(id -u)" = "0" ]; then SUDO=""; return 0; fi
+  if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; return 0; fi
+  return 1
+}
+pkg_install_cmd() {   # pkg_install_cmd <pkg...> -> the command that installs them (and, for these, upgrades)
+  case "$(detect_pkg_mgr)" in
+    apt)    echo "${SUDO:+$SUDO }DEBIAN_FRONTEND=noninteractive apt-get install -y $*" ;;
+    dnf)    echo "${SUDO:+$SUDO }dnf install -y $*" ;;
+    yum)    echo "${SUDO:+$SUDO }yum install -y $*" ;;
+    pacman) echo "${SUDO:+$SUDO }pacman -S --needed --noconfirm $*" ;;
+    zypper) echo "${SUDO:+$SUDO }zypper install -y $*" ;;
+    apk)    echo "${SUDO:+$SUDO }apk add $*" ;;
+    brew)   echo "brew install $*" ;;
+    *)      echo "" ;;
+  esac
+}
+pkg_upgrade_cmd() {   # dnf/yum/zypper/apk `install` leaves an installed package where it is
+  case "$(detect_pkg_mgr)" in
+    dnf)    echo "${SUDO:+$SUDO }dnf upgrade -y $*" ;;
+    yum)    echo "${SUDO:+$SUDO }yum update -y $*" ;;
+    zypper) echo "${SUDO:+$SUDO }zypper update -y $*" ;;
+    apk)    echo "${SUDO:+$SUDO }apk add --upgrade $*" ;;
+    *)      pkg_install_cmd "$@" ;;
+  esac
+}
+APT_UPDATED=0
+pkg_run() {   # pkg_run <command> - the question was already asked, once, for the whole list
+  [ -n "$1" ] || return 1
+  if ! need_sudo; then warn "root privileges are needed, and sudo is not available"; return 1; fi
+  if [ "$(detect_pkg_mgr)" = apt ] && [ "$APT_UPDATED" = "0" ]; then
+    # A first-boot container/VM has no package lists at all, so an install fails with "Unable to locate
+    # package" for a package that exists. Refresh once per run, not per package.
+    info "refreshing package lists (apt-get update)"
+    $SUDO apt-get update -qq || warn "apt-get update failed - continuing anyway"
+    APT_UPDATED=1
+  fi
+  eval "$1"
+}
+ask_fix() {   # [Y/n] - yes with --yes; a non-interactive run without --yes DECLINES
+  [ "$YES" = "1" ] && return 0
+  if [ ! -t 0 ]; then warn "not interactive and --yes not given: nothing is changed"; return 1; fi
+  local a; printf '    %s? %s [Y/n] %s' "$C_B" "$1" "$C_0"; read -r a
+  case "$a" in ""|y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+}
+ver_ge() {   # ver_ge <a> <b> - numeric on the first three dot fields; "2.55.0.windows.3" reads as 2.55.0
+  awk -v a="$1" -v b="$2" 'BEGIN { split(a, x, "."); split(b, y, ".")
+    for (i = 1; i <= 3; i++) { if ((x[i] + 0) > (y[i] + 0)) exit 0; if ((x[i] + 0) < (y[i] + 0)) exit 1 }
+    exit 0 }'
+}
+git_runs() { "${1:-git}" --version >/dev/null 2>&1; }   # macOS /usr/bin/git is a STUB without the CLT
+git_ver()  { "${1:-git}" --version 2>/dev/null | awk '{print $3}'; }
+profile_file() { case "$(basename "${SHELL:-sh}")" in zsh) echo "$HOME/.zprofile" ;; *) echo "$HOME/.profile" ;; esac; }
+fix_profile_path() {   # fix_profile_path <dir> - for every login shell after this one
+  local f; f="$(profile_file)"
+  grep -qsF "$1" "$f" && return 0
+  printf '\n# added by Iris update.sh: git lives here\nexport PATH="%s:$PATH"\n' "$1" >> "$f"
+}
+install_git() {   # install_git install|upgrade
+  if [ "$(detect_pkg_mgr)" = none ]; then
+    if [ "$ENV_KIND" = macos ]; then
+      xcode-select --install
+      warn "finish the Command Line Tools dialog that just opened (it includes git), then re-run ./update.sh"
+    fi
+    return 1
+  fi
+  if [ "$1" = upgrade ]; then pkg_run "$(pkg_upgrade_cmd git)"; else pkg_run "$(pkg_install_cmd git)"; fi
+  hash -r
+  git_runs
+}
+FIX_WHAT=(); FIX_CMD=(); FIX_DO=()
+add_fix() { FIX_WHAT+=("$1"); FIX_CMD+=("$2"); FIX_DO+=("$3"); }
+
+step "Checking what the updater needs"
+need_sudo || true
+MGR="$(detect_pkg_mgr)"
+NEED_GIT=""
+if command -v git >/dev/null 2>&1 && git_runs; then
+  case "$(command -v git)" in
+    /mnt/*) warn "the git on PATH is Windows' ($(command -v git)) through WSL interop - slow, and it writes CRLF; install a Linux git" ;;
+  esac
+  GV="$(git_ver)"
+  if ! ver_ge "$GV" "$GIT_MIN"; then
+    warn "git ${GV%%.windows*} is older than $GIT_MIN - the update works, with a line-ending warning on every call"
+    [ "$MGR" != none ] && NEED_GIT=upgrade
+  fi
+else
+  command -v git >/dev/null 2>&1 && warn "the git on PATH ($(command -v git)) does not run"
+  FOUND=""
+  for d in $GIT_DIRS; do
+    if [ -x "$d/git" ] && git_runs "$d/git"; then FOUND="$d"; break; fi
+  done
+  if [ -n "$FOUND" ]; then
+    warn "git is installed at $FOUND/git, but that folder is not on PATH"
+    # This run uses it either way; the fix is for every shell after this one.
+    PATH="$FOUND:$PATH"; export PATH
+    add_fix "put $FOUND on PATH for future shells" "echo 'export PATH=\"$FOUND:\$PATH\"' >> $(profile_file)" "fix_profile_path $(printf '%q' "$FOUND")"
+  else
+    NEED_GIT=install
+  fi
+fi
+if [ "$NEED_GIT" = install ]; then
+  if [ "$MGR" != none ]; then add_fix "install git" "$(pkg_install_cmd git)" "install_git install"
+  elif [ "$ENV_KIND" = macos ]; then add_fix "install the Command Line Tools (they include git)" "xcode-select --install" "install_git install"
+  fi
+elif [ "$NEED_GIT" = upgrade ]; then
+  add_fix "upgrade git ${GV%%.windows*} (the updater wants $GIT_MIN+)" "$(pkg_upgrade_cmd git)" "install_git upgrade"
+fi
+
+if command -v git >/dev/null 2>&1 && git_runs; then line "$(printf '%-9s %s  %s' git "$(git_ver)" "$(command -v git)")"
+else line "$(printf '%-9s %s' git 'not found')"; fi
+PM_NOTE="$MGR"; [ -n "$SUDO" ] && PM_NOTE="$MGR (via sudo)"
+[ "$MGR" = none ] && PM_NOTE="none found - nothing can be installed automatically"
+[ "$MGR" = none ] && [ "$ENV_KIND" = windows-gitbash ] && PM_NOTE="none in Git Bash - on Windows, .\\update.ps1 installs dependencies through winget"
+line "$(printf '%-9s %s' packages "$PM_NOTE")"
+
+if [ ${#FIX_WHAT[@]} -gt 0 ]; then
+  printf '\n    %sto fix%s\n' "$C_B" "$C_0"
+  for i in "${!FIX_WHAT[@]}"; do line "  - ${FIX_WHAT[$i]}"; info "      ${FIX_CMD[$i]}"; done
+  if [ "$NO_INSTALL" = "1" ]; then warn "--no-install: nothing was changed"
+  elif ask_fix "Fix $([ ${#FIX_WHAT[@]} -eq 1 ] && echo this || echo "these ${#FIX_WHAT[@]}") now?"; then
+    for i in "${!FIX_WHAT[@]}"; do
+      if eval "${FIX_DO[$i]}"; then ok "${FIX_WHAT[$i]}"; else warn "not done: ${FIX_WHAT[$i]}"; fi
+    done
+  else warn "skipped - nothing was changed"; fi
+fi
+hash -r
+if ! { command -v git >/dev/null 2>&1 && git_runs; }; then
+  case "$MGR" in
+    none) [ "$ENV_KIND" = macos ] && die "git is not available. Run xcode-select --install (or install Homebrew, then brew install git) and re-run."
+          die "git is not available and no package manager was found. Install git and re-run." ;;
+    *)    die "git is not available. Install it ($(pkg_install_cmd git)) and re-run." ;;
+  esac
+fi
+ok "git $(git_ver)  ($(command -v git))"
+
 # ── 1. the checkout ──────────────────────────────────────────────────────────
 step "Checking this copy of Iris"
-command -v git >/dev/null 2>&1 || die "git is not installed. Install it (apt/dnf/brew install git) and re-run."
+# "dubious ownership": git refuses a repository owned by another user (a copy made with sudo, a folder on
+# a Windows drive under WSL) - and every git call then fails, which would read below as "not a git
+# checkout". It is a one-line trust entry, so it is named and offered.
+case "$(git -C "$ROOT" rev-parse --show-toplevel 2>&1)" in
+  *"dubious ownership"*)
+    SAFE="$(pwd -P)"
+    warn "git refuses this folder: it is owned by another user (git calls this 'dubious ownership')"
+    info "      git config --global --add safe.directory $SAFE"
+    [ "$NO_INSTALL" = "1" ] && die "--no-install: trust the folder with the command above and re-run" 3
+    ask_fix "Trust this folder for git?" || die "declined - git cannot read this copy until it is trusted" 3
+    git config --global --add safe.directory "$SAFE" || die "could not write the git config"
+    ok "folder trusted" ;;
+esac
 IS_REPO=0
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   TOP="$(git rev-parse --show-toplevel 2>/dev/null)"
@@ -357,7 +545,7 @@ fi
 INSTALL="$MODE"
 if [ "$MODE" = "auto" ]; then
   if [ "$CONTAINER_HERE" = "1" ]; then INSTALL=docker
-  elif [ -x .venv/bin/python ] || [ -d frontend/node_modules ] || [ -f frontend/dist/index.html ]; then INSTALL=local
+  elif [ -x .venv/bin/python ] || [ -L .venv/bin/python ] || [ -d frontend/node_modules ] || [ -f frontend/dist/index.html ]; then INSTALL=local
   else INSTALL=none; fi
 fi
 changed() { printf '%s\n' "$NAMES" | grep -Eq "$1"; }
@@ -371,18 +559,66 @@ elif [ "$INSTALL" = "docker" ]; then
   ./start.sh --build --no-browser --port="$PORT" || die "the rebuild failed - the code is updated; fix the error above and run ./start.sh --build (or ./update.sh rollback)"
 elif [ "$INSTALL" = "local" ]; then
   step "Refreshing the local install"
-  if changed '^backend/requirements\.txt$'; then
+  # A .venv whose python does not run was made from an interpreter that has since been upgraded or
+  # removed (a distro upgrade does this); pip into it fails with a message that says nothing about why.
+  # setup.sh local is the repair for both that and a missing .venv, and it rebuilds the UI too.
+  VENV_STATE=none
+  if [ -e .venv/bin/python ] || [ -L .venv/bin/python ]; then   # -L: a venv symlink to a removed python dangles
+    if .venv/bin/python -c 'import sys' >/dev/null 2>&1; then VENV_STATE=ok; else VENV_STATE=broken; fi
+  fi
+  RUN_SETUP=""
+  if [ "$VENV_STATE" = broken ]; then
+    warn ".venv does not run - the Python it was made from was upgraded or removed"
+    RUN_SETUP="rebuild .venv"
+  elif [ "$VENV_STATE" = none ] && changed '^backend/requirements\.txt$'; then
+    warn "Python dependencies changed and there is no .venv here"
+    RUN_SETUP="create .venv and install the Python dependencies"
+  fi
+  SETUP_DONE=0
+  if [ -n "$RUN_SETUP" ]; then
+    SETUP_ARGS=(local); [ "$YES" = "1" ] && SETUP_ARGS+=(--yes)
+    line "  - $RUN_SETUP"
+    info "      ./setup.sh ${SETUP_ARGS[*]}   (it also rebuilds the UI, so that step is not repeated here)"
+    if [ "$NO_INSTALL" = "1" ]; then warn "--no-install: run ./setup.sh local yourself before starting Iris"
+    elif ask_fix "Run ./setup.sh local now?"; then
+      ./setup.sh "${SETUP_ARGS[@]}" || die "setup failed - the code is updated; fix the error above and re-run ./setup.sh local"
+      SETUP_DONE=1; ok "local install rebuilt by setup"
+    else warn "skipped - run ./setup.sh local before starting Iris"; fi
+  fi
+  if [ "$SETUP_DONE" = "0" ] && [ "$VENV_STATE" = ok ] && changed '^backend/requirements\.txt$'; then
     if [ -x .venv/bin/python ]; then
       info "installing the changed Python dependencies into .venv"
       .venv/bin/python -m pip install --quiet -r backend/requirements.txt >"$STATE/pip.log" 2>&1 &
       spin "pip install -r backend/requirements.txt" $! || { tail -n 15 "$STATE/pip.log" | sed 's/^/        /'; die "pip install failed"; }
       ok "Python dependencies installed"
-    else
-      warn "Python dependencies changed and there is no .venv here - run ./setup.sh local"
     fi
   fi
-  changed '^backend/requirements-gpu\.txt$' && warn "GPU wheels changed - run ./setup.sh local to resolve them for this machine"
-  if command -v npm >/dev/null 2>&1 && [ -f frontend/package.json ]; then
+  [ "$SETUP_DONE" = "0" ] && changed '^backend/requirements-gpu\.txt$' && warn "GPU wheels changed - run ./setup.sh local to resolve them for this machine"
+  # Node: without it the UI is never rebuilt and the new API serves the OLD app.
+  NODE_PKGS=""
+  case "$MGR" in apt|dnf|yum|pacman|zypper|apk) NODE_PKGS="nodejs npm" ;; brew) NODE_PKGS="node" ;; esac
+  if [ "$SETUP_DONE" = "0" ] && [ -f frontend/package.json ] && ! command -v npm >/dev/null 2>&1; then
+    warn "npm is not installed - the UI cannot be rebuilt without it"
+    if [ -n "$NODE_PKGS" ]; then
+      line "  - install Node.js"; info "      $(pkg_install_cmd $NODE_PKGS)"
+      if [ "$NO_INSTALL" = "1" ]; then warn "--no-install: nothing was changed"
+      elif ask_fix "Install Node.js now?"; then
+        # shellcheck disable=SC2086
+        if pkg_run "$(pkg_install_cmd $NODE_PKGS)"; then hash -r; ok "Node.js installed"; else warn "installing Node.js failed"; fi
+      else warn "skipped - Node.js was not installed"; fi
+    fi
+  fi
+  if [ "$SETUP_DONE" = "0" ] && command -v npm >/dev/null 2>&1; then
+    NV="$(node --version 2>/dev/null | tr -d 'v' | cut -d. -f1)"
+    if [ -n "$NV" ] && [ "$NV" -lt "$NODE_MIN" ] 2>/dev/null; then
+      warn "Node $NV is older than $NODE_MIN, which the UI build (Vite 5) needs - the build is tried anyway"
+      if [ "$MGR" = brew ]; then info "      fix: brew install node"
+      else info "      fix: the distro's Node is too old - install a current LTS from NodeSource (github.com/nodesource/distributions) or nvm"; fi
+    fi
+  fi
+  if [ "$SETUP_DONE" = "1" ]; then
+    :   # setup.sh local already rebuilt the UI
+  elif command -v npm >/dev/null 2>&1 && [ -f frontend/package.json ]; then
     (
       cd frontend || exit 1
       if [ ! -d node_modules ] || changed '^frontend/package(-lock)?\.json$'; then
