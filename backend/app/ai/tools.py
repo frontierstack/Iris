@@ -134,6 +134,41 @@ class ToolError(Exception):
 # own, and anything reading ctx.tool_name keeps working.
 _CALL_DEADLINE: ContextVar[float] = ContextVar("iris_tool_deadline", default=-1.0)
 _CALL_NAME: ContextVar[str] = ContextVar("iris_tool_name", default="")
+# How many characters THIS call's result will be clipped at by whoever reads it — the lead's window-
+# scaled room for row reads, or a worker agent's much smaller clip. Per CALL, like the deadline, and
+# for the same reason: the lead and its workers share one RunContext. 0 = not set (tests, MCP), which
+# keeps the fixed ROW_BUDGET. Without it a worker's row read was packed to 5.6 kB and then clipped at
+# 3 kB from the END — its last rows vanished without a word.
+_RESULT_ROOM: ContextVar[int] = ContextVar("iris_result_room", default=0)
+# The tools whose results are fitted with `_fit_rows`, i.e. whose size follows the result room.
+ROW_TOOLS = frozenset({"search_events", "get_events", "sample_events", "find_related_events",
+                       "source_profile"})
+
+
+def set_result_room(chars: int) -> None:
+    _RESULT_ROOM.set(max(0, int(chars or 0)))
+
+
+def row_budget() -> int:
+    """The byte budget a row read must fit in for THIS call (a margin under its clip)."""
+    room = _RESULT_ROOM.get()
+    return ROW_BUDGET if room <= 0 else max(1200, room - 400)
+
+
+def refit_rows(result: Any) -> Any:
+    """A cached row result, re-fitted for THIS call's room when it was fitted for a larger one.
+
+    The read cache is shared by the lead and its worker agents, so a result built for the lead's
+    12 kB room can be served to a worker that clips at 3 kB — which would cut its last rows off the
+    end. Fitting only ever shrinks, so a result that already fits is returned unchanged.
+    """
+    if not isinstance(result, dict) or not isinstance(result.get("rows"), list):
+        return result
+    budget = row_budget()
+    if _size(result) <= budget:
+        return result
+    import orjson
+    return _fit_rows(orjson.loads(orjson.dumps(result)), budget)
 
 
 @dataclass
@@ -448,6 +483,11 @@ def _include(args: dict[str, Any]) -> set[str]:
 
 
 ROW_BUDGET = 5600        # bytes one multi-event tool result may occupy (under TOOL_RESULT_CHARS)
+RAW_MAX = 1200           # the longest raw line a multi-event read carries, before any fitting
+RAW_FLOOR = 100          # raw is shortened no further than this before other detail goes first
+# Row keys that are usually the SAME on every row of a read (one file, one parser, one host): stated
+# once in `common` instead of 25 times. Lossless — `common` says exactly what every row carries.
+COMMON_KEYS = ("source", "file", "host", "user")
 
 
 def _detail_caps(n: int) -> tuple[int, int]:
@@ -458,8 +498,12 @@ def _detail_caps(n: int) -> tuple[int, int]:
     missing its last events entirely, which is the silent-omission failure this codebase keeps fighting.
     Clamping every row a little is the honest trade, and the clamp is reported per row.
     """
+    # RAW is not pre-clamped by row count any more. It used to be DETAIL_BUDGET / n — 180 characters
+    # at 25 rows, before anything had measured whether the result was actually full — and on a proxy
+    # log that cut every line before its URL, so the agent reported "the rows are being trimmed" and
+    # went looking for another tool. `_fit_rows` now finds the longest raw length that genuinely fits.
     per = DETAIL_BUDGET // max(1, n)
-    return max(120, min(1200, per)), (4 if per < 300 else (10 if per < 700 else 30))
+    return RAW_MAX, (4 if per < 300 else (10 if per < 700 else 30))
 
 
 def _size(obj: Any) -> int:
@@ -507,15 +551,87 @@ def _shed(out: dict[str, Any], budget: int, steps: list[tuple[str, Callable[[], 
     return out
 
 
-def _fit_rows(out: dict[str, Any], budget: int = ROW_BUDGET) -> dict[str, Any]:
-    """Fit a multi-event read into one tool result WITHOUT losing any of its rows."""
+def _hoist_common(out: dict[str, Any]) -> None:
+    """State a value every row shares ONCE, in `out['common']`, instead of on each row. Lossless."""
     rows = out.get("rows") or []
+    if len(rows) < 2:
+        return
+    common: dict[str, Any] = {}
+    for k in COMMON_KEYS:
+        vals = {r.get(k) for r in rows if isinstance(r, dict)}
+        if len(vals) == 1 and all(k in r for r in rows):
+            common[k] = next(iter(vals))
+    if common:
+        for r in rows:
+            for k in common:
+                r.pop(k, None)
+        out["common"] = common
+
+
+def _fit_rows(out: dict[str, Any], budget: Optional[int] = None) -> dict[str, Any]:
+    """Fit a multi-event read into one tool result WITHOUT losing any of its rows.
+
+    The RAW LINE is what a reader of these rows came for, so it is the last thing given up: first the
+    redundancy goes (values every row shares are stated once; `_row` already omitted a `msg` that
+    only restated the line), then the summary text, then raw is shortened to the LONGEST length that
+    fits (searched, not a fixed rung), and only then does it go. Reported as "the rows came back
+    without the raw lines" when the old ladder dropped raw while keeping a 300-character message
+    that was the same line re-joined.
+    """
+    if budget is None:
+        budget = row_budget()      # this call's room: the lead's window-scaled one, or a worker's
+    rows = out.get("rows") or []
+    _hoist_common(out)
+    # Each row's untrimmed raw length, so `rawTruncated` stays exact however many times raw is cut.
+    full = [(str(r.get("raw", "")), len(str(r.get("raw", ""))) + int(r.get("rawTruncated", 0) or 0))
+            if "raw" in r else None for r in rows]
+
+    def set_raw(n: int) -> None:
+        for r, f in zip(rows, full):
+            if f is None or "raw" not in r:
+                continue
+            text, whole = f
+            r["raw"] = text[:n]
+            cut = whole - len(r["raw"])
+            if cut > 0:
+                r["rawTruncated"] = cut
+            else:
+                r.pop("rawTruncated", None)
+
+    note_room = [0]      # set below, once the ladder's labels are known
+
+    def fit_raw(floor: int) -> Callable[[], None]:
+        """Shorten raw to the longest uniform length (>= floor) at which the result fits."""
+        def go() -> None:
+            # `_shed` adds its `trimmed` note AFTER the rungs and counts it on every check, so a
+            # length fitted to the whole budget fails the very next check by the note's size — and
+            # the ladder then DROPPED raw from a result that had room (measured: 2.6 kB of 5.6 kB).
+            room = budget - note_room[0]
+            lo, hi = floor, RAW_MAX
+            set_raw(lo)
+            if _size(out) > room:
+                return                  # even the floor does not fit: later rungs take over
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                set_raw(mid)
+                if _size(out) <= room:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            set_raw(lo)
+        return go
 
     def clamp_raw(n: int) -> Callable[[], None]:
         def go() -> None:
+            set_raw(n)
+        return go
+
+    def drop_msg_beside_raw() -> Callable[[], None]:
+        """`msg` is a normalized SUMMARY of the line; where the line itself is shown, it goes first."""
+        def go() -> None:
             for r in rows:
                 if "raw" in r:
-                    r["raw"] = str(r["raw"])[:n]
+                    r.pop("msg", None)
         return go
 
     def drop(key: str) -> Callable[[], None]:
@@ -580,19 +696,46 @@ def _fit_rows(out: dict[str, Any], budget: int = ROW_BUDGET) -> dict[str, Any]:
     # `_clip` cut the last rows off the end without a word, which is the exact failure this exists to
     # prevent. `msg` is a normalized summary and goes before `raw`; a detection id is the most citable
     # thing on a row, so it is trimmed last and never removed (an empty list would say "nothing fired").
-    return _shed(out, budget, [
-        ("shorter raw lines", clamp_raw(240)),
+    # Say how to get the lines WHOLE, with a number: "ask for fewer" left the agent guessing, and it
+    # answered by switching tools rather than by asking for a smaller batch. Estimated from the rows
+    # as they are NOW (full raw), and put into `why` rather than appended afterwards, because `_shed`
+    # measures `why` on every pass — a sentence added after it would overshoot the budget it fitted.
+    why = "to keep every row you asked for inside one tool result."
+    if rows and any(f is not None for f in full):
+        head = _size({k: v for k, v in out.items() if k != "rows"})
+        per_row = (_size(out) - head) / len(rows)
+        fits = int((budget - head) // max(1.0, per_row))
+        if 0 < fits < len(rows):
+            why += (f" To read the raw lines whole, ask for about {fits} ids at a time "
+                    "(get_events), or a smaller limit.")
+        else:
+            why += " Ask for fewer ids, or a smaller limit, to read each line in full."
+    # RAW LAST. The order used to drop raw while a 300-character `msg` survived, and on a delimited
+    # log that msg is the same cells re-joined — the one part of the row the caller asked for was
+    # given up to keep a copy of it.
+    ladder = [
+        ("shorter messages", clamp_msg(120)),
         ("fewer parsed fields", thin_fields(4)),
         ("entities dropped", drop("entities")),
-        ("shorter raw lines again", clamp_raw(120)),
+        ("raw lines shortened to fit", fit_raw(RAW_FLOOR)),
         ("parsed fields dropped", drop("fields")),
-        ("shorter messages", clamp_msg(160)),
-        ("raw lines dropped", drop("raw")),
+        ("messages dropped where the raw line is shown", drop_msg_beside_raw()),
+        ("raw lines shortened further", fit_raw(40)),
         ("fewer detection ids per row", thin_detections(2)),
+        ("raw lines dropped", drop("raw")),
         ("shorter messages again", clamp_msg(80)),
         ("everything but the identity of each row", keep_identity()),
-    ], "to keep every row you asked for inside one tool result. Ask for fewer ids, or a smaller limit, "
-       "if you need the full text of each line.")
+    ]
+    # The note's worst case (every label), reserved for `fit_raw` — over by the labels never applied,
+    # a few dozen bytes; under would drop raw from a result that had room for it.
+    note_room[0] = _size({"trimmed": ", ".join(lbl for lbl, _ in ladder) + " — " + why})
+    return _shed(out, budget, ladder, why)
+
+
+def _restates(msg: str, raw: str) -> bool:
+    """True when every word of `msg` appears in `raw` — the message adds nothing the line lacks."""
+    words = msg.split()
+    return bool(words) and bool(raw) and all(w in raw for w in words)
 
 
 def _row(r: dict[str, Any], want: set[str] = frozenset(), raw_cap: int = 400,
@@ -611,6 +754,11 @@ def _row(r: dict[str, Any], want: set[str] = frozenset(), raw_cap: int = 400,
         out["raw"] = full[:raw_cap]
         if len(full) > raw_cap:
             out["rawTruncated"] = len(full) - raw_cap
+        # A message that only RESTATES the line (a delimited row's cells re-joined, a syslog body) is
+        # the same evidence twice, and it was paid for out of the room the line itself needed. Omitted
+        # only when every one of its words is in the raw line, so nothing it says is lost.
+        if _restates(str(r.get("msg") or ""), full):
+            out.pop("msg", None)
     if "fields" in want:
         f = r.get("fields") or {}
         out["fields"] = {k: _s(v, 120) for k, v in list(f.items())[:field_cap]}

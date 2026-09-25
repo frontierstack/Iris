@@ -257,7 +257,8 @@ async def _dispatch(calls: list[dict[str, Any]], reg: dict[str, Any], ctx: Any, 
             return
         async with sem:
             note(run_id, {"agent": agent, "phase": "call", "tool": entry["name"]})
-            entry["ok"], entry["result"] = await _run_tool(entry["name"], entry["args"], ctx)
+            entry["ok"], entry["result"] = await _run_tool(entry["name"], entry["args"], ctx,
+                                                           WORKER_RESULT_CHARS)
 
     await asyncio.gather(*(one(e) for e in prepared))
     return prepared

@@ -93,8 +93,8 @@ from .prompts import (CONTINUE_OUTPUT, RESET_NOTE, ARG_TOO_BIG, BUDGET_NOTICE, C
                       RECORD_NUDGE, REPORT_NOW,
                       NARRATE_NUDGE, PARALLEL_NUDGE, PARALLEL_NUDGE_SOLO, SUMMARY_CHECK, WRAP_UP, delegation_block,
                       investigator_user_prompt)
-from .tools import (REGISTRY, RunContext, ToolError, _s, tool_budget_seconds, tool_schemas,
-                    unverified_citations)
+from .tools import (REGISTRY, ROW_TOOLS, RunContext, ToolError, _s, refit_rows, set_result_room,
+                    tool_budget_seconds, tool_schemas, unverified_citations)
 
 DISABLED_MESSAGE = ("AI assistant is disabled — choose a provider and add an API key in Settings → AI "
                     "assistant. The investigator needs a model that supports tool calling.")
@@ -208,6 +208,23 @@ CONTEXT_SHRINK = 0.75         # the new ceiling, as a fraction of the estimate t
 MIN_CEILING = 3_000           # below this there is no room for a tool result at all
 ELIDE_RESULT_CHARS = 600      # a tool result in the kept tail is cut to this when folding was not enough
 TOOL_RESULT_CHARS_SMALL = 2500   # new tool results are clipped harder once the window is known to be small
+# ROW READS (search_events / get_events / sample_events …) may use more of the window than other tools:
+# their whole value is the log lines, and 25 proxy lines cannot fit in 6,000 characters — reported as
+# "the rows came back without the raw lines". ~5 % of the context ceiling, never less than the ordinary
+# clip and never more than ROW_RESULT_MAX; once the provider has refused a transcript it follows the
+# smaller clip like everything else.
+ROW_RESULT_MAX = 12_000
+ROW_RESULT_SHARE = 0.05
+
+
+def _row_chars(ceiling_tokens: int, result_chars: int) -> int:
+    if result_chars < TOOL_RESULT_CHARS:           # the window is known to be small
+        return result_chars
+    return int(max(TOOL_RESULT_CHARS, min(ROW_RESULT_MAX, ceiling_tokens * 4 * ROW_RESULT_SHARE)))
+
+
+def _clip_for(name: str, result_chars: int, row_chars: int) -> int:
+    return row_chars if name in ROW_TOOLS else result_chars
 # ---- a reply CUT OFF at the provider's output limit (finish_reason 'length') with no tool call in it.
 # The loop reads "no tool call" as "finished", so a report truncated mid-sentence was published as the
 # final answer — on a local model with a small n_predict, most long reports. The model is asked to go
@@ -759,7 +776,11 @@ def _finish_call(run_id: str, entry: dict[str, Any], result_chars: int) -> list[
              "data": payload if len(body) <= 4000 else {"truncated": True}}]
 
 
-async def _run_tool(name: str, args: dict[str, Any], ctx: RunContext) -> tuple[bool, Any]:
+async def _run_tool(name: str, args: dict[str, Any], ctx: RunContext,
+                    room: int = 0) -> tuple[bool, Any]:
+    # `room` = the characters this call's result will be clipped at (0 = the fixed default). Set per
+    # call — the lead and its worker agents share `ctx` — and read by the row tools' fitting.
+    set_result_room(room)
     t = REGISTRY.get(name)
     if t is None:
         known = ", ".join(sorted(REGISTRY))
@@ -775,6 +796,8 @@ async def _run_tool(name: str, args: dict[str, Any], ctx: RunContext) -> tuple[b
     if key and key in ctx.cache:
         ctx.cache_hits += 1
         cached = ctx.cache[key]
+        if name in ROW_TOOLS:
+            cached = refit_rows(cached)     # fitted for a larger room (the lead's) than this caller's
         if isinstance(cached, dict):
             return True, {**cached, "cached": True,
                           "note": "identical call already made in this run — the previous result is repeated "
@@ -791,7 +814,7 @@ async def _run_tool(name: str, args: dict[str, Any], ctx: RunContext) -> tuple[b
         remembered = readcache.get(name, args)
         if remembered is not None:
             ctx.cache[key] = remembered
-            return True, remembered
+            return True, refit_rows(remembered) if name in ROW_TOOLS else remembered
     budget = float(tool_budget_seconds()) * float(getattr(t, "budget_factor", 1.0) or 1.0)
     ctx.begin_call(name, budget)
     try:
@@ -929,9 +952,11 @@ def _file_count(d: dict[str, Any]) -> int:
 
 
 _SUMMARY: dict[str, Callable[[dict[str, Any]], str]] = {
+    # `file` is on each row, or once in `common` when every row shares it (tools._hoist_common).
     "search_events": lambda d: (f"{d.get('returned', _len(d, 'rows'))} of {_n(d.get('total', 0))} matching events"
-                                + (f" — {_names(d.get('rows'), 'file')}"
-                                   if _names(d.get("rows"), "file") else "")),
+                                + (f" — {_names(d.get('rows'), 'file') or (d.get('common') or {}).get('file', '')}"
+                                   if _names(d.get("rows"), "file") or (d.get("common") or {}).get("file")
+                                   else "")),
     "get_events": lambda d: (f"read {d.get('returned', 0)} of {d.get('requested', 0)} event(s)"
                              + (f" — {_len(d, 'missing')} id(s) do not exist" if d.get("missing") else "")),
     "get_event": lambda d: (f"event {d.get('id', '?')} — {d.get('source', '?')} {d.get('ts') or 'no timestamp'}"
@@ -1197,6 +1222,7 @@ async def investigate(store: Any, objective: str, run_id: str,
     productive_since_write = 0   # reads that returned evidence since the last write (or the start)
     ceiling = lim["maxContextTokens"]   # lowered when the provider refuses the transcript (ContextTooLong)
     result_chars = TOOL_RESULT_CHARS
+    row_chars = _row_chars(ceiling, result_chars)
     context_recoveries = 0
     # THE FIXED COST OF EVERY REQUEST. `_est_tokens` measures the messages and nothing else, but the
     # provider counts the tool schemas too — ~11k tokens for the full registry, on top of a ~5.5k
@@ -1500,6 +1526,7 @@ async def investigate(store: Any, objective: str, run_id: str,
                     real = exc.limit if exc.limit else est_now
                     ceiling = max(MIN_CEILING, min(ceiling, int(real * CONTEXT_SHRINK)))
                     result_chars = min(result_chars, TOOL_RESULT_CHARS_SMALL)
+                    row_chars = _row_chars(ceiling, result_chars)
                     # THE PART OF THE REQUEST A FOLD CANNOT REACH. The tool schemas are sent on every
                     # request and are not in `messages`, so once they are a large share of the window
                     # no amount of compacting the transcript can make it fit — measured on this very
@@ -1891,12 +1918,13 @@ async def investigate(store: Any, objective: str, run_id: str,
                 # work lands would make a refused call look like it was running all that time.
                 for entry in prepared:
                     if not entry["run"]:
-                        for ev in _finish_call(run_id, entry, result_chars):
+                        for ev in _finish_call(run_id, entry, _clip_for(entry["name"], result_chars, row_chars)):
                             yield ev
                 tasks: dict[Any, dict[str, Any]] = {}
                 for entry in runnable:
                     entry["t0"] = time.perf_counter()
-                    tasks[asyncio.ensure_future(_run_tool(entry["name"], entry["args"], ctx))] = entry
+                    tasks[asyncio.ensure_future(_run_tool(entry["name"], entry["args"], ctx,
+                                                          _clip_for(entry["name"], result_chars, row_chars)))] = entry
                 waiting = set(tasks)
                 # WHILE A LANE IS IN FLIGHT, SAY WHAT THE WORKER AGENTS ARE DOING.
                 # `delegate_investigation` runs several agents inside ONE tool call, on a worker
@@ -1971,7 +1999,7 @@ async def investigate(store: Any, objective: str, run_id: str,
                         # Streamed the moment it lands, out of order on purpose: the card was appended
                         # in emitted order and is PATCHED in place by id, so one result arriving while
                         # its neighbour still spins is exactly what the analyst should see.
-                        for ev in _finish_call(run_id, entry, result_chars):
+                        for ev in _finish_call(run_id, entry, _clip_for(entry["name"], result_chars, row_chars)):
                             yield ev
                 # ...and everything the RUN's own state depends on, strictly in emitted order.
                 for entry in prepared:
