@@ -764,7 +764,14 @@ export interface ReplayBeat {
   role?: string; value?: string; sev?: Severity;
   firstTs?: string; firstFile?: string; firstId?: string;
 }
-export interface ReplayEvent { eventId: string; tMs: number | null; precision: 'ms' | 's' | ''; beats: ReplayBeat[] }
+/** `action`: what the event DID and to what — every event has one, so every event can be drawn.
+ *  `entities`: every value it carries (the beats report a value only on its first event). */
+/** `actor`: the process behind it — a process start's PARENT, or the process that wrote/loaded/connected. */
+export interface ReplayAction { kind: string; verb: string; object: string; actor?: string }
+export interface ReplayEvent {
+  eventId: string; tMs: number | null; precision: 'ms' | 's' | ''; beats: ReplayBeat[];
+  action?: ReplayAction; entities?: { role: string; value: string }[];
+}
 export interface ReplayContext { events: ReplayEvent[]; valuesChecked: number; valuesCapped: boolean; note: string }
 /** 'all' = every ingested event; 'case' = re-run the analysis over only the case set. */
 export type Scope = 'all' | 'case';

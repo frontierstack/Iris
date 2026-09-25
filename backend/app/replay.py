@@ -256,6 +256,166 @@ def action_beats(e: Any) -> list[dict[str, str]]:
     return out
 
 
+# ───────────────────────── one action per event (the replay's map draws EVERY event) ─────────────────────────
+# `action_beats` above reports what it can PROVE and says nothing otherwise, which is right for the
+# observations. The map needs more: every event on the timeline has to appear on it as something —
+# "everything that is an event needs to show", as the analyst put it — so each event is classified
+# into ONE action and the thing it acted on. Typed fields first, in the order of specificity; then the
+# analyst's own note (its first `quoted value` is, by the note's own convention, the object); then the
+# event's first entity. `kind: 'event'` is the honest bottom: the event is shown, unclassified.
+
+_DELETE_RE = re.compile(r"delet|remov|unlink|wipe|shred|purge|erase", re.I)
+_RENAME_RE = re.compile(r"renam|mov", re.I)
+_TICK_RE = re.compile(r"`([^`]{1,200})`")
+_URL_HOST = re.compile(r"^[a-z][a-z0-9+.-]*://([^/:?#]+)", re.I)
+
+
+def _verb(act: str, default: str) -> str:
+    a = (act or "").replace("_", " ").strip().lower()
+    return a or default
+
+
+def action_of(e: Any, note: str = "") -> dict[str, str]:
+    """{kind, verb, object, actor} for ONE event — never empty, because every event is drawn.
+
+    `actor` is the PROCESS behind the action: for a process start, its parent; for a file write, a DLL
+    load, a connection or a lookup, the process that did it. It is how the map links a child process
+    to the one that spawned it — reported as "a child process wasn't linked to anything": the two
+    share no file, hash or address, only the relationship, and the relationship is in these fields.
+    """
+    f = _F(e.fields)
+    act = f.get("event.action", "Action", "action", "operation", "Operation", "EventType", "event.type",
+                "OperationName", "eventName")
+    ds = (f.get("data_stream.dataset", "event.dataset", "event.category", "log_type", "category") or "").lower()
+    msg = f"{e.msg or ''} {act}"
+
+    proc = f.get("process.name") or _base(f.get("process.executable", "Image", "NewProcessName"))
+    parent = f.get("process.parent.name") or _base(f.get("process.parent.executable", "ParentImage",
+                                                           "ParentProcessName"))
+
+    def out(kind: str, verb: str, obj: str) -> dict[str, str]:
+        obj = (obj or "").strip()[:300]
+        actor = parent if kind == "process" else (proc if proc and proc.lower() != obj.lower() else "")
+        return {"kind": kind, "verb": verb, "object": obj, "actor": actor or ""}
+
+    # A deletion is a deletion whatever produced it — the one action most worth never missing.
+    target = f.get("file.path", "TargetFilename", "file.name", "Path", "ObjectName", "path", "filename",
+                   "registry.path", "TargetObject")
+    if (act and _DELETE_RE.search(act)) or (not act and _DELETE_RE.search(e.msg or "") and target):
+        what = "registry" if ("registry" in ds or f.get("registry.path") or f.get("TargetObject")) else "file"
+        return out("delete", f"{what} deleted", _base(target) or target or (e.msg or "")[:80])
+
+    # Windows event ids (Security / System / Sysmon)
+    eid = f.get("EventID", "event.code", "EventCode", "winlog.event_id", "event_id")
+    channel = (f.get("Channel", "winlog.channel", "LogName", "provider", "winlog.provider_name") or "").lower()
+    if eid:
+        who = f.get("TargetUserName", "SubjectUserName", "user.name") or _real(e.user)
+        if "sysmon" in channel:
+            sysmon = {"1": ("process", "process started", _base(f.get("Image", "process.executable"))),
+                      "3": ("network", "connection", f.get("DestinationIp", "DestinationHostname")),
+                      "11": ("file", "file created", _base(f.get("TargetFilename"))),
+                      "12": ("registry", "registry key changed", _base(f.get("TargetObject"))),
+                      "13": ("registry", "registry value set", _base(f.get("TargetObject"))),
+                      "22": ("dns", "DNS lookup", f.get("QueryName")),
+                      "23": ("delete", "file deleted", _base(f.get("TargetFilename"))),
+                      "26": ("delete", "file deleted", _base(f.get("TargetFilename")))}.get(eid)
+            if sysmon and sysmon[2]:
+                return out(*sysmon)
+        win = {"4624": ("access", "logon", who), "4625": ("auth-fail", "failed logon", who),
+               "4648": ("access", "explicit-credential logon", who), "4672": ("privilege", "special privileges", who),
+               "4688": ("process", "process created", _base(f.get("NewProcessName", "process.executable"))),
+               "4697": ("persistence", "service installed", f.get("ServiceName")),
+               "7045": ("persistence", "service installed", f.get("ServiceName")),
+               "4698": ("persistence", "scheduled task created", f.get("TaskName")),
+               "4720": ("account", "account created", who), "4726": ("delete", "account deleted", who),
+               "4732": ("privilege", "added to group", who), "4728": ("privilege", "added to group", who),
+               "1102": ("anti-forensics", "audit log cleared", channel or "Security"),
+               "104": ("anti-forensics", "event log cleared", channel or "log"),
+               "4104": ("execution", "PowerShell script block", f.get("Path") or "script")}.get(eid)
+        if win and win[2]:
+            return out(*win)
+
+    # Elastic Endpoint / ECS datasets
+    if ds.endswith(".process") or ds == "process":
+        name = f.get("process.name") or _base(f.get("process.executable"))
+        if name:
+            # ECS may record several actions at once ("start, end" = a short-lived process).
+            words = {"start": "started", "exec": "executed", "fork": "forked", "end": "ended"}
+            acts = [x.strip() for x in (act or "").lower().split(",") if x.strip()]
+            v = ("process " + " & ".join(words.get(x, x) for x in acts)) if acts else "process"
+            return out("process", v, name)
+    if ds.endswith(".file") or ds == "file":
+        path = f.get("file.path") or f.get("file.name")
+        if path:
+            words = {"creation": "created", "create": "created", "open": "opened", "modification": "modified",
+                     "overwrite": "overwritten", "rename": "renamed", "write": "written", "read": "read"}
+            acts = [x.strip() for x in (act or "").lower().replace("_", " ").split(",") if x.strip()]
+            v = ("file " + " & ".join(words.get(x, x) for x in acts)) if acts else "file"
+            if acts and _RENAME_RE.search(v):
+                v = "file renamed"
+            return out("file", v, _base(path))
+    if ds.endswith(".library"):
+        dll = f.get("dll.name") or _base(f.get("dll.path"))
+        if dll:
+            return out("library", "DLL loaded", dll)
+    if ds.endswith(".network") or "network" in ds:
+        dst = f.get("destination.ip", "dst_ip", "DestinationIp", "dest_ip")
+        if dst:
+            port = f.get("destination.port", "dst_port", "DestinationPort")
+            return out("network", _verb(act, "connection"), dst + (f":{port}" if port else ""))
+    if ds.endswith(".registry") or "registry" in ds:
+        reg = f.get("registry.path", "TargetObject")
+        if reg:
+            return out("registry", _verb(act, "registry change"), _base(reg))
+    if ds.endswith(".security") or "authentication" in ds:
+        who = f.get("user.name") or _real(e.user)
+        if who:
+            failed = (f.get("event.outcome") or "").lower() == "failure"
+            return out("auth-fail" if failed else "access", "failed sign-in" if failed else "sign-in", who)
+
+    # Web proxy / DNS
+    dl = f.get("download_file_name")
+    domain = f.get("domain", "url.domain", "destination.domain", "cs-host", "http.host", "host_header")
+    url = f.get("url", "url.full", "cs-uri", "request_url")
+    blocked = (f.get("log_subtype", "action", "event.outcome", "disposition") or "").lower() in (
+        "denied", "blocked", "deny", "block", "dropped")
+    if dl:
+        return out("download", "download blocked" if blocked else "download", dl)
+    q = f.get("dns.question.name", "query", "QueryName", "qname", "dns_query")
+    if q:
+        return out("dns", "DNS lookup", q)
+    if domain or url:
+        host = domain or (_URL_HOST.match(url).group(1) if url and _URL_HOST.match(url) else url)
+        return out("web", "web request blocked" if blocked else "web request", host)
+    dst = f.get("dst_ip", "destination.ip", "dest_ip", "DestinationIp")
+    if dst:
+        port = f.get("dst_port", "destination.port", "dest_port")
+        return out("network", "connection", dst + (f":{port}" if port else ""))
+
+    # Unix / cloud sign-ins, read from what the daemon wrote
+    m = _SSH_OK.search(msg)
+    if m:
+        return out("access", "SSH logon", m.group(2))
+    m = _SSH_FAIL.search(msg)
+    if m:
+        return out("auth-fail", "failed SSH logon", m.group(1))
+    m = _SUDO.search(msg)
+    if m:
+        return out("privilege", "sudo", m.group(1))
+    if f.get("eventName"):
+        return out("cloud", _verb(f.get("eventName"), "API call"), _real(e.user) or f.get("userIdentity.arn"))
+
+    # The analyst's note: its first quoted value is, by the note's own convention, the object.
+    t = _TICK_RE.search(note or "")
+    label = ""
+    if t:
+        label = t.group(1)
+        return out("event", "event", _base(label) if ("\\" in label or "/" in label) else label)
+    if e.entities:
+        return out("event", "event", str(e.entities[0]))
+    return out("event", "event", _real(e.host) or _real(e.user) or (e.msg or e.raw or "")[:60])
+
+
 # ───────────────────────── first sightings ─────────────────────────
 
 # (fields, role) in priority order. Roles decide the wording of a first sighting.
@@ -405,7 +565,12 @@ def build(entries: list[Any]) -> dict[str, Any]:
                                "text": f"{_ROLE_NOUN.get(role, '')}{value[:16] + '…' if role == 'hash' else value} was already active before this — first seen "
                                        f"{fs['ts'][:19].replace('T', ' ')} UTC in {fs['file']}"})
         beats = (beats + firsts)[:BEATS_PER_EVENT]
-        out_events.append({"eventId": en.eventId, "tMs": t_ms, "precision": precision, "beats": beats})
+        out_events.append({"eventId": en.eventId, "tMs": t_ms, "precision": precision, "beats": beats,
+                           "action": action_of(e, en.note or ""),
+                           # EVERY value the event carries, not only the ones a beat reported: the map
+                           # links events that share a file, process, hash, domain or address, and a
+                           # value is reported as a beat only on the first event that carries it.
+                           "entities": [{"role": r, "value": v} for v, r in _candidates(e)]})
 
     result = {"events": out_events, "valuesChecked": checked,
               "valuesCapped": checked >= MAX_VALUES,

@@ -812,6 +812,11 @@ interface CaseSetResponse { entries:CaseSetEntry[]; events:Event[] /*resolved, s
   `first` when this event is the earliest carrying `value`, `earlier` (once per value) when it was already
   active before, with when and where. A sighting found by free text must be confirmed by a word-bounded
   match or no claim is made. At most `MAX_VALUES` (80) values are checked per request (`valuesCapped`).
+  Each `ReplayEvent` also carries `action {kind, verb, object}` — ONE classification per event (process,
+  execution, library, file, delete, download, web, dns, network, registry, access, account, auth-fail,
+  privilege, persistence, anti-forensics, cloud, or `event` when nothing typed says more), because the
+  replay draws every event — and `entities {role, value}[]`, every value the event carries, not only the
+  ones a beat reported.
 - `Case.caseSet: CaseSetEntry[]` replaces `Case.pinned`; `Event.inCase:boolean` + `Event.labels:string[]` are set on
   every event the case set contains, so lists can render membership without a second request.
 

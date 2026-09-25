@@ -342,7 +342,8 @@ export function CaseTimeline({ sources }: { sources: Source[] }) {
       {ordered.length > 0 && (
         <div className="segbar" role="group" aria-label="Timeline view">
           <button type="button" className={cx('seg', view === 'list' && 'seg--on')} aria-pressed={view === 'list'}
-            onClick={() => setView('list')}>List</button>
+            onClick={() => setView('list')}
+            title="Every entry, in order, each opening to its note, raw line, entities and detections">Full events</button>
           <button type="button" className={cx('seg', view === 'replay' && 'seg--on')} aria-pressed={view === 'replay'}
             onClick={() => setView('replay')}
             title="Watch the events happen again, spaced exactly as far apart as their timestamps">
