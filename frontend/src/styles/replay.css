@@ -10,6 +10,7 @@
 @keyframes rp-fade { from { opacity: 0; } to { opacity: 1; } }
 
 .rp {
+  overflow-anchor: none;      /* the replay anchors its own scroll: see TimelineReplay */
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -402,6 +403,11 @@
   transition: opacity calc(400ms * var(--rp-anim, 1)) linear;
 }
 .rp-ln--new { border-color: color-mix(in srgb, var(--c) 40%, var(--border)); background: color-mix(in srgb, var(--c) 7%, var(--panel-2)); }
+.rp-ln--hl {
+  border-color: var(--accent); background: var(--accent-bg);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.rp-ln--hl .rp-ln__cmd { color: var(--text-bright); }
 .rp-ln--flare { border-color: color-mix(in srgb, var(--bad) 45%, var(--border)); }
 .rp-ln__ts { font-size: var(--fs-xs); color: var(--muted-2); white-space: nowrap; display: flex; flex-direction: column; font-variant-numeric: tabular-nums; padding-top: 2px; }
 .rp-ln__ts i { font-style: normal; color: var(--muted-3); }

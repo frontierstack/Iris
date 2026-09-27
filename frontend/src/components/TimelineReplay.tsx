@@ -452,8 +452,10 @@ const pathStyle = (d: string): CSSProperties => ({ d: `path("${d}")` } as unknow
  *  activity stacks under it. Each connected thread of events is one block, blocks sit in the order
  *  they began. Because the layout covers every event from the start, nothing moves when the replay
  *  reaches the next one: the map draws what has been reached, in place, and its frame grows to hold it. */
-const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, current }: {
+const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, current, onPin }: {
   nodes: MapNode[]; edges: MapEdge[]; lanes: string[]; reached: number; current: string | null;
+  /** The node the analyst clicked (held), or null: the stream highlights that event's card. */
+  onPin?: (id: string | null) => void;
 }) {
   const shown = useMemo(() => nodes.filter((n) => n.first < reached), [nodes, reached]);
   const box = useRef<HTMLDivElement>(null);
@@ -469,6 +471,7 @@ const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, curren
   // Focus: the event under the pointer, else one the analyst clicked, else the one being played.
   const [hover, setHover] = useState<string | null>(null);
   const [pinned, setPinned] = useState<string | null>(null);
+  useEffect(() => { onPin?.(pinned); }, [pinned, onPin]);
   const focus = hover ?? pinned ?? current;
   const chosen = hover != null || pinned != null;
   // Over EVERY event, not the reached ones: that is what keeps a node where it first appeared.
@@ -583,7 +586,7 @@ const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, curren
                   onPointerEnter={() => setHover(n.key)}
                   onClick={() => setPinned((cur) => (cur === n.key ? null : n.key))}>
                   <g className={cx('rp-node', n.key === current && 'rp-node--now', n.key === focus && chosen && 'rp-node--focus')}>
-                    <title>{`${c.clock}${c.ms} UTC — ${n.verb}: ${n.value}\nphase: ${phase}${n.host ? `\nhost: ${n.host}` : ''}${pinned === n.key ? '\n(click again to release)' : '\n(click to hold its links)'}`}</title>
+                    <title>{`${c.clock}${c.ms} UTC — ${n.verb}: ${n.value}\nphase: ${phase}${n.host ? `\nhost: ${n.host}` : ''}${pinned === n.key ? '\n(click again to release)' : '\n(click to hold its links and highlight it in the stream)'}`}</title>
                     <rect className="rp-node__box" width={NODE_W} height={NODE_H} rx={5} />
                     {/* the phase it belongs to: a rule down the left edge, in the phase's colour */}
                     <rect className="rp-node__phase" x={0.6} y={6} width={2.6} height={NODE_H - 12} />
@@ -672,17 +675,29 @@ const PhaseActivity = memo(function PhaseActivity({ phases, active, pct, newestF
 });
 
 /* ───────── the live stream: typed in as it happens, in the timeline's order ───────── */
-function StreamLine({ it, fresh, age, skipped, onOpen, anim }: {
+function StreamLine({ it, fresh, age, skipped, onOpen, anim, hl }: {
   it: Item; fresh: boolean; age: number; skipped: boolean; onOpen: (id: string) => void; anim: number;
+  /** Held on the map: drawn highlighted and scrolled into view. */
+  hl: boolean;
 }) {
+  const row = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    // Scroll the STREAM to it, never the page: scrollIntoView would also move the window.
+    const el = row.current;
+    const wrap = el?.closest('.rp-logwrap') as HTMLElement | null;
+    if (!hl || !el || !wrap) return;
+    const top = el.offsetTop - wrap.clientHeight / 2 + el.offsetHeight / 2;
+    wrap.scrollTo({ top: Math.max(0, top), behavior: reducedMotion() ? 'auto' : 'smooth' });
+  }, [hl]);
   const text = it.said || trunc(it.e.raw || it.e.msg, 220);
   const shown = useTypewriter(text, fresh, anim);
   const typing = shown.length < text.length;
   const p = utcParts(it.t);
   const flare = milestone(it);
   return (
-    <div className={cx('rp-ln', age === 0 && 'rp-ln--new', flare && beatTone(flare) === 'bad' && 'rp-ln--flare')}
-      style={{ ['--c' as string]: PHASE_HUES[it.lane % PHASE_HUES.length], opacity: Math.max(0.45, 1 - age * 0.09) }}>
+    <div ref={row} className={cx('rp-ln', age === 0 && 'rp-ln--new', flare && beatTone(flare) === 'bad' && 'rp-ln--flare', hl && 'rp-ln--hl')}
+      aria-current={hl || undefined}
+      style={{ ['--c' as string]: PHASE_HUES[it.lane % PHASE_HUES.length], opacity: hl ? 1 : Math.max(0.45, 1 - age * 0.09) }}>
       <span className="rp-ln__ts mono">{p.clock}{it.precise ? <i>{p.ms}</i> : null}
         {skipped && <em>after a skipped lull</em>}</span>
       <span className="rp-ln__body">
@@ -707,8 +722,10 @@ function StreamLine({ it, fresh, age, skipped, onOpen, anim }: {
     </div>
   );
 }
-const Stream = memo(function Stream({ items, reached, skipped, onOpen, newestFirst, picked, onClear, anim }: {
+const Stream = memo(function Stream({ items, reached, skipped, onOpen, newestFirst, picked, onClear, anim, held }: {
   items: Item[]; reached: number; skipped: Set<number>; onOpen: (id: string) => void; newestFirst: boolean;
+  /** The event held on the map: its card is highlighted, and shown even when a phase filter hides its phase. */
+  held: string | null;
   /** Phases chosen in Phase activity: only their rows are shown. Empty = every row. */
   picked: ReadonlySet<number>; onClear: () => void; anim: number;
 }) {
@@ -718,14 +735,14 @@ const Stream = memo(function Stream({ items, reached, skipped, onOpen, newestFir
   const wrap = useRef<HTMLDivElement>(null);
   const atEdge = useRef(true);         // following the newest row (top or bottom, by the order)
   const done = items.slice(0, reached);
-  const kept = picked.size ? done.filter((it) => picked.has(it.lane)) : done;
+  const kept = picked.size ? done.filter((it) => picked.has(it.lane) || it.en.eventId === held) : done;
   const shown = newestFirst ? [...kept].reverse() : kept;
   useEffect(() => { for (const it of shown) seen.current.add(it.en.eventId); });
   // Oldest first puts the newest row at the BOTTOM: follow it there, smoothly, unless the analyst has
   // scrolled up to read something (then stay put — yanking the view away mid-read is worse).
   useLayoutEffect(() => {
     const el = wrap.current;
-    if (!el || !atEdge.current) return;
+    if (!el || !atEdge.current || held) return;     // a held card owns the scroll position
     const top = newestFirst ? 0 : el.scrollHeight;
     el.scrollTo({ top, behavior: reducedMotion() ? 'auto' : 'smooth' });
   }, [reached, newestFirst, picked]);
@@ -753,6 +770,7 @@ const Stream = memo(function Stream({ items, reached, skipped, onOpen, newestFir
             const age = newestFirst ? i : shown.length - 1 - i;
             return (
               <StreamLine key={it.en.eventId} it={it} age={age} skipped={skipped.has(it.idx)} onOpen={onOpen} anim={anim}
+                hl={it.en.eventId === held}
                 fresh={age === 0 && !seen.current.has(it.en.eventId)} />
             );
           })}
@@ -898,6 +916,44 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
   const [trackW, setTrackW] = useState(1000);
 
   const rootRef = useRef<HTMLElement>(null);
+  // SCROLL ANCHORING, done here. "When replay is playing and things are generating the scrollbar for
+  // the page keeps resetting": the map grows as events are reached and pushed everything under it
+  // (the stream, the phases) down under the reader. The browser's own anchoring compensated only
+  // sometimes - measured, the stream drifted 100 -> 266 px down the screen in 14 s with scrollY
+  // unchanged, and a manual fix stacked on top of it overshot. So the replay opts out of it
+  // (`overflow-anchor: none` on .rp) and anchors on the STREAM: while the stream is on screen and the
+  // map's bottom is above the viewport, any change in the stream's position is scrolled back out.
+  // While the map itself is in view nothing is adjusted - it grows downward, as it should.
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root || typeof ResizeObserver === 'undefined') return;
+    const anchorEl = () => root.querySelector<HTMLElement>('.rp-logwrap');
+    let last = anchorEl()?.getBoundingClientRect().top ?? null;
+    let sy = window.scrollY;
+    const sync = () => { last = anchorEl()?.getBoundingClientRect().top ?? null; sy = window.scrollY; };
+    // A scroll moves the anchor by exactly the scroll delta. Re-reading the layout here instead would
+    // also swallow growth that landed since the last observation, and lose part of each correction.
+    const onScroll = () => { if (last != null) last -= window.scrollY - sy; sy = window.scrollY; };
+    const ro = new ResizeObserver(() => {
+      const a = anchorEl();
+      if (!a) { last = null; return; }
+      const top = a.getBoundingClientRect().top;
+      const map = root.querySelector<HTMLElement>('.rp-mapframe, .rp-map__wait');
+      const mapAbove = !map || map.getBoundingClientRect().bottom < 64;
+      if (last != null && top !== last && mapAbove && top < window.innerHeight && !document.fullscreenElement) {
+        window.scrollBy(0, top - last);
+        last = top - (window.scrollY - sy);     // where the anchor is after the correction
+        sy = window.scrollY;
+        return;
+      }
+      sync();
+    });
+    ro.observe(root);                             // anything above the stream changes the root's height
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => { ro.disconnect(); window.removeEventListener('scroll', onScroll); };
+    // Once the replay is on screen, for its life: re-running per render would re-read the layout
+    // mid-growth. (The section is not rendered until there is something to replay.)
+  }, [items.length > 0]);
   const clockRef = useRef<HTMLSpanElement>(null);
   const msRef = useRef<HTMLSpanElement>(null);
   const offRef = useRef<HTMLSpanElement>(null);
@@ -1270,6 +1326,8 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
 
   /* ── the stream's phase filter: per view, never persisted, and it touches ONLY the stream ── */
   const [picked, setPicked] = useState<ReadonlySet<number>>(() => new Set());
+  // The map node the analyst clicked: its card in the live stream is highlighted.
+  const [held, setHeld] = useState<string | null>(null);
   const togglePicked = useCallback((li: number) => setPicked((cur) => {
     const next = new Set(cur);
     if (next.has(li)) next.delete(li); else next.add(li);
@@ -1541,7 +1599,7 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
             </div>
           )}
           <div className="rp-mapwrap">
-            <AttackMap nodes={nodes} edges={edges} lanes={lanes} reached={reached} current={cur?.en.eventId ?? null} />
+            <AttackMap nodes={nodes} edges={edges} lanes={lanes} reached={reached} current={cur?.en.eventId ?? null} onPin={setHeld} />
           </div>
           <div className="rp-legend" aria-hidden>
             <span className="rp-legend__k"><svg width="26" height="8"><path d="M1,4 L25,4" className="rp-legend__actor" /></svg>done by — the process that did it{edgeCounts.actor ? ` (${edgeCounts.actor})` : ''}</span>
@@ -1563,7 +1621,7 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
           <div className="rp-card__hd"><span className="rp-mk" style={{ background: '#d8974f' }} /><h3>Live event stream</h3>
             <span className="rp-tagline">every event, {newestFirst ? 'newest' : 'oldest'} first — the timeline's order</span></div>
           <Stream items={items} reached={reached} skipped={skipped} onOpen={onOpen} newestFirst={newestFirst}
-            picked={picked} onClear={clearPicked} anim={anim} />
+            picked={picked} onClear={clearPicked} anim={anim} held={held} />
         </div>
         <div className="rp-side">
         <div className="rp-card">
