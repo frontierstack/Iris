@@ -2,6 +2,9 @@
 OpenAI-compatible endpoint (Azure OpenAI gateways, vLLM, Ollama, LM Studio, OpenRouter...) works through the same provider."""
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import os
 import re
 import time
 from typing import Any, AsyncIterator, Optional
@@ -123,6 +126,96 @@ _PARAM = re.compile(r"<parameter\s*=\s*([A-Za-z0-9_.-]+)\s*>(.*?)(?:</parameter>
 # a bare <function=…> call with no <tool_call> wrapper, plus the older ```tool_call fenced form
 _BARE_FN = re.compile(r"<function\s*=\s*[A-Za-z0-9_.-]+\s*>.*?(?:</function>|\Z)", re.S | re.I)
 _FENCED = re.compile(r"```(?:tool_call|tool_code|function_call)\s*(.*?)```", re.S | re.I)
+
+
+class ReplyCut(AIError):
+    """A reply that was ended by Iris mid-stream: `why` says whether it was a stop, a time budget, a
+    silent provider or a runaway generation."""
+
+    def __init__(self, why: str, kind: str):
+        super().__init__(why)
+        self.why = why
+        self.kind = kind          # 'stop' | 'deadline' | 'silent' | 'runaway'
+
+
+def reply_max_seconds() -> float:
+    """The longest ONE model reply may stream before Iris calls it a runaway and cuts it.
+
+    Not a token limit - Iris sends no max_tokens, on the analyst's instruction, and still does not.
+    This is a wall-clock ceiling on a single reply: a local model caught in its own reasoning loop
+    produced ~90,000 tokens over 20 minutes inside a worker agent, holding a gateway slot the whole
+    time, and nothing in Iris was looking. 600 s is ~40k tokens at a local model's pace - far past any
+    real turn. `IRIS_AI_REPLY_MAX_SECONDS`, 0 disables it."""
+    try:
+        return max(0.0, float(os.environ.get("IRIS_AI_REPLY_MAX_SECONDS", "600")))
+    except ValueError:
+        return 600.0
+
+
+#: A provider that has sent NOTHING (no token, no reasoning, no heartbeat) for this long is treated as
+#: stalled and the reply is cut. Generous, because a queued request on a busy gateway is silent too.
+SILENT_SECONDS = 240.0
+#: How often a guarded stream wakes when nothing arrives, to look at the stop flag and the clocks.
+GUARD_TICK = 0.5
+
+
+async def guarded(stream: AsyncIterator[dict[str, Any]], *, stopping: Any = None,
+                  deadline: Optional[float] = None, max_seconds: Optional[float] = None,
+                  silent_seconds: float = SILENT_SECONDS) -> AsyncIterator[dict[str, Any]]:
+    """Every model reply goes through this. It yields the stream's items unchanged, and raises
+    `ReplyCut` when the analyst stopped the run, `deadline` (monotonic) passed, the reply ran longer
+    than `max_seconds` (default `reply_max_seconds()`), or the provider went silent.
+
+    Two things a bare `async for` over the stream could not do, and both were live bugs:
+      - WAKE WITHOUT A TOKEN. The stop flag and the clocks used to be read only when an item arrived,
+        so a stalled or queued request ignored Stop and every budget indefinitely.
+      - CLOSE THE REQUEST. Breaking out of an `async for` leaves the async generator suspended and
+        its HTTP connection OPEN until garbage collection, so after a Stop llama.cpp kept generating
+        into a socket nobody read - "even stop did not stop the job". Here the generator is closed in
+        a `finally`, which closes the response, and the gateway sees the disconnect and cancels.
+    """
+    cap = reply_max_seconds() if max_seconds is None else max_seconds
+    t0 = time.monotonic()
+    last_item = t0
+    it = stream.__aiter__()
+    pending: Optional[asyncio.Future] = None
+    try:
+        while True:
+            if stopping is not None and stopping():
+                raise ReplyCut("the analyst stopped the run", "stop")
+            now = time.monotonic()
+            if deadline is not None and now >= deadline:
+                raise ReplyCut("the time budget ran out mid-reply", "deadline")
+            if cap and now - t0 >= cap:
+                raise ReplyCut(f"the model's reply ran for {int(now - t0)} s without finishing "
+                               f"(a runaway generation) and was cut", "runaway")
+            if silent_seconds and now - last_item >= silent_seconds:
+                raise ReplyCut(f"the provider sent nothing for {int(now - last_item)} s", "silent")
+            if pending is None:
+                pending = asyncio.ensure_future(it.__anext__())
+            done, _ = await asyncio.wait({pending}, timeout=GUARD_TICK)
+            if not done:
+                continue
+            fut, pending = pending, None
+            try:
+                item = fut.result()
+            except StopAsyncIteration:
+                return
+            last_item = time.monotonic()
+            yield item
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
+            try:
+                await pending
+            except BaseException:  # noqa: BLE001 — cancelled on purpose
+                pass
+        aclose = getattr(it, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except BaseException:  # noqa: BLE001 — closing is best effort; the socket goes with it
+                pass
 
 
 def _coerce(value: str) -> Any:
@@ -452,13 +545,17 @@ class LLMClient:
         takes over, tells the model its call never ran and asks for a smaller one (prompts.ARG_TOO_BIG).
         """
         try:
-            async for item in self._stream_once(messages, tools, temperature, tool_choice):
-                yield item
+            # aclosing: closing THIS generator (a Stop, a cut) must close the inner one too, or its
+            # HTTP response stays open and the provider keeps generating into it.
+            async with contextlib.aclosing(self._stream_once(messages, tools, temperature, tool_choice)) as inner:
+                async for item in inner:
+                    yield item
             return
         except BadToolArguments:
             pass
-        async for item in self._stream_once(messages, tools, 0.0, tool_choice):
-            yield item
+        async with contextlib.aclosing(self._stream_once(messages, tools, 0.0, tool_choice)) as inner:
+            async for item in inner:
+                yield item
 
     async def _stream_once(self, messages: list[dict[str, Any]], tools: Optional[list[dict[str, Any]]] = None,
                            temperature: float = 0.1,

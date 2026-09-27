@@ -82,7 +82,7 @@ from ..config import get_settings
 from . import autodelegate, compaction, continuation, eventids, readcache, runs, subagents
 from .ledger import Ledger
 from .argrepair import repair_arguments
-from .client import (AIError, BadToolArguments, ContextTooLong, LLMClient, ProviderUnavailable,
+from .client import (AIError, BadToolArguments, ContextTooLong, LLMClient, ProviderUnavailable, ReplyCut, guarded,
                      absorb_text_calls, has_tool_call_syntax, parse_text_tool_calls)
 from .history import HISTORY
 from .loopguard import (LoopGuard, MAX_RECOVERIES as MAX_LOOP_RECOVERIES, call_key as _cache_key,
@@ -1455,6 +1455,7 @@ async def investigate(store: Any, objective: str, run_id: str,
             retry_turn = False       # BadToolArguments: the model is told and the step is re-taken
             ctx_tries = 0            # ContextTooLong recoveries on THIS turn
             prov_tries = 0           # transient provider failures on THIS turn
+            cut_tries = 0            # replies cut as a runaway / a silent provider on THIS turn
             while True:
                 buf, final_msg, finish = [], {}, ""
                 if auto_msg is not None:
@@ -1464,7 +1465,11 @@ async def investigate(store: Any, objective: str, run_id: str,
                     final_msg, finish = auto_msg, "tool_calls"
                     break
                 try:
-                    async for item in client.stream_chat(messages, tools=tools, temperature=0.1):
+                    # guarded: Stop is seen twice a second even while the provider sends nothing,
+                    # a reply that runs past reply_max_seconds() is cut as a runaway, and a cut
+                    # CLOSES the request so the gateway cancels the generation.
+                    async for item in guarded(client.stream_chat(messages, tools=tools, temperature=0.1),
+                                              stopping=lambda: runs.stop_requested(run_id)):
                         # Checked INSIDE the token loop, not only between steps: a plain question
                         # streams prose and never calls a tool, so a stop that was only checked at the
                         # two old checkpoints could not interrupt it at all — which is what "there is
@@ -1603,6 +1608,24 @@ async def investigate(store: Any, objective: str, run_id: str,
                     HISTORY.append(run_id, {"kind": kind, "text": note})
                     yield {"type": kind, "message": note, "text": note, "ids": [],
                            "contextCeiling": ceiling, "compactions": compactions}
+                    continue
+                except ReplyCut as cut:
+                    if cut.kind == "stop":
+                        break                # the checkpoint below records the stop
+                    cut_tries += 1
+                    if cut_tries > 2:
+                        raise AIError(f"{cut.why}, {cut_tries} times on one turn. Everything written to "
+                                      f"the case so far is kept; send a follow-up in this conversation "
+                                      f"to continue.") from cut
+                    note = (f"{cut.why}; asking the model again (attempt {cut_tries} of 2) — nothing "
+                            f"from the cut reply was acted on")
+                    HISTORY.append(run_id, {"kind": "warning", "text": note})
+                    yield {"type": "warning", "message": note, "ids": []}
+                    if cut.kind == "runaway":
+                        messages.append({"role": "user", "content": (
+                            "Your previous reply ran for minutes without finishing and was cut off - "
+                            "nothing in it was used. Do not reason at length: make the next tool call, "
+                            "or write the answer, now.")})
                     continue
                 except ProviderUnavailable as exc:
                     prov_tries += 1
@@ -2178,17 +2201,25 @@ async def investigate(store: Any, objective: str, run_id: str,
                 buf = []
                 wrap_msg: dict[str, Any] = {}
                 wrap_finish = ""
-                async for item in client.stream_chat(messages, tools=None, temperature=0.1,
-                                                     tool_choice="none"):
-                    if runs.stop_requested(run_id):
-                        break
-                    if item["type"] == "text":
-                        buf.append(item["text"])
-                        HISTORY.append_text(run_id, item["text"])
-                        yield {"type": "delta", "text": item["text"], "step": step}
-                    elif item["type"] == "message":
-                        wrap_msg = item["message"]
-                        wrap_finish = str(item.get("finish") or "")
+                try:
+                    async for item in guarded(client.stream_chat(messages, tools=None, temperature=0.1,
+                                                                 tool_choice="none"),
+                                              stopping=lambda: runs.stop_requested(run_id)):
+                        if item["type"] == "text":
+                            buf.append(item["text"])
+                            HISTORY.append_text(run_id, item["text"])
+                            yield {"type": "delta", "text": item["text"], "step": step}
+                        elif item["type"] == "message":
+                            wrap_msg = item["message"]
+                            wrap_finish = str(item.get("finish") or "")
+                except ReplyCut as cut:
+                    # What the report had written before the cut is kept - it is the report. A stop
+                    # ends here exactly as the old in-loop break did.
+                    if cut.kind != "stop":
+                        note = f"{cut.why}; the report below is what was written before the cut"
+                        HISTORY.append(run_id, {"kind": "warning", "text": note})
+                        yield {"type": "warning", "message": note, "ids": []}
+                    wrap_finish = "stop"
                 # The assembled message is the fallback, exactly as in the main loop. Collecting ONLY the
                 # `text` deltas meant that a provider which streams no prose deltas — perfectly legal, the
                 # client always yields the assembled `message` — produced an EMPTY report after a run had

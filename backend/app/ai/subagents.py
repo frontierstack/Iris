@@ -58,6 +58,8 @@ from typing import Any, Callable, Optional
 
 import orjson
 
+from .client import ReplyCut, guarded
+
 MAX_TASKS = 6                 # more than this is a survey, not a delegation
 MIN_TASKS = 2                 # "make sure two agents are always working"
 WORKER_RESULT_CHARS = 3000    # a worker's own tool results are clipped harder than the lead's
@@ -311,7 +313,11 @@ async def run_worker(task: dict[str, Any], *, client: Any, ctx: Any, context_blo
         msg: dict[str, Any] = {}
         span: Optional[list[float]] = None
         try:
-            async for item in client.stream_chat(messages, tools=schemas, temperature=0.1):
+            # guarded: wakes twice a second whatever the provider sends, so Stop and this agent's
+            # time budget land MID-REPLY (a runaway reasoning loop streamed ~90k tokens for 20 min
+            # here), and closes the request when it cuts, so the gateway cancels the generation.
+            async for item in guarded(client.stream_chat(messages, tools=schemas, temperature=0.1),
+                                      stopping=ctx.stopping, deadline=deadline):
                 # A STOP HAS TO LAND INSIDE THE STREAM, not only between steps. A gateway reply
                 # takes as long as it takes, and reading one to the end after the analyst pressed
                 # Stop is most of what "the stop button does not stop things at all" actually was:
@@ -329,6 +335,9 @@ async def run_worker(task: dict[str, Any], *, client: Any, ctx: Any, context_blo
                     buf.append(item["text"])
                 elif item["type"] == "message":
                     msg = item["message"]
+        except ReplyCut as cut:
+            stopped = cut.why
+            break
         except Exception as exc:  # noqa: BLE001 — one worker's provider failure is not the run's
             stopped = f"{type(exc).__name__}: {exc}"
             break
@@ -366,8 +375,11 @@ async def run_worker(task: dict[str, Any], *, client: Any, ctx: Any, context_blo
         try:
             buf = []
             msg = {}
-            async for item in client.stream_chat(messages, tools=None, temperature=0.1,
-                                                 tool_choice="none"):
+            # The wrap-up gets the reserve it was admitted on, no more: it must not outlive the call.
+            async for item in guarded(client.stream_chat(messages, tools=None, temperature=0.1,
+                                                         tool_choice="none"),
+                                      stopping=ctx.stopping,
+                                      deadline=time.monotonic() + max(5.0, ctx.remaining() - 5.0)):
                 if item["type"] == "text":
                     buf.append(item["text"])
                 elif item["type"] == "message":
