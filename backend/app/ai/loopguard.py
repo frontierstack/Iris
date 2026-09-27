@@ -415,7 +415,7 @@ class LoopGuard:
             self._refuse(key)
             self._pending = (key, writes, "repeat")
             return (f"REFUSED — you have already made this exact call {n_ever} time(s) in this run "
-                    f"({name} with {_fmt_args(args)}) and its answer is in this transcript above. It "
+                    f"({name} with {_fmt_args(args)}) and its answer was already returned to you. It "
                     f"was NOT run again, so nothing has changed. Do ONE of these instead, in this "
                     f"turn:" + self.advice(name, args) +
                     f"\nRepeating it will end the run." + self._no_announcement())
@@ -528,6 +528,36 @@ class LoopGuard:
         self.repeat_streak = 0
         self.barren_streak = 0
         self.plan_repeats = 0
+
+    def restarted(self) -> None:
+        """The run was restarted from its own record after tripping: let it WORK again.
+
+        The trip used to end the run, and the report it forced routinely listed work still to do
+        (2026-09-27: "it still noted additional items that needed work, but this loop guard forced a
+        final summary"). A restart hands the model a fresh transcript that states the looped calls and
+        their answers; this clears what would end the new transcript on its first turn - the trip
+        and the streaks - and keeps what must stay true: an identical call is still refused
+        (`counts`/`ever`), a duplicate write still is (`written`), and the RECOVERY COUNT stands. The
+        restart note is itself the plan, so a model that goes straight back to the loop meets the
+        short fuse (`repeat_limit`) rather than two fresh plans per restart.
+        """
+        self.tripped = ""
+        self.repeat_streak = 0
+        self.barren_streak = 0
+        self.plan_repeats = 0
+        self.page_streak = 0
+        self.restarts = getattr(self, "restarts", 0) + 1
+
+    def refused_calls(self) -> list[tuple[str, dict[str, Any]]]:
+        """(tool, args) of the most recently refused calls, oldest first, without duplicates."""
+        out: list[tuple[str, dict[str, Any]]] = []
+        seen: set[str] = set()
+        for key in self._refused_keys:
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((_tool_of(key), self._args_of(key)))
+        return out
 
     def repeat_limit(self) -> int:
         """Consecutive repeats that end the run — shorter after each recovery plan was ignored."""

@@ -343,6 +343,31 @@ class HistoryStore:
             self._touch_locked(rec)
             self._save_locked(force=False)   # throttled: this is called once per token
 
+    def retract_text(self, run_id: str, text: str) -> None:
+        """Take `text` back off the END of the last prose line - streamed, then found not to be prose.
+
+        The wrap-up turn streams as it arrives, so a model answering it with tool-call MARKUP had that
+        markup stored as the report's first paragraph, and the finished panel showed it verbatim
+        above the real report. Only the exact trailing text is removed; the entry keeps its `seq` and
+        `updSeq` moves, so a polling tab picks the change up exactly as it does for a tool result.
+        """
+        if not text:
+            return
+        with self.lock:
+            rec = self._runs.get(run_id)
+            if rec is None:
+                return
+            for e in reversed(rec["transcript"]):
+                if e.get("kind") != "text":
+                    continue
+                cur = e.get("text") or ""
+                if cur.endswith(text):
+                    rec["seq"] += 1
+                    e.update({"text": cur[: len(cur) - len(text)], "updSeq": rec["seq"]})
+                    self._touch_locked(rec)
+                    self._save_locked()
+                break
+
     def tool_result(self, run_id: str, call_id: str, ok: bool, summary: str, took_ms: int) -> None:
         with self.lock:
             rec = self._runs.get(run_id)

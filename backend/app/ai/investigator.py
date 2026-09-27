@@ -562,6 +562,51 @@ def _brief_chars(ceiling: int) -> int:
     return max(compaction.MAX_BRIEF_CHARS, min(24_000, int(ceiling * 4 * 0.15)))
 
 
+# Restarts from the run's own record after the loop guard trips, before the report is asked for.
+MAX_LOOP_RESTARTS = 2
+
+
+def _earlier_answer(ctx: Any, name: str, args: dict[str, Any], writes: bool) -> str:
+    """The gist of the answer an identical READ already got, for a refusal to carry.
+
+    "Its answer is in this transcript above" stopped being true the moment a fold ran: on the run
+    this was written for, the two searches made just before compaction 3 were folded away, and the
+    model re-sent them six times against a refusal pointing at text it could no longer see. The
+    refusal now repeats what the call returned, so it is never a dead end.
+    """
+    if writes:
+        return ""
+    try:
+        cached = ctx.cache.get(_cache_key(name, args))
+    except Exception:                    # noqa: BLE001 - an unhashable argument is just no gist
+        cached = None
+    if cached is None:
+        return ""
+    try:
+        body = orjson.dumps(cached).decode() if not isinstance(cached, str) else cached
+    except (TypeError, ValueError):
+        return ""
+    return ("\nWHAT THAT CALL RETURNED (repeated because the earlier part of this conversation may "
+            "have been summarised since): " + compaction._result_gist(body)[:600])
+
+
+def _loop_restart_note(ctx: Any, looped: list[tuple[str, dict[str, Any]]]) -> str:
+    """The user turn after a loop restart: the calls that looped, what they returned, and go on."""
+    lines = []
+    for name, args in looped[-6:]:
+        gist = _earlier_answer(ctx, name, args, False).split(": ", 1)[-1] if name else ""
+        shown = ", ".join(f"{k}={str(v)[:80]}" for k, v in args.items())
+        lines.append(f"- {name}({shown})" + (f" -> {gist}" if gist else ""))
+    done = "\n".join(lines) if lines else "- (the calls repeated in the last turns)"
+    return ("THE RUN WAS RESTARTED because the last turns kept repeating calls that had already been "
+            "made. Those calls are DONE and will be refused if sent again; this is what they returned:\n"
+            + done +
+            "\n\nDo NOT make them again. Continue the investigation from the record above: take the "
+            "next item that is still open (an open lead, a finding not yet recorded, a question your "
+            "own notes say is unanswered) and make a DIFFERENT call for it. When nothing is left "
+            "open, write the final report.")
+
+
 def _reset_transcript(messages: list[dict[str, Any]], run_id: str,
                       ledger: Optional[Ledger] = None) -> Optional[list[dict[str, Any]]]:
     """The transcript REBUILT from this run's own persisted record — an in-run "continue".
@@ -1315,6 +1360,7 @@ async def investigate(store: Any, objective: str, run_id: str,
     # model cannot act on is worse than none.
     guard = LoopGuard(available=frozenset(REGISTRY))
     loop_recoveries = 0      # recovery plans handed to a model that kept repeating itself
+    loop_restarts = 0        # in-run restarts after the loop guard tripped (see MAX_LOOP_RESTARTS)
     lane_no = 0              # per-run ordinal of the dispatch lane, so the panel can GROUP a lane
     record_nudges = 0        # "record as you go" nudges sent
     solo_turns = 0           # consecutive turns that asked for exactly ONE read
@@ -2068,7 +2114,7 @@ async def investigate(store: Any, objective: str, run_id: str,
                         # exists to be called, with a message that says what to do instead.
                         refusal = guard.admit(name, args, writes)
                         if refusal:
-                            entry["result"] = refusal
+                            entry["result"] = refusal + _earlier_answer(ctx, name, args, writes)
                         else:
                             entry["run"] = True
                     # The guard stages one decision at a time and `observe` consumes it. A lane admits
@@ -2337,6 +2383,31 @@ async def investigate(store: Any, objective: str, run_id: str,
                 HISTORY.append(run_id, {"kind": "status", "text": note})
                 yield {"type": "status", "text": note, "loopRecovery": loop_recoveries}
 
+            if (guard.tripped and loop_restarts < MAX_LOOP_RESTARTS
+                    and not runs.stop_requested(run_id)):
+                # THE TRIP IS NOT THE END OF THE WORK. Ending here forced a report that itself listed
+                # what was still to do (2026-09-27). The loop is in the TRANSCRIPT - after a fold the
+                # model kept re-sending the two calls it had made just before it - so the run is
+                # restarted from its own record with those calls and their answers stated, and the
+                # model carries on. Bounded; past MAX_LOOP_RESTARTS the report is asked for as before.
+                note_ledger_writes()
+                reset = _reset_transcript(messages, run_id, ledger)
+                if reset is not None:
+                    looped = guard.refused_calls()
+                    reset.append({"role": "user", "content": _loop_restart_note(ctx, looped)})
+                    messages = reset
+                    loop_restarts += 1
+                    why = guard.tripped
+                    guard.restarted()
+                    re_arm()
+                    note = (f"the assistant was repeating itself ({why}) — restarted the conversation "
+                            f"from this run's own record with those calls and their answers stated, so it "
+                            f"can carry on with the work still open (loop restart {loop_restarts} of "
+                            f"{MAX_LOOP_RESTARTS})")
+                    HISTORY.append(run_id, {"kind": "status", "text": note})
+                    yield {"type": "status", "text": note, "loopRestart": loop_restarts}
+                    continue
+
             if guard.tripped:
                 # A WARNING, never folded in the panel: the analyst should see that the run was ended
                 # by Iris and why. The report still follows — `loop` takes the wrap-up turn below.
@@ -2433,6 +2504,8 @@ async def investigate(store: Any, objective: str, run_id: str,
             # that leave no room for another call; what it writes then is the report.
             if (parse_text_tool_calls(wrapped)[0].strip() == "" and not runs.stop_requested(run_id)):
                 attempted = parse_text_tool_calls(wrapped)[1]
+                # it was streamed into the record as if it were the report; take it back off
+                HISTORY.retract_text(run_id, wrapped)
                 messages.append({"role": "user", "content": WRAP_UP_NO_CALLS})
                 note = ("the model answered the final turn with " + ("a tool call" if attempted else "nothing")
                         + " instead of a report — asked it once more for the report in prose")
