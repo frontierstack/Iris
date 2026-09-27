@@ -17,9 +17,11 @@
  *  - the default speed is 1x, REAL TIME, and the analyst's choice is remembered. Fitting the span
  *    into a minute made a 54-minute case play at 60x, and a burst of events 100 ms apart flashed past
  *    in two milliseconds — reported as "the timeline plays too fast";
- *  - "Skip quiet stretches" (on by default) FAST-FORWARDS a lull: the clock speeds up as far as it
- *    takes to cross it in about a second and a half, and is back at the chosen speed 5 s (incident
- *    time) before the next event - see ffPlan. Every moment reached that way is marked "skipped", so a
+ *  - "Skip quiet stretches" (on by default) FAST-FORWARDS a lull - a gap the seek bar draws as a
+ *    break, decided by incident time and never by the speed: the clock holds the chosen speed for a
+ *    second after the event, speeds up as far as it takes to cross the lull in about a second and a
+ *    half, and is back at the chosen speed 5 s (incident time; 3-8 s of screen) before the next
+ *    event - see ffPlan. Every moment reached that way is marked "skipped", so a
  *    skipped gap never looks like a short one. Within a burst nothing is skipped: the pace of the
  *    activity itself is always the real one.
  *
@@ -74,21 +76,37 @@ const TAIL_MS = 2_500;
  *  clock that lurches from 1x to 1000x in one frame is the jagged motion this screen was fixed for.
  *  This IS "Skip quiet stretches": it used to glide over a lull in a quarter second and land 0.8 s
  *  before the next event, which was both abrupt and too little warning; it now crosses it this way. */
+/*  WHICH GAPS, AND HOW LONG AT THE CHOSEN SPEED ("the timeline seek is moving too fast all the time even
+ *  at 0.5x, the auto speed up is not slowing down based on the selected time x"). The first version
+ *  decided both RELATIVE to the chosen speed: a gap was "quiet" when fast-forwarding it beat the chosen
+ *  speed 4x, and the approach was capped at 5 s of SCREEN. So the slower the speed, the more gaps were
+ *  skipped and the shorter (in incident time) the stretch that played at it. Simulated: at 0.5x a 10 s
+ *  gap was fast-forwarded in 7.1 s of screen while at 1x the SAME gap played in real time for 10 s -
+ *  0.5x was FASTER than 1x - and every fast-forwarded gap took 7.1 s of screen at 0.5x and at 1x alike,
+ *  so the choice of speed was invisible. Now:
+ *   - a gap is quiet by INCIDENT time alone, the same rule the seek bar uses to draw it as a break
+ *     (longer than the scale's G, or than FF_QUIET_MAX_MS): the speed never decides what is dead air,
+ *     and the thumb only races across a gap that the bar already draws compressed;
+ *   - the hold after an event and the approach to the next are SCREEN time at the chosen speed, so a
+ *     slower speed always spends longer watching each arrival, never less. */
 /** After an event, this long (screen time) at the chosen speed before speeding up: it is seen to land. */
-const FF_HOLD_MS = 600;
+const FF_HOLD_MS = 1_000;
 /** The chosen speed resumes this much INCIDENT time before the next event (5 s)... */
 const FF_APPROACH_MS = 5_000;
-/** ...but never more than this much SCREEN time of it at a slow speed, nor less than FF_MIN_NEAR_MS. */
-const FF_APPROACH_SCREEN_MS = 5_000;
-const FF_MIN_NEAR_MS = 1_200;
-/** How long (screen time) a whole gap takes to cross, ramps included. */
-const FF_CROSS_MS = 1_500;
+/** ...and never under FF_NEAR_SCREEN_MS of SCREEN time at the chosen speed (a fast speed), nor over
+ *  FF_NEAR_SCREEN_MAX_MS of it (a slow one) - so the approach is always seen, at every speed. */
+const FF_NEAR_SCREEN_MS = 3_000;
+const FF_NEAR_SCREEN_MAX_MS = 8_000;
+/** A gap longer than this (incident time) is quiet even when the bar does not compress it. */
+const FF_QUIET_MAX_MS = 60_000;
+/** How long (screen time) the fast part of a gap takes to cross, ramps included. */
+const FF_CROSS_MS = 1_600;
 /** A lull is only fast-forwarded when that is at least this many times the chosen speed: below it the
  *  hold and the approach take nearly the whole gap anyway, and a 2x "skip" would mark as skipped a gap
  *  the analyst mostly watched in real time. */
 const FF_MIN_GAIN = 4;
 /** Screen time to go from the chosen speed to the gap's rate, and back (each ramp). */
-const FF_RAMP_MS = 350;
+const FF_RAMP_MS = 450;
 /** Pointer within this many pixels of an event snaps the playhead onto it (on a click, not a drag). */
 const SNAP_PX = 8;
 /** A drag this many pixels long is a drag, not a click. */
@@ -108,9 +126,9 @@ const SPEED_KEY = 'iris.replay.speed';
 const SKIP_KEY = 'iris.replay.skipQuiet';
 
 /** How much INCIDENT time before the next event the chosen speed resumes, at speed `sp`: 5 s, unless
- *  that would be more than 5 s of screen (a slow speed) or under 1.2 s of it (a fast one). */
+ *  that would be under 3 s of screen (a fast speed) or over 8 s of it (a slow one). */
 function ffNear(sp: number): number {
-  return Math.max(FF_MIN_NEAR_MS * sp, Math.min(FF_APPROACH_MS, FF_APPROACH_SCREEN_MS * sp));
+  return Math.min(FF_NEAR_SCREEN_MAX_MS * sp, Math.max(FF_APPROACH_MS, FF_NEAR_SCREEN_MS * sp));
 }
 /** The fast-forward across the gap from the event at `tp` to the next one at `tn`: the stretch
  *  [lo, hi] it covers, its top rate and the ramp constant `tau`, or null when the gap is too short to
@@ -119,11 +137,14 @@ function ffNear(sp: number): number {
  *  every frame, which is what reads as smooth: a constant-acceleration (square-root) ramp put a 29x jump
  *  into the first frame of a three-hour gap. `tau` is chosen so each ramp lasts FF_RAMP_MS whatever the
  *  ratio, and each covers tau x (top - sp) of incident time; `top` is then solved (bisection - the left
- *  side grows with it) so ramp + cruise + ramp takes FF_CROSS_MS. */
+ *  side grows with it) so ramp + cruise + ramp takes FF_CROSS_MS.
+ *  `G` is the seek bar's own quiet-gap threshold (Scale.G): only a gap longer than it (or than
+ *  FF_QUIET_MAX_MS) is dead air, whatever the speed. */
 const ffMemo = { key: '', plan: null as { lo: number; hi: number; top: number; tau: number } | null };
-function ffPlan(tp: number, tn: number, sp: number): { lo: number; hi: number; top: number; tau: number } | null {
-  const key = `${tp}|${tn}|${sp}`;
+function ffPlan(tp: number, tn: number, sp: number, G: number): { lo: number; hi: number; top: number; tau: number } | null {
+  const key = `${tp}|${tn}|${sp}|${G}`;
   if (ffMemo.key === key) return ffMemo.plan;
+  if (tn - tp <= Math.min(G, FF_QUIET_MAX_MS)) { ffMemo.key = key; ffMemo.plan = null; return null; }
   const lo = tp + FF_HOLD_MS * sp;
   const hi = tn - ffNear(sp);
   const d = hi - lo;
@@ -142,8 +163,8 @@ function ffPlan(tp: number, tn: number, sp: number): { lo: number; hi: number; t
 }
 /** The clock's rate (incident ms per screen ms) at instant `t` of that gap: the chosen speed through
  *  the hold and the approach, the plan's top rate between them, joined by the exponential ramps. */
-function ffRate(t: number, tp: number, tn: number, sp: number): number {
-  const f = ffPlan(tp, tn, sp);
+function ffRate(t: number, tp: number, tn: number, sp: number, G: number): number {
+  const f = ffPlan(tp, tn, sp, G);
   if (!f || t <= f.lo || t >= f.hi) return sp;
   return Math.min(f.top, sp + (t - f.lo) / f.tau, sp + (f.hi - t) / f.tau);
 }
@@ -933,7 +954,7 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
     const nx = its[k];
     if (nx && nextRef.current) nextRef.current.textContent = dur(nx.t - t);
     // "on screen" is a promise about the wait; a gap that will be fast-forwarded cannot keep it at sp.
-    const ffGap = live.current.skipQuiet && nx && ffPlan(k > 0 ? its[k - 1]!.t : live.current.d0, nx.t, sp) != null;
+    const ffGap = live.current.skipQuiet && nx && ffPlan(k > 0 ? its[k - 1]!.t : live.current.d0, nx.t, sp, sc.G) != null;
     if (nx && nextScreenRef.current) nextScreenRef.current.textContent = sp !== 1 && !ffGap ? ` · ${dur((nx.t - t) / sp)} on screen` : '';
     trackRef.current?.setAttribute('aria-valuetext', `${c.clock} UTC, ${k} of ${its.length} events`);
     if (k !== reachedRef.current) { reachedRef.current = k; setReached(k); }
@@ -1019,7 +1040,7 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
       // A frame's step is capped: a throttled tab must not fast-forward past the approach it lands on.
       const dt = Math.min(100, Math.max(0, now - last));
       last = now;
-      const { items: its, d0: a, d1: b, speed: sp, skipQuiet: ff } = live.current;
+      const { items: its, d0: a, d1: b, speed: sp, skipQuiet: ff, scale: sc } = live.current;
       let fast: number | null = null;
       const va = viewAnim.current;
       if (va) {
@@ -1043,12 +1064,12 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
         const k0 = reachedBy(its, tRef.current);
         const nx0 = its[k0];
         const tp0 = k0 > 0 ? its[k0 - 1]!.t : a;
-        const rate = ff && nx0 ? ffRate(tRef.current, tp0, nx0.t, sp) : sp;
+        const rate = ff && nx0 ? ffRate(tRef.current, tp0, nx0.t, sp, sc.G) : sp;
         if (rate > sp && nx0) {
           // Integrated, not anchored: this stretch is by definition not real time. It stops at the
           // approach, and from there the anchored clock below takes over at the chosen speed - the
           // anchor written here is exactly where it picks up, so there is no seam.
-          const plan = ffPlan(tp0, nx0.t, sp)!;
+          const plan = ffPlan(tp0, nx0.t, sp, sc.G)!;
           fast = plan.top;
           // Exact, phase by phase - and the frame that reaches the approach spends the REST of its time
           // at the chosen speed: cutting it short there froze the clock for one frame at every handover
@@ -1394,7 +1415,7 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
             </select>
           </div>
           <label className="rp-skip"
-            title="Speed through the dead air between events: the clock accelerates as far as it takes to cross a quiet gap in about a second and a half, and is back at the chosen speed 5 seconds (incident time) before the next event. Every arrival and every burst plays at the chosen speed, the clock always shows real time, and moments reached this way are marked, so a skipped gap never looks like a short one.">
+            title="Speed through the dead air between events - the long gaps the seek bar draws as breaks, whatever the speed: the clock holds the chosen speed for a second after an event, accelerates as far as it takes to cross the gap in about a second and a half, and is back at the chosen speed 5 seconds (incident time; 3 to 8 seconds on screen) before the next event. Every arrival and every burst plays at the chosen speed, the clock always shows real time, and moments reached this way are marked, so a skipped gap never looks like a short one.">
             <input type="checkbox" checked={skipQuiet} onChange={(e) => setSkipQuiet(e.target.checked)} />
             Skip quiet stretches
           </label>

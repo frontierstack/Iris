@@ -579,6 +579,13 @@ class LLMClient:
                 if choice.get("finish_reason"):
                     finish = str(choice["finish_reason"])
                 delta = choice.get("delta") or {}
+                # A REASONING model (llama.cpp / Qwen3 `reasoning_content`, some gateways `reasoning`)
+                # streams its thinking before its answer. It is not prose and never reaches the
+                # transcript, but it IS the provider generating for this request: `probe_parallel`
+                # and a worker's streaming span must count it, or two requests thinking side by side
+                # read as a one-slot queue (the probe judged a 3-slot pool serial on exactly that).
+                if delta.get("reasoning_content") or delta.get("reasoning"):
+                    yield {"type": "thinking"}
                 text = delta.get("content")
                 if text:
                     content.append(text)

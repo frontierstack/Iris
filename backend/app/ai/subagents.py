@@ -423,27 +423,38 @@ def stream_overlap(per_agent: list[list[tuple[float, float]]]) -> tuple[Optional
     the same moment, so that is what is measured: a sweep over every reply's first-to-last-token
     span. Share ~0 is a queue; anything substantial is real concurrency.
     """
-    live = [s for s in per_agent if s]
+    live = [[(a, b) for a, b in s if b > a] for s in per_agent]
+    live = [s for s in live if s]
     if len(live) < 2:
         return None, 0.0
+    # JUDGE ONLY WHILE TWO OR MORE AGENTS WERE STILL WORKING. Agents that take different numbers of
+    # steps are normal, and once all but one have finished the last one streams alone however many
+    # slots the provider has - a lone survivor is not a queue. Measured over the whole run, one agent
+    # finishing in 16 s and the other running 63 s read as 9 % on a pool that served them together,
+    # and that false verdict was then REMEMBERED (note_parallel), switching delegation off. The
+    # window runs from the first token to the moment the second-to-last agent finished; a queue
+    # still reads ~0 inside it, because in a queue the agents take turns for the whole window.
+    ends = sorted(max(b for _a, b in s) for s in live)
+    lo, hi = min(a for s in live for a, _b in s), ends[-2]
     edges: list[tuple[float, int]] = []
     for spans in live:
         for a, b in spans:
-            if b > a:
-                edges.append((a, 1))
-                edges.append((b, -1))
+            edges.append((a, 1))
+            edges.append((b, -1))
     edges.sort()
-    depth, last, any_t, multi_t = 0, 0.0, 0.0, 0.0
+    depth, last, any_t, win_t, multi_t = 0, 0.0, 0.0, 0.0, 0.0
     for t, d in edges:
         if depth >= 1:
             any_t += t - last
-        if depth >= 2:
-            multi_t += t - last
+            seg = max(0.0, min(t, hi) - max(last, lo))
+            win_t += seg
+            if depth >= 2:
+                multi_t += seg
         depth += d
         last = t
-    if any_t < MIN_STREAMED_SECONDS:
+    if win_t < MIN_STREAMED_SECONDS:
         return None, any_t
-    return multi_t / any_t, any_t
+    return multi_t / win_t, any_t
 
 
 # Below this much streamed time there is no verdict: a fast provider answers in slivers, and
@@ -514,7 +525,8 @@ async def probe_parallel(client: Any) -> Optional[bool]:
     async def one(i: int) -> None:
         async for item in client.stream_chat([{"role": "user", "content": PROBE_PROMPT}],
                                              tools=None, temperature=0.0, tool_choice="none"):
-            if item.get("type") == "text" and item.get("text"):
+            # thinking counts: a reasoning model spends most of a short reply there (client.py)
+            if item.get("type") == "thinking" or (item.get("type") == "text" and item.get("text")):
                 now = time.monotonic()
                 if spans[i][0] is None:
                     spans[i][0] = now

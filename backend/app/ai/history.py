@@ -407,6 +407,15 @@ class HistoryStore:
                         "answer": _clip(answer, MAX_ANSWER), "actions": [dict(a) for a in actions],
                         "unverifiedCitations": [str(u) for u in unverified][:200],
                         "error": _clip(error, 4000), "endedAt": _now()})
+            # An agent still at work when the run ends (a Stop, the lead abandoning the delegation)
+            # reports its own end AFTER this record is final, and nothing drains that note any more -
+            # so its line said "working" forever in a stopped run. Close it here, saying why.
+            for e in rec["transcript"]:
+                if e.get("kind") == "status" and e.get("agent") and e.get("phase") != "end":
+                    rec["seq"] += 1
+                    e.update({"phase": "end", "updSeq": rec["seq"],
+                              "text": _clip(f"agent {e['agent']} finished — the run {state} before "
+                                            "this agent reported", MAX_TEXT)})
             self._touch_locked(rec)
             # NOT `self._stop.discard(run_id)` - see `_stop` in __init__. Anything still in flight
             # for this run (a worker agent mid-stream) has not looked at the flag yet.

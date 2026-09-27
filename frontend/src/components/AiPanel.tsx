@@ -102,7 +102,7 @@ const STREAM_LAG_MAX_MS = 1200;     // and at most, however coarse the packets a
 // the lag can never exceed ~1.2x that, and a fine per-token stream still pays the MINIMUM — the cap
 // only ever applies to a wire that has already been measured as coarse.
 const STREAM_RATE_WINDOW_MS = 1200; // the window the arrival rate and the gaps are measured over
-const STREAM_CATCHUP_MS = 400;      // a backlog beyond the lag is worked off across this long
+const STREAM_CATCHUP_MS = 1000;     // a backlog beyond the lag is worked off across this long (was 400: a surge)
 const STREAM_DEFAULT_CPS = 180;     // characters per second assumed until there is a rate to measure
 const EVENT_DRAIN_MS = 260;         // longest a tool card waits for the sentence that introduces it
 const EVENT_DRAIN_MIN = 12;         // ...below which draining is a frame's work and not worth waiting
@@ -495,6 +495,243 @@ const LiveTail = memo(function LiveTail({ prefix, className, onPaint, where = 'b
   if (where === 'log') return null;
   return <LiveMarkdown className={className} text={text} />;
 });
+
+/**
+ * THE PLAYER: ONE PLAYBACK ENGINE FOR BOTH WAYS PROSE REACHES THIS PANEL.
+ *
+ * "Randomly skippy — sometimes smooth, sometimes very choppy" (the fourth report about this stream)
+ * was four separate PATHS that bypassed the jitter buffer, each taken only under some condition,
+ * which is exactly why it read as random. Measured on a stub provider with irregular timing:
+ *
+ *  1. THE POLLING PATH HAD NO SMOOTHING AT ALL. Closing the panel unmounts it and aborts the SSE; a
+ *     refresh does the same; so does any second tab. Reopening rejoins the run by polling every
+ *     900 ms, and each poll replaced the growing paragraph wholesale: a median frame advance of 138
+ *     characters, 18 advancing frames in a 20 s report. Any analyst who closed the panel to look at
+ *     the evidence it cited got this for the rest of the run.
+ *  2. A DELTA ARRIVING WHILE AN EVENT WAS QUEUED dumped the whole buffer instantly (`flushText`), to
+ *     keep the text behind the event. Whether it happened depended on how quickly the next model turn
+ *     started after a (cached, 1 ms) tool call.
+ *  3. END OF STREAM dumped the remaining buffer — up to the whole lag, 1.2 s of text — in one frame.
+ *  4. THE PLAYBACK RATE STEPPED. The lag was recomputed from scratch every frame from the largest
+ *     gap in the window, so a pause entering the window raised it at once and the pause LEAVING the
+ *     window dropped it at once — turning a second of buffered text into "excess" to be worked off in
+ *     400 ms (a 2.5x surge), then a stall at the next pause. And an event's 260 ms deadline forced a
+ *     jump from the wire's rate to `buffer / 260 ms` in one frame. A bursty provider (a local
+ *     gateway, or one slot shared with worker agents) is what made that happen "sometimes".
+ *
+ * So everything goes through one FIFO of text and events, played by one frame loop:
+ *  - text and events are queued IN ARRIVAL ORDER. An event runs the moment the text ahead of it has
+ *    been typed, never before (a card can never precede its sentence), and text arriving behind an
+ *    event simply waits its turn — nothing is ever dumped to keep the order;
+ *  - the painted speed is SMOOTHED (it eases toward its target: ~140 ms to speed up, ~380 ms to slow
+ *    down), so no single frame changes pace abruptly, whatever the wire or a deadline asks for;
+ *  - the lag rises at once when a gap is seen and DECAYS over seconds, so a pause leaving the window
+ *    is a gentle speed-up rather than a surge;
+ *  - an event's deadline is sized from the text in front of it (at most ~2.5x the current speed,
+ *    between 260 ms and 1.2 s), so a card waits a little longer instead of the sentence being flung;
+ *  - the end of the stream is typed out too, and `end()` resolves when it has been;
+ *  - a hidden tab, or a backlog past `STREAM_FLUSH_OVER`, is applied at once: a tab that has fallen a
+ *    minute behind must not spend a minute typing.
+ * The polling path feeds the SAME engine: each poll's new characters are `text`, every other change
+ *  is an `event` — so a rejoined run types exactly like a streamed one.
+ */
+const STREAM_RATE_TAU_MS = 600;     // the arrival rate is eased over this long
+const STREAM_LAG_DECAY_MS = 3000;   // a lag that is no longer needed shrinks over this long
+const STREAM_ACCEL_MS = 140;        // the painted speed eases UP over this long...
+const STREAM_DECEL_MS = 380;        // ...and down over this long
+const STREAM_FLOOR_CPS = 25;        // nothing queued ever types slower than this
+const STREAM_FLUSH_OVER = 6000;     // a backlog this big is applied at once
+const EVENT_DRAIN_MAX_MS = 1500;    // longest an event waits for the text ahead of it
+const EVENT_SPEEDUP = 1.8;          // how much faster than now the text ahead of an event may play
+const POLL_LIVE_MS = 450;           // poll cadence while a rejoined run is live (was 900 ms lumps)
+
+type PlayOp = { t: 'text'; s: string } | { t: 'ev'; fn: () => void; due: number };
+interface Player {
+  /** Characters to type. */
+  text(s: string): void;
+  /** Something to apply once everything queued before it has been typed. */
+  event(fn: () => void): void;
+  /** No more input: resolves once everything queued has played. */
+  end(): Promise<void>;
+  /** Everything queued, at once, in order. */
+  flush(): void;
+  /** Drop everything (a run replaced by another): nothing further is painted or applied. */
+  abort(): void;
+}
+
+function createPlayer(opts: { commit: (t: string) => void; windowMs?: number; lagMaxMs?: number }): Player {
+  const windowMs = opts.windowMs ?? STREAM_RATE_WINDOW_MS;
+  const lagMaxMs = opts.lagMaxMs ?? STREAM_LAG_MAX_MS;
+  const ops: PlayOp[] = [];
+  let pending = 0;                                  // characters queued, across all text ops
+  let raf = 0;
+  let prevTs = 0;
+  let carry = 0;                                    // the fraction of a character owed to the next frame
+  let speed = 0;                                    // chars/ms being painted, eased
+  let rateS = 0;                                    // arrival rate, eased
+  let lagS = STREAM_LAG_MIN_MS;                     // the lag being run behind the wire, eased down
+  let lastDue = 0;
+  let lastPaint = 0;
+  const arrivals: Array<[number, number]> = [];
+  let arrived = 0;
+  let ended = false;
+  let endDue = 0;
+  let dead = false;
+  let waiters: Array<() => void> = [];
+
+  const settle = () => {
+    if ((ended || dead) && !ops.length) { const w = waiters; waiters = []; w.forEach((f) => f()); }
+  };
+  /** The typed-out text becomes a transcript entry before anything that came after it applies. */
+  const commitPlayed = () => {
+    const played = liveTail.get();
+    if (!played) return;
+    liveTail.set('');
+    opts.commit(played);
+  };
+  const runEvent = (fn: () => void) => { commitPlayed(); fn(); };
+  const schedule = () => { if (!raf && !dead) raf = requestAnimationFrame(tick); };
+  const floor = STREAM_DEFAULT_CPS / 1000;
+
+  /** Arrival rate (chars/ms) and the lag that absorbs the largest gap, over the recent window. */
+  const wire = (now: number): { rate: number; lagMs: number } | null => {
+    while (arrivals.length && now - arrivals[0]![0] > windowMs) arrived -= arrivals.shift()![1];
+    if (arrivals.length < 2) return null;
+    let gap = 0;
+    for (let i = 1; i < arrivals.length; i++) gap = Math.max(gap, arrivals[i]![0] - arrivals[i - 1]![0]);
+    return {
+      rate: arrived / Math.max(STREAM_LAG_MIN_MS, now - arrivals[0]![0]),
+      lagMs: Math.min(lagMaxMs, Math.max(STREAM_LAG_MIN_MS, 1.2 * gap)),
+    };
+  };
+
+  function flushAll() {
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
+    prevTs = 0;
+    carry = 0;
+    let acc = '';
+    while (ops.length) {
+      const op = ops.shift()!;
+      if (op.t === 'text') { acc += op.s; continue; }
+      if (acc) { liveTail.set(liveTail.get() + acc); acc = ''; }
+      runEvent(op.fn);
+    }
+    if (acc) liveTail.set(liveTail.get() + acc);
+    pending = 0;
+    commitPlayed();
+    settle();
+  }
+
+  function tick(ts: number) {
+    raf = 0;
+    if (dead) return;
+    if (document.hidden || pending > STREAM_FLUSH_OVER) { flushAll(); return; }
+    const dt = prevTs ? Math.min(100, ts - prevTs) : 16;
+    prevTs = ts;
+    const w = wire(ts);
+    const r = w ? w.rate : (rateS || floor);
+    rateS = rateS ? rateS + (r - rateS) * (1 - Math.exp(-dt / STREAM_RATE_TAU_MS)) : r;
+    const lagT = w ? w.lagMs : lagS;
+    lagS = lagT >= lagS ? lagT : lagS + (lagT - lagS) * (1 - Math.exp(-dt / STREAM_LAG_DECAY_MS));
+    const lag = Math.max(1, rateS * lagS);
+    const fill = Math.min(1, pending / lag);
+    const excess = Math.max(0, pending - lag);
+    // Under the lag the buffer is still filling: play a little under the wire (never below half, so
+    // the last words of a stalled stream still arrive). Over it, work the excess off gradually.
+    let tgt = rateS * (0.55 + 0.45 * fill) + excess / STREAM_CATCHUP_MS;
+    // Something is WAITING behind text (a card, the end of the stream): play the text ahead of it by
+    // its deadline. The deadline was sized so this asks for at most a few times the current speed.
+    let before = 0;
+    let due = 0;
+    for (const op of ops) {
+      if (op.t === 'text') before += op.s.length;
+      else { due = op.due; break; }
+    }
+    if (!due && ended) due = endDue;
+    if (due) tgt = Math.max(tgt, before / Math.max(50, due - ts));
+    tgt = Math.max(tgt, STREAM_FLOOR_CPS / 1000);
+    // A new paragraph after a quiet spell starts from the wire's pace, not from the last one's.
+    if (ts - lastPaint > 500) speed = Math.min(speed, rateS);
+    speed += (tgt - speed) * (1 - Math.exp(-dt / (tgt > speed ? STREAM_ACCEL_MS : STREAM_DECEL_MS)));
+    const want = speed * dt + carry;
+    let n = Math.floor(want);
+    carry = want - n;
+    let out = '';
+    while (ops.length) {
+      const op = ops[0]!;
+      if (op.t === 'ev') {
+        // Everything ahead of it has been typed: it goes now, after the text it was waiting for.
+        if (out) { liveTail.set(liveTail.get() + out); out = ''; }
+        ops.shift();
+        runEvent(op.fn);
+        continue;
+      }
+      if (n <= 0) break;
+      let take = Math.min(n, op.s.length);
+      // Never cut between the halves of a surrogate pair: half of one is not a character.
+      if (take < op.s.length && (op.s.charCodeAt(take - 1) & 0xfc00) === 0xd800) take += 1;
+      out += op.s.slice(0, take);
+      n -= take;
+      pending -= take;
+      if (take >= op.s.length) ops.shift();
+      else op.s = op.s.slice(take);
+    }
+    if (out) { liveTail.set(liveTail.get() + out); lastPaint = ts; }
+    if (!ops.length) {
+      pending = 0;
+      carry = 0;
+      prevTs = 0;
+      if (ended) { commitPlayed(); settle(); }
+      return;
+    }
+    schedule();
+  }
+
+  return {
+    text(s) {
+      if (dead || !s) return;
+      const last = ops[ops.length - 1];
+      if (last && last.t === 'text') last.s += s;
+      else ops.push({ t: 'text', s });
+      pending += s.length;
+      arrivals.push([performance.now(), s.length]);
+      arrived += s.length;
+      if (document.hidden) { flushAll(); return; }
+      schedule();
+    },
+    event(fn) {
+      if (dead) return;
+      if (!ops.length) { runEvent(fn); return; }             // nothing ahead of it: at once
+      if (pending <= EVENT_DRAIN_MIN || document.hidden) { flushAll(); runEvent(fn); return; }
+      const r = Math.max(speed, rateS, floor);
+      const now = performance.now();
+      const due = Math.max(lastDue, now + Math.min(EVENT_DRAIN_MAX_MS, Math.max(EVENT_DRAIN_MS, pending / (EVENT_SPEEDUP * r))));
+      lastDue = due;
+      ops.push({ t: 'ev', fn, due });
+      schedule();
+    },
+    end() {
+      ended = true;
+      const r = Math.max(speed, rateS, floor);
+      endDue = performance.now() + Math.min(2000, Math.max(200, pending / (2 * r)));
+      return new Promise<void>((resolve) => {
+        waiters.push(resolve);
+        if (!ops.length) { commitPlayed(); settle(); }
+        else if (document.hidden) flushAll();
+        else schedule();
+      });
+    },
+    flush() { if (!dead) flushAll(); },
+    abort() {
+      dead = true;
+      if (raf) { cancelAnimationFrame(raf); raf = 0; }
+      ops.length = 0;
+      pending = 0;
+      liveTail.set('');
+      const w = waiters; waiters = []; w.forEach((f) => f());
+    },
+  };
+}
 
 /**
  * What a write DID, in the analyst's words — not the tool that did it.
@@ -1591,20 +1828,102 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
     if (!id || run?.state !== 'running' || streamingId === id) return;
     let stop = false;
     let timer = 0;
+    // THE REJOIN PATH TYPES TOO. It used to merge each poll straight into the transcript, so the
+    // paragraph being written grew by a whole poll's worth at once — a median jump of 138 characters,
+    // every time the panel had been closed and reopened, the page refreshed, or a second tab looked.
+    // Now each poll is fed to the same player the SSE path uses: new characters of a text entry are
+    // `text`, every other change is an `event`, and the transcript shows only what has been typed.
+    //
+    // `recv` is what the SERVER has sent (the cursor and the diffs read it); `committed` is how much of
+    // each text entry has been typed into the transcript. They differ only while the player is behind.
+    const mine = () => runRef.current?.id === id;
+    const recv = new Map<number, AiTranscriptEntry>(entriesRef.current.map((e) => [e.seq, e]));
+    const committed = new Map<number, number>();
+    const applied = new Set<number>(entriesRef.current.map((e) => e.seq));
+    for (const e of entriesRef.current) if (e.kind === 'text') committed.set(e.seq, e.text.length);
+    let typingSeq = -1;       // the entry the player is typing into, at PLAY time
+    let queuedSeq = -1;       // ...and the one the last queued text belongs to, at QUEUE time
+    const player = createPlayer({
+      // a poll lands every ~0.5 s, so the window and the lag have to be able to span that
+      windowMs: 2500,
+      lagMaxMs: 2200,
+      commit: (t) => {
+        const seq = typingSeq;
+        const full = recv.get(seq);
+        if (!mine() || !full) return;
+        const n = (committed.get(seq) ?? 0) + t.length;
+        committed.set(seq, n);
+        applied.add(seq);
+        const text = full.text.slice(0, n);
+        setEntries((prev) => {
+          const cur = prev.find((e) => e.seq === seq);
+          // something else (Stop's own refresh) may already have put more of it on screen
+          if (cur && cur.text.length > text.length && cur.text.startsWith(text)) return prev;
+          return mergeEntries(prev, [{ ...full, text }]);
+        });
+      },
+    });
+    const place = (e: AiTranscriptEntry) => {
+      applied.add(e.seq);
+      if (mine()) setEntries((prev) => mergeEntries(prev, [e]));
+    };
+    const cursor = (): number => {
+      let last: AiTranscriptEntry | undefined;
+      for (const e of recv.values()) if (!last || e.seq > last.seq) last = e;
+      return last ? cursorOf([last], true) : 0;
+    };
     const tick = async () => {
       try {
-        const r = await api.aiRun(id, cursorOf(entriesRef.current, true));
+        const r = await api.aiRun(id, cursor());
         if (stop) return;
-        setEntries((prev) => mergeEntries(prev, r.transcript));
-        setRun((prev) => (prev && prev.id === id ? { ...r, transcript: [] } : prev));
-        if (r.state === 'running') timer = window.setTimeout(tick, POLL_MS);
-        else { refreshWorkspace(); void loadHistory(); }
+        for (const e of [...r.transcript].sort((a, b) => a.seq - b.seq)) {
+          const before = recv.get(e.seq);
+          recv.set(e.seq, e);
+          if (e.kind === 'text') {
+            const had = before ? before.text : '';
+            if (before && !e.text.startsWith(had)) {
+              // rewritten rather than extended (a clip): show it as it now is
+              const seq = e.seq;
+              player.event(() => { committed.set(seq, e.text.length); place(e); });
+              continue;
+            }
+            const add = e.text.slice(had.length);
+            if (!add) continue;
+            if (queuedSeq !== e.seq) {
+              const seq = e.seq;
+              queuedSeq = seq;
+              player.event(() => { typingSeq = seq; });
+            }
+            player.text(add);
+          } else if (applied.has(e.seq)) {
+            // a PATCH to something already on screen (a tool result landing): it takes no new place
+            // in the sequence, so it does not wait — a finished card must not keep spinning
+            place(e);
+          } else {
+            player.event(() => place(e));
+          }
+        }
+        const snap: AiRun = { ...r, transcript: [] };
+        if (r.state === 'running') {
+          setRun((prev) => (prev && prev.id === id ? snap : prev));
+          timer = window.setTimeout(tick, POLL_LIVE_MS);
+        } else {
+          // The run is over, but its last words may still be typing: the state changes (and the
+          // finished layout replaces the live one) once they have been.
+          player.event(() => setRun((prev) => (prev && prev.id === id ? snap : prev)));
+          void player.end().then(() => { refreshWorkspace(); void loadHistory(); });
+        }
       } catch {
         if (!stop) timer = window.setTimeout(tick, POLL_MS * 3);
       }
     };
-    timer = window.setTimeout(tick, POLL_MS);
-    return () => { stop = true; window.clearTimeout(timer); };
+    timer = window.setTimeout(tick, POLL_LIVE_MS);
+    return () => {
+      stop = true;
+      window.clearTimeout(timer);
+      // Still this run on screen (it ended, or Stop): apply what is queued. Another run: drop it.
+      if (mine()) player.flush(); else player.abort();
+    };
   }, [run?.id, run?.state, streamingId, refreshWorkspace, loadHistory]);
 
   /* ── starting a run: SSE for per-token prose in the tab that asked ──────────── */
@@ -1649,183 +1968,45 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
     const spKnown = spChoice === null || spChoice === '' || !!systemPrompts.data?.prompts.some((p) => p.id === spChoice);
     if (spChoice !== null && spKnown) body.systemPromptId = spChoice;
 
-    // Prose arrives one TOKEN at a time, in bursts. See STREAM_LAG_MIN_MS: deltas go into `buffered` and
-    // a frame loop plays it out at the measured ARRIVAL rate, a short lag behind the wire, so what is
-    // painted is a steady flow rather than the shape of the packets. Every other event flushes the
-    // buffer FIRST, so the order on screen is exactly the stream's — a tool card can never appear ahead
-    // of the sentence that introduced it.
-    let buffered = '';
-    let raf = 0;
-    let prevTs = 0;
-    let carry = 0;                                   // the fraction of a character owed to the next frame
-    const arrivals: Array<[number, number]> = [];    // [when, chars] inside the rate window
-    let arrived = 0;                                 // chars inside the window
-    let queued: AiRunEvent[] = [];                   // events waiting for the prose ahead of them
-    let drainBy = 0;                                 // performance.now() the queue must be released by
-
-    const noteArrival = (chars: number) => {
-      arrivals.push([performance.now(), chars]);
-      arrived += chars;
-    };
-    /** The wire as measured over the recent window: characters per ms, and the lag (ms) that absorbs
-     *  its largest gap. Defaults until there are two arrivals to measure between. */
-    const wire = (now: number): { rate: number; lagMs: number } => {
-      while (arrivals.length && now - arrivals[0]![0] > STREAM_RATE_WINDOW_MS) arrived -= arrivals.shift()![1];
-      if (arrivals.length < 2) return { rate: STREAM_DEFAULT_CPS / 1000, lagMs: STREAM_LAG_MIN_MS };
-      let gap = 0;
-      for (let i = 1; i < arrivals.length; i++) gap = Math.max(gap, arrivals[i]![0] - arrivals[i - 1]![0]);
-      return {
-        rate: arrived / Math.max(STREAM_LAG_MIN_MS, now - arrivals[0]![0]),
-        lagMs: Math.min(STREAM_LAG_MAX_MS, Math.max(STREAM_LAG_MIN_MS, 1.2 * gap)),
-      };
-    };
-
-    // WHAT A FRAME COSTS. `paint` puts the character on screen; it does NOT touch React state, so a
-    // frame re-renders the one leaf subscribed to `liveTail` and nothing else. `commit` is the
-    // expensive one — it moves the played-out text into the transcript — and it runs only at the
-    // boundaries `flushText` always used, which is why the ORDER on screen is unchanged.
-    const paint = (t: string) => liveTail.set(liveTail.get() + t);
-
+    // Prose arrives one TOKEN at a time, in bursts, interleaved with tool calls and status lines. All
+    // of it goes through ONE player (see `createPlayer`): text is typed at a smoothed rate a short lag
+    // behind the wire, and every other event is applied the moment the text ahead of it has been typed
+    // — so a tool card can never appear ahead of the sentence that introduced it, and nothing is ever
+    // dumped to keep that order.
+    //
+    // `commit` is the expensive step — it moves the typed-out text into the transcript — and the player
+    // calls it only before an event is applied and at the end, which is why the ORDER on screen is the
+    // stream's. Painting in between touches `liveTail` alone, i.e. one memoised leaf.
     const commit = (t: string) => {
+      if (ac.signal.aborted) return;
       setEntries((prev) => {
         const last = prev[prev.length - 1];
         if (last?.kind === 'text') return [...prev.slice(0, -1), { ...last, text: last.text + t }];
         return [...prev, { ...blank(++sseSeqRef.current, 'text'), text: t }];
       });
     };
+    const player = createPlayer({ commit });
+    // A run replaced by another (`startRun` aborts the old stream) or a panel unmounting: nothing more of
+    // this stream may be painted or applied, or the previous run's tail lands on the next conversation.
+    ac.signal.addEventListener('abort', () => player.abort());
 
-    const stopRaf = () => {
-      if (raf) { cancelAnimationFrame(raf); raf = 0; }
-      prevTs = 0;
-      carry = 0;
-      drainBy = 0;
-    };
-
-    /** End of stream: type nothing more, commit what is left, release anything still queued.
-     *  The `done` event is in that queue, and it may not be held back waiting for a frame. */
-    const endStream = () => {
-      flushText();
-      flushQueue();
-    };
-
-    /** Everything still buffered, at once, and the played-out tail folded into the transcript.
-     *  Used at end of stream, and whenever a queued event has waited long enough (see `queue`). */
-    const flushText = () => {
-      stopRaf();
-      const t = buffered;
-      buffered = '';
-      // A pending flush must never land on the NEXT conversation: `startRun` aborts the old stream, and
-      // a frame that fires after that would append the previous run's tail to a fresh transcript.
-      if (ac.signal.aborted) { liveTail.set(''); return; }
-      const played = liveTail.get();
-      liveTail.set('');
-      if (played || t) commit(played + t);
-    };
-
-    /**
-     * A TOOL CARD MUST NOT MAKE THE SENTENCE BEFORE IT APPEAR ALL AT ONCE.
-     *
-     * Everything above smooths the arrival of prose. None of it survived contact with the thing the
-     * analyst actually watches, which is not a report streaming into an empty panel — it is the
-     * running NARRATION: one line of prose, then the tool call it introduces, over and over. Those
-     * two arrive in the SAME assistant message, milliseconds apart, and every non-delta event used to
-     * dump the whole buffer instantly so that the card could not be drawn ahead of its sentence. So
-     * the line was not typed at all: it appeared whole, then a card, then the next line appeared
-     * whole. Measured on a twelve-call run against a local-gateway-shaped stream: a median frame
-     * advanced the text by 2 characters and eight frames advanced it by SIXTY — those eight are the
-     * jumps, and they are what "very skippy and not smooth" describes.
-     *
-     * The ordering constraint is real and is kept exactly: an event may never be applied before the
-     * prose that precedes it. What changes is which side waits. A non-delta event now QUEUES, the
-     * frame loop drains the buffer at whatever rate empties it within `EVENT_DRAIN_MS`, and the queue
-     * is applied the moment the buffer is empty. The card is late by up to a quarter of a second and
-     * the sentence is typed; nothing is reordered, nothing is dropped, and a queue that is already
-     * empty of text (a `status` with no prose in front of it, the common case) is applied at once.
-     */
-    const flushQueue = () => {
-      const evs = queued;
-      queued = [];
-      if (evs.length) {
-        // the text that has PLAYED is committed first, so the card lands after its own sentence
-        const played = liveTail.get();
-        liveTail.set('');
-        if (played) commit(played);
-        for (const e of evs) apply(e);
-      }
-    };
-
-    const queue = (ev: AiRunEvent) => {
-      queued.push(ev);
-      if (ac.signal.aborted) { queued = []; return; }
-      // Nothing left to type, or so little that draining it is a frame's work: apply immediately and
-      // keep the old behaviour exactly.
-      if (buffered.length <= EVENT_DRAIN_MIN) { flushText(); flushQueue(); return; }
-      if (!drainBy) drainBy = performance.now() + EVENT_DRAIN_MS;
-      if (!raf) raf = requestAnimationFrame(tick);
-    };
-
-    const tick = (ts: number) => {
-      raf = 0;
-      if (ac.signal.aborted) { buffered = ''; prevTs = 0; carry = 0; liveTail.set(''); return; }
-      const dt = prevTs ? Math.min(160, ts - prevTs) : 16;
-      prevTs = ts;
-      const { rate: r, lagMs } = wire(ts);
-      const lag = Math.max(1, r * lagMs);
-      const fill = Math.min(1, buffered.length / lag);
-      const excess = Math.max(0, buffered.length - lag);
-      let want = r * dt * (0.5 + 0.5 * fill) + (excess / STREAM_CATCHUP_MS) * dt + carry;
-      // Something is WAITING behind this text (a tool card, a warning). Type the rest out at whatever
-      // rate clears it by the deadline — faster than the wire, but still typed rather than dumped.
-      if (drainBy) {
-        const left = Math.max(dt, drainBy - ts);
-        want = Math.max(want, (buffered.length / left) * dt + carry);
-      }
-      let n = Math.floor(want);
-      carry = want - n;
-      if (n >= buffered.length) { n = buffered.length; carry = 0; }
-      // Never cut between the halves of a surrogate pair: half of one is not a character, and React
-      // would paint the replacement glyph for a frame before the other half arrived.
-      else if (n > 0 && (buffered.charCodeAt(n - 1) & 0xfc00) === 0xd800) n += 1;
-      if (n > 0) {
-        paint(buffered.slice(0, n));
-        buffered = buffered.slice(n);
-      }
-      if (buffered) { raf = requestAnimationFrame(tick); return; }
-      prevTs = 0;
-      carry = 0;
-      // The buffer is empty, so whatever was queued behind it can go now — in arrival order, after
-      // the text it was waiting for. This is the ONLY place a queued event is released on the happy
-      // path, which is what guarantees a card can never precede its own sentence.
-      drainBy = 0;
-      if (queued.length) flushQueue();
-    };
-    // NO `flushText()` here any more. It was the second half of the dump: `queue` holds an event
-    // until the prose ahead of it has been typed out, and then `flushQueue` commits that text before
-    // applying the event — so by the time `push` runs, the ordering is already settled. Flushing
-    // again would empty a buffer that has only just started refilling from the NEXT delta, which is
-    // the same instant-lump this exists to remove.
     const push = (e: Partial<AiTranscriptEntry> & { kind: AiTranscriptEntry['kind'] }) => {
       setEntries((prev) => [...prev, { ...blank(++sseSeqRef.current, e.kind), ...e }]);
     };
 
+    let liveId = rid;                                 // the server's id for this run, once it says so
     api
       .aiInvestigate(body, (ev: AiRunEvent) => {
-        // A NON-DELTA EVENT NO LONGER DUMPS THE BUFFER — it QUEUES BEHIND IT. See `queue`.
-        if (ev.type !== 'delta') { queue(ev); return; }
-        // ...and a delta that arrives while events are still queued belongs AFTER them. The queue
-        // holds things that came off the wire BEFORE this token, so appending it to the buffer would
-        // move it in front of them — and `commit` folds text into the last entry when that entry is
-        // text, so the next model turn's narration was being merged into the previous turn's line,
-        // jumping over the tool call that sits between them. Seen exactly once and it reads as a
-        // typo: "…which rules have fired on it.4,000 events in one syslog source…". The queue is
-        // cheap to release (the buffer is typed out, then the events apply in order), so release it.
-        if (queued.length) { flushText(); flushQueue(); }
-        apply(ev);
-      }, ac.signal)
-      .then(() => endStream())
-      .catch((e: unknown) => {
-        endStream();
         if (ac.signal.aborted) return;
+        if (ev.type === 'delta') player.text(ev.text);
+        else player.event(() => apply(ev));
+      }, ac.signal)
+      // The rest of the text is TYPED OUT, not dumped: `end` resolves once everything queued (the
+      // `done` event included) has played.
+      .then(() => player.end())
+      .catch((e: unknown) => {
+        if (ac.signal.aborted) return;
+        player.flush();
         setError(errMsg(e));
       })
       .finally(() => {
@@ -1834,14 +2015,19 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
         //
         // The transcript is REPLACED wholesale here, not merged: while streaming, entries carry
         // locally-minted seq numbers (prose is coalesced differently server-side), so merging a server
-        // tail onto them would collide on seq and interleave two numbering schemes.
-        void api.aiRun(rid)
+        // tail onto them would collide on seq and interleave two numbering schemes. Not for a stream
+        // that was ABORTED: that means another run replaced this one, and its transcript is on screen.
+        if (ac.signal.aborted) {
+          setStreamingId((cur) => (cur === rid || cur === liveId ? null : cur));
+          return;
+        }
+        void api.aiRun(liveId)
           .then((r) => {
             setEntries(r.transcript);
             setRun((prev) => (prev && (prev.id === rid || prev.id === r.id) ? { ...r, transcript: [] } : prev));
           })
           .catch(() => { /* offline: keep what the stream already showed */ })
-          .finally(() => { setStreamingId(null); void loadHistory(); });
+          .finally(() => { setStreamingId((cur) => (cur === rid || cur === liveId ? null : cur)); void loadHistory(); });
       });
 
     function apply(ev: AiRunEvent) {
@@ -1851,6 +2037,7 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
             ...r, id: ev.runId, model: ev.model,
             threadId: ev.threadId ?? r.threadId, parentId: ev.parentId ?? r.parentId,
           } : r));
+          liveId = ev.runId;
           setStreamingId(ev.runId);
           break;
         case 'status':
@@ -1865,9 +2052,7 @@ export function AiPanel({ target, onClose }: { target: AiTarget; onClose: () => 
           push({ kind: 'step', step: ev.step });
           break;
         case 'delta':
-          buffered += ev.text;
-          noteArrival(ev.text.length);
-          if (!raf) raf = requestAnimationFrame(tick);
+          player.text(ev.text);     // never reached: deltas go straight to the player above
           break;
         case 'tool_call':
           // ...and `laneId`, for the same reason: `groupTrail` brackets calls that share one, so

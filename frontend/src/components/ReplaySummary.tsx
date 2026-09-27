@@ -187,6 +187,57 @@ function keyValueForm(text: string): ParsedSummary | null {
   return { kind: 'keyvalue', headline, facets, scope, notes: [], more: rest.join('\n').trim() };
 }
 
+/** Index of the first top-level `:` (outside brackets and code spans) that is followed by a space, or -1.
+ *  The space requirement keeps a time (18:13:07) or a path (C:\...) inside a code span or not from
+ *  being read as a label separator. */
+function topColon(s: string): number {
+  let depth = 0;
+  let code = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === '`') { code = !code; continue; }
+    if (code) continue;
+    if (ch === '(' || ch === '[') depth++;
+    else if ((ch === ')' || ch === ']') && depth > 0) depth--;
+    else if (depth === 0 && ch === ':' && /\s/.test(s[i + 1] ?? '')) return i;
+  }
+  return -1;
+}
+
+/** A plain PROSE summary as the same boxes the facet form draws ("I liked how it was before … the nice
+ *  looking boxes"). The assistant rewrites a case summary whenever it re-investigates, and a rewrite in
+ *  ordinary sentences fell through to one paragraph plus a disclosure — the boxes vanished with no code
+ *  change. So: the first sentence is the headline, and every sentence after it is a card. A sentence
+ *  with a `lead: a, b and c` shape is labelled by its lead and lists what follows; otherwise its first
+ *  top-level clause is the label and the remaining clauses are the list. No label is INVENTED — it is
+ *  always the sentence's own words — and nothing is dropped: every sentence lands in a card. */
+function proseForm(text: string): ParsedSummary | null {
+  const ss = sentences(text);
+  if (ss.length < 3) return null;
+  const facets: SummaryFacet[] = [];
+  const scope: SummaryScope[] = [];
+  for (const s of ss.slice(1)) {
+    const sc = scopeSentence(s);
+    if (sc) { scope.push(...sc); continue; }
+    const body = s.replace(/[.!?]$/, '').trim();
+    const at = topColon(body);
+    let label = '';
+    let items: string[];
+    if (at > 0 && at <= 90) {
+      label = body.slice(0, at).trim();
+      const rest = body.slice(at + 1).trim();
+      items = splitTop(rest, ',').flatMap((p) => splitTop(p.replace(/^and\s+/i, ''), ' and '));
+    } else {
+      const parts = splitTop(body, ',').map((p) => p.replace(/^and\s+/i, '').trim()).filter(Boolean);
+      if (parts.length > 1 && parts[0]!.length <= 110) { label = parts[0]!; items = parts.slice(1); }
+      else items = [body];
+    }
+    facets.push({ label: label ? sentenceCase(label) : '', items: items.map((x) => x.trim()).filter(Boolean) });
+  }
+  if (!facets.length) return null;
+  return { kind: 'facets', headline: ss[0]!, facets, scope, notes: [], more: '' };
+}
+
 export function parseSummary(raw: string): ParsedSummary {
   const text = unescapeBreaks(raw ?? '').replace(/\r\n?/g, '\n').trim();
   if (!text) return EMPTY;
@@ -213,6 +264,8 @@ export function parseSummary(raw: string): ParsedSummary {
     }
     return { ...EMPTY, kind: 'markdown', headline: ss[0] ?? '', more: lines.join('\n').trim() };
   }
+  const boxed = proseForm(text);
+  if (boxed) return boxed;
   const ss = sentences(text);
   return { ...EMPTY, kind: 'prose', headline: ss.slice(0, 2).join(' '), more: ss.slice(2).join(' ') };
 }
@@ -248,7 +301,7 @@ export function ReplaySummary({ text, fallback }: { text: string; fallback: stri
         <dl className="rps-grid">
           {p.facets.map((f, i) => (
             <div key={i} className="rps-card">
-              <dt className="rps-card__k">{f.label}</dt>
+              {f.label && <dt className="rps-card__k">{inlineMd(f.label, `rsk-${i}`)}</dt>}
               <dd className="rps-card__v">
                 {f.items.length === 1
                   ? <span>{inlineMd(f.items[0]!, `rsf-${i}`)}</span>
