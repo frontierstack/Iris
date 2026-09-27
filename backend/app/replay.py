@@ -330,6 +330,7 @@ def action_of(e: Any, note: str = "") -> dict[str, str]:
     def out(kind: str, verb: str, obj: str) -> dict[str, str]:
         obj = (obj or "").strip()[:300]
         actor = parent if kind == "process" else (proc if proc and proc.lower() != obj.lower() else "")
+        actor = _not_ua(actor)
         return {"kind": kind, "verb": verb, "object": obj, "actor": actor or ""}
 
     # A deletion is a deletion whatever produced it — the one action most worth never missing.
@@ -1002,15 +1003,31 @@ def relations(rows: list[tuple[str, Any, dict[str, str]]], facts: Optional[list[
 
 # ───────────────────────── the story: one line per event, actor → verb → object ─────────────────────────
 
+_UA_RE = re.compile(r"^(?:mozilla|opera|curl|wget|python-requests|go-http-client|java|okhttp|dalvik|microsoft-cryptoapi|windows-update-agent)/", re.I)
+
+
+def _not_ua(s: str) -> str:
+    """A user-agent is not an ACTOR. Proxy exports put the UA in a column the parser may map to user or
+    process, and the story then read "Mozilla/5.0 (Windows NT 10.0 ...) requested x.fun". Refuse any
+    string shaped like one (a product/version token, or long with a parenthesised platform)."""
+    s = (s or "").strip()
+    if not s:
+        return ""
+    if _UA_RE.match(s) or (len(s) > 40 and "(" in s and "/" in s):
+        return ""
+    return s
+
+
 def story_of(e: Any, act: dict[str, str], fx: "_Facts") -> str:
     """What happened, in plain words, from the fields the classification already read. It is the line
     the stream card and the focused node show, so it names the ACTOR: 'WINWORD.EXE (pid 3320) spawned
     powershell.exe (pid 4412) on WS01', not 'process started: powershell.exe'."""
     kind, verb, obj = act.get("kind", "event"), act.get("verb", ""), act.get("object", "")
     host = _real(e.host)
-    user = _real(e.user) or fx.user
+    user = _not_ua(_real(e.user) or fx.user)
     on = f" on {host}" if host else ""
-    proc = f"{fx.shown}{f' (pid {fx.pid})' if fx.pid else ''}" if fx.shown else ""
+    shown = _not_ua(fx.shown)
+    proc = f"{shown}{f' (pid {fx.pid})' if fx.pid else ''}" if shown else ""
     by = f" by {proc}" if proc and proc.split(" ")[0].lower() != obj.lower() else ""
     f = _F(e.fields)
     src = fx.src_ip or ""

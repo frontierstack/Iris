@@ -461,22 +461,22 @@ function serverEdges(links: ReplayLink[], out: Item[]): MapEdge[] {
 }
 
 /* ───────── the map: what the intrusion has reached, BUILT as the replay reaches it ───────── */
-const NODE_W = 190;
-const NODE_H = 44;
+const NODE_W = 232;
+const NODE_H = 50;
 /** Outer padding of the drawing inside its frame. */
 const MAP_PAD = 16;
 const MAP_EMPTY_H = 120;
 /** The geometry the layered layout works in (utils/replayLayout.ts). The column gap holds the trunks
  *  that carry a process's links to its children, and a reason plate on the one in focus. */
-const LAYOUT = { nodeW: NODE_W, nodeH: NODE_H, colGap: 84, rowGap: 18, pad: 12, head: 26, blockGap: 26 };
+const LAYOUT = { nodeW: NODE_W, nodeH: NODE_H, colGap: 92, rowGap: 24, pad: 14, head: 28, blockGap: 30 };
 /** DENSE cards: the same layout with a 30px card (title + one line) and a tighter pitch. Used when the
  *  full-size map would run taller than the viewport, so the whole picture stays on screen — "the
  *  replay node area is making the list very long vertically, which is hard to see everything". The
  *  analyst can pin either mode (`iris.replay.mapDense`: auto | on | off). */
-const DENSE_H = 30;
+const DENSE_H = 36;
 /** ...and a narrower card, so a wide window holds one more column before a chain has to wrap. */
-const DENSE_W = 156;
-const DENSE_LAYOUT = { nodeW: DENSE_W, nodeH: DENSE_H, colGap: 60, rowGap: 8, pad: 10, head: 22, blockGap: 18 };
+const DENSE_W = 196;
+const DENSE_LAYOUT = { nodeW: DENSE_W, nodeH: DENSE_H, colGap: 68, rowGap: 12, pad: 12, head: 24, blockGap: 22 };
 const DENSE_KEY = 'iris.replay.mapDense';
 type DenseMode = 'auto' | 'on' | 'off';
 /** Above this natural height the map goes dense (auto mode): about two thirds of the window. */
@@ -975,10 +975,10 @@ const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, curren
                     <rect className="rp-node__box" width={NW} height={NH} rx={5} />
                     {/* the phase it belongs to: a rule down the left edge, in the phase's colour */}
                     <rect className="rp-node__phase" x={0.6} y={6} width={2.6} height={NH - 12} />
-                    <circle className="rp-node__badge" cx={dense ? 17 : 21} cy={NH / 2} r={dense ? 9 : 11.5} />
+                    <circle className="rp-node__badge" cx={dense ? 17 : 21} cy={NH / 2} r={dense ? 10 : 12} />
                     <text className="rp-node__glyph" x={dense ? 17 : 21} y={NH / 2 + 3.5} textAnchor="middle">{meta.glyph}</text>
-                    <text className="rp-node__title" x={dense ? 32 : 40} y={dense ? 12.5 : 19}>{trunc(n.value, dense ? 19 : 20)}</text>
-                    <text className="rp-node__sub" x={dense ? 32 : 40} y={dense ? 24 : 33}>{trunc(n.verb, 17)} · {c.clock}</text>
+                    <text className="rp-node__title" x={dense ? 34 : 42} y={dense ? 15 : 21}>{trunc(n.value, dense ? 22 : 27)}</text>
+                    <text className="rp-node__sub" x={dense ? 34 : 42} y={dense ? 28 : 37}>{trunc(n.verb, dense ? 16 : 22)} · {c.clock}</text>
                   </g>
                 </g>
               );
