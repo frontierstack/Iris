@@ -73,21 +73,39 @@ class BaseParser:
 
 
 def clean(s: object) -> str:
+    if type(s) is str:          # the common case: a cell that is already text
+        return s.strip()
     if s is None:
         return ""
     return str(s).strip()
 
 
 def flatten(obj: object, prefix: str = "", out: Optional[dict[str, str]] = None, depth: int = 0) -> dict[str, str]:
-    """Flatten nested JSON into dotted keys with string values."""
+    """Flatten nested JSON into dotted keys with string values.
+
+    The recursion is kept for containers; a SCALAR value of a dict is written in place rather than
+    through a recursive call, because scalars are the leaves and there is one per key - on a
+    CloudTrail record that was 21 Python frames per record for 21 assignments (32 us of a 50 us
+    parse). The in-place branch reproduces the recursive one exactly: a leaf one level down is written
+    only when `depth + 1 <= 6`, `None` becomes "", a str is itself, everything else is `str(x)`.
+    `tests/test_parse_speed.py` fuzzes this against the original recursive definition.
+    """
     if out is None:
         out = {}
     if depth > 6:
         return out
     if isinstance(obj, dict):
+        leaf_ok = depth < 6
         for k, v in obj.items():
             key = f"{prefix}.{k}" if prefix else str(k)
-            flatten(v, key, out, depth + 1)
+            t = type(v)
+            if t is str:
+                if leaf_ok and key:
+                    out[key] = v
+            elif t is dict or t is list or isinstance(v, (dict, list)):
+                flatten(v, key, out, depth + 1)
+            elif leaf_ok and key:      # `key` is "" only for an empty top-level key, which the
+                out[key] = "" if v is None else str(v)   # recursive form never wrote either
     elif isinstance(obj, list):
         if all(not isinstance(x, (dict, list)) for x in obj):
             out[prefix] = ",".join(str(x) for x in obj)

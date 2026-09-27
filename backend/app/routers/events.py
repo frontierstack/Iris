@@ -7,7 +7,7 @@ from collections import Counter, deque
 # `datetime.UTC` is 3.11+; the CUDA runtime image is Python 3.10, so the whole app failed to
 # import on it. `timezone.utc` is what every other module here uses and works on both.
 from datetime import datetime, timezone
-from itertools import chain, repeat
+from itertools import chain, islice, repeat
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -194,6 +194,15 @@ def _facets(rows: list[Event]) -> tuple[dict[str, int], dict[str, dict[str, int]
     first-insertion order, `chain` yields the rows in order, and the fixed columns are disjoint from
     the parser fields (a field named like one folds into it), so every key sees its values in the
     order it first saw them.
+
+    The walk over the distinct pairs is INLINE and the samples are derived AFTERWARDS. "A few
+    hundred" distinct pairs is true of a syslog; a proxy export has ~120,000 of them at the scan cap
+    (a url, a port, a byte count and a log id per row, each nearly unique), and on that shape the
+    `tally()` call per pair was as long as the C count it followed - 180 ms against 100. Per pair
+    the function call, the `samples` list scan and the `len()` check are gone; a field's samples are
+    its first five distinct values in first-seen order, which is exactly the first five keys of its
+    `value_counts` dict, read once at the end. Measured 189 -> 141 ms on that source, 44 -> 30 on a
+    syslog, and `tests/test_fields_and_raw.py` pins it against the per-event loop, key order included.
     """
     counts: dict[str, int] = {}
     value_counts: dict[str, dict[str, int]] = {}
@@ -201,7 +210,8 @@ def _facets(rows: list[Event]) -> tuple[dict[str, int], dict[str, dict[str, int]
 
     def tally(name: str, value: str, weight: int) -> None:
         """`weight` events at once. An EMPTY value still counts the field, exactly as before: the
-        event carries the column, it just has nothing in it."""
+        event carries the column, it just has nothing in it. The fallback path and the fixed columns
+        use this; the parser-field pairs are walked inline below with the same rules."""
         counts[name] = counts.get(name, 0) + weight
         if not value:
             return
@@ -224,10 +234,25 @@ def _facets(rows: list[Event]) -> tuple[dict[str, int], dict[str, dict[str, int]
         pairs = None
 
     if pairs is not None:
+        get_vc = value_counts.get
+        get_count = counts.get
         for (key, value), c in pairs.items():
             if key in _FIXED_COLUMNS:
                 continue    # a parser field named like a fixed column folds into that column
-            tally(key, value if isinstance(value, str) else str(value), c)
+            if not isinstance(value, str):
+                value = str(value)
+            counts[key] = get_count(key, 0) + c
+            if not value:
+                continue
+            vc = get_vc(key)
+            if vc is None:
+                value_counts[key] = {value: c}
+            else:
+                vc[value] = vc.get(value, 0) + c
+        # Samples: the first five distinct values of each field, in the order they were first seen.
+        # `value_counts[key]` holds exactly those distinct values in exactly that order.
+        for key, vc in value_counts.items():
+            samples[key] = list(islice(vc, 5))
     else:
         for e in rows:
             for key, value in e.fields.items():

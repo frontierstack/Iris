@@ -777,19 +777,38 @@ export interface ReplayEvent {
   /** false = the event's source is still RAW (phase 1): no typed fields, so no actor and only the
    *  addresses/hashes written in the raw line. */
   interpreted?: boolean;
+  /** One line, actor → verb → object: "WINWORD.EXE (pid 3320) spawned powershell.exe (pid 4412) on WS01". */
+  story?: string;
+  /** The event's CAUSE on the map — its most specific incoming link — or null. */
+  linked?: { from: string; rel: string; kind: string; why: string } | null;
+  /** Why nothing ties this event to an earlier one ('' when it is linked). Never silently unlinked. */
+  threadStart?: string;
 }
 /** A tie between two timeline events, from values BOTH carry (app/replay.relations). `a` is the earlier
  *  one. `rel` is the rule; `kind` 'actor' = causation (spawned / ran the file / the same process
- *  again), 'shared' = the two touched the same thing. One per pair, the most specific reason. */
+ *  again / a hop reached it / ran in that logon), 'shared' = the two touched the same thing,
+ *  'authored' = the analyst or the assistant drew it (an EventLink). One per pair, the most specific reason. */
+export type ReplayRel = 'spawned' | 'executed' | 'same-process' | 'injected' | 'lateral' | 'in-session' | 'hash' | 'file'
+  | 'filename' | 'resolved' | 'domain' | 'session' | 'account-move' | 'address' | 'authored';
 export interface ReplayLink {
   a: string; b: string;
-  rel: 'spawned' | 'executed' | 'same-process' | 'injected' | 'hash' | 'file' | 'resolved' | 'domain' | 'session' | 'address';
-  kind: 'actor' | 'shared'; rank: number; label: string; detail: string;
+  rel: ReplayRel;
+  kind: 'actor' | 'shared' | 'authored'; rank: number; label: string; detail: string;
+  /** authored links only */
+  id?: string; source?: string; target?: string; linkKind?: 'causal' | 'related'; ai?: boolean;
+}
+/** An AUTHORED link between two case-set events: what someone concluded, kept apart from what the logs say. */
+export interface EventLink {
+  id: string; source: string; target: string; verb: string; kind: 'causal' | 'related'; why: string;
+  ai: boolean; runId: string; createdAt: string;
 }
 export interface ReplayContext {
   events: ReplayEvent[]; valuesChecked: number; valuesCapped: boolean; note: string;
   /** Every link between the events; absent from an older server (the screen then guesses from names). */
   links?: ReplayLink[];
+  /** The case's authored event links, whole (a link whose end is unstamped is here but not in `links`). */
+  eventLinks?: EventLink[];
+  threadStarts?: number;
   /** The pool version this was built at; `complete` false = it will change (loading / raw / missing). */
   version?: number; missing?: number; rawEvents?: number; awaiting?: number; poolLoading?: boolean; complete?: boolean;
 }

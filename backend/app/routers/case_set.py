@@ -40,6 +40,45 @@ def replay() -> dict:
     return replay_mod.build(entries)
 
 
+# ── authored event links: declared BEFORE the /{eid} routes, or POST /links is "add event 'links'" ──
+class EventLinkBody(BaseModel):
+    sourceEventId: str
+    targetEventId: str
+    why: str
+    verb: Optional[str] = ""
+    kind: Optional[str] = "related"
+
+
+@router.get("/links")
+def list_event_links() -> dict:
+    """The case's AUTHORED event links (what the analyst or the assistant concluded ties two events)."""
+    with STORE.lock:
+        return {"links": [dict(l) for l in STORE.event_links]}
+
+
+@router.post("/links")
+def add_event_link(body: EventLinkBody) -> dict:
+    """Link two events by hand. Both must be real events; either not yet in the case set is added to
+    it (reported as `autoAdded`). The same (source, target) twice returns the existing link."""
+    if STORE.pending:
+        raise HTTPException(409, "no active case — create one first")
+    if not (body.why or "").strip():
+        raise HTTPException(400, "say why the two events are related (`why`)")
+    try:
+        link, info = STORE.add_event_link(body.sourceEventId, body.targetEventId, body.why, body.verb or "",
+                                          body.kind or "related")
+    except ValueError as ex:
+        raise HTTPException(400, str(ex))
+    return {"link": link, **info}
+
+
+@router.delete("/links/{link_id}")
+def delete_event_link(link_id: str) -> dict:
+    if STORE.delete_event_link(link_id) is None:
+        raise HTTPException(404, "no such event link")
+    return {"ok": True}
+
+
 @router.post("/{eid}", response_model=CaseSetEntry)
 def add(eid: str, body: Optional[CaseSetBody] = None) -> CaseSetEntry:
     b = body or CaseSetBody()

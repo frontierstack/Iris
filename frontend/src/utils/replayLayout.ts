@@ -215,22 +215,24 @@ export function layoutReplay(nodes: LayoutNode[], edges: LayoutEdge[], o: Layout
       if (wrapGroup.length) deferred.push(wrapGroup);
       for (const x of ch) if (x.kind === 'shared') place(x.k, c, r + 1);
     };
-    // Each tree starts on a band of its own, below everything before it, so two chains never
-    // interleave their rows. Consecutive one-event trees share a band, left to right, so events linked
-    // to nothing read as a compact row in time order rather than a tall column.
-    let run: { row: number; col: number } | null = null;
+    // WIDTH FIRST. Trees are packed onto BANDS inside the lane, side by side while they fit: a tree
+    // takes the columns its causal depth needs, the next tree starts in the column after it on the same
+    // band, and only when the width is used up does a new band open below everything so far. Each tree
+    // still owns its own columns, so two chains never interleave their rows — but a case whose story is
+    // several short chains no longer stacks them into one tall column ("the replay node area is making
+    // the list very long vertically"). A one-event tree takes one column.
+    const colsOf = (k: string): number => {
+      let need = 1;
+      for (const x of kids.get(k) ?? []) need = Math.max(need, x.kind === 'actor' ? 1 + colsOf(x.k) : colsOf(x.k));
+      return need;
+    };
+    let band: { row: number; col: number } | null = null;
     const keysOf: string[] = [];
     for (const r of roots) {
       const t = trees.get(r)!;
       keysOf.push(...t);
-      if (t.length === 1) {
-        if (!run || run.col >= maxCols) run = { row: top(), col: 0 };
-        col.set(r, run.col); row.set(r, run.row);
-        free[run.col] = run.row + 1;
-        for (let c = 0; c < maxCols; c++) free[c] = Math.max(free[c] ?? 0, run.row + 1);
-        run.col++;
-      } else if (outline) {
-        run = null;
+      if (outline) {
+        band = null;
         let next = top();
         const walk = (k: string, depth: number) => {
           col.set(k, Math.min(depth, maxDepth)); row.set(k, next++);
@@ -240,13 +242,23 @@ export function layoutReplay(nodes: LayoutNode[], edges: LayoutEdge[], o: Layout
         };
         walk(r, 0);
         free[0] = next;
+        continue;
+      }
+      const need = Math.min(maxCols, colsOf(r));
+      if (!band || band.col + need > maxCols) band = { row: top(), col: 0 };
+      if (t.length === 1) {
+        col.set(r, band.col); row.set(r, band.row);
+        free[band.col] = Math.max(free[band.col] ?? 0, band.row + 1);
       } else {
-        run = null;
-        place(r, 0, top());
+        // The tree is placed at its band's row in its own columns; a chain deeper than the width still
+        // wraps under the whole band (`place` defers past maxCols), on the tree's own first column.
+        const base = band.col;
+        place(r, base, band.row);
         // Last source first: its lines then NEST inside the earlier source's (which runs further down
         // the margin, further out), so the carriage returns do not cross each other.
-        while (deferred.length) for (const k of deferred.pop()!) place(k, 0, top());
+        while (deferred.length) for (const k of deferred.pop()!) place(k, base, top());
       }
+      band.col += need;
     }
     for (const k of keysOf) if (!col.has(k)) place(k, 0, top());   // cannot happen in a forest; never lose one
     let cols = 0, rows = 0;

@@ -68,6 +68,10 @@ MAX_RAW_PREVIEW = 200
 # How much of the file phase 1 decodes at a time. Big enough that the per-chunk bookkeeping is noise,
 # small enough that a 1.9 GB capture never exists in this process as one Python str. See `_iter_lines`.
 CHUNK_BYTES = 4 * 1024 * 1024
+# Every character `str.splitlines` treats as a line break (its documented list). A chunk ending on one
+# of these ends on a complete line; `_iter_lines` reads it off the last character instead of splitting
+# the chunk twice. `tests/test_raw_stream.py` and `test_parse_speed.py` pin the equivalence.
+_LINE_BREAKS = frozenset("\n\r\x0b\x0c\x1c\x1d\x1e\x85  ")
 
 
 def _iter_lines(chunks: Iterable[bytes]) -> Iterable[str]:
@@ -105,10 +109,11 @@ def _iter_lines(chunks: Iterable[bytes]) -> Iterable[str]:
         parts = text.splitlines()
         if parts:
             # `splitlines()` cannot tell "ended on a break" from "ended mid-line", and only the first
-            # means the final part is a complete line. Splitting again WITH the ends answers it: the
-            # last element differs from its stripped form exactly when a break terminated it.
-            kept = text.splitlines(keepends=True)
-            if kept[-1] == parts[-1]:
+            # means the final part is a complete line. The chunk's LAST character answers it: the final
+            # part is terminated exactly when the text ends on one of the characters `splitlines`
+            # breaks on (this used to split the chunk a second time with keepends=True to compare the
+            # last elements - the same answer for the price of a second full split).
+            if text[-1] not in _LINE_BREAKS:
                 rest = parts.pop() + rest
         yield from parts
     rest += decoder.decode(b"", final=True)
@@ -175,6 +180,7 @@ def _raw_events(sid: str, filename: str, family: str, chunks: Iterable[bytes], t
     # finish. Whichever comes first wins. See jobs.progress_step.
     step = jobs.progress_step(total)
     next_at = step
+    pre = prefix or "e"
     for line in _iter_lines(chunks):
         done += len(line) + 1
         if not line.strip():
@@ -183,7 +189,7 @@ def _raw_events(sid: str, filename: str, family: str, chunks: Iterable[bytes], t
         # points the three containers at the shared frozen empties. On a gigabyte of DNS log that is
         # the difference between ~666 and ~386 bytes an event — see the note in models.py.
         append(Event(
-            id=f"{prefix}{n:x}" if prefix else f"e{n:x}",
+            id=f"{pre}{n:x}",
             ts=lead(line, ts_cache), source=family, sourceId=sid, file=filename, host="", user="",
             msg=line[:MAX_RAW_PREVIEW], sev="info", raw=line,
         ))

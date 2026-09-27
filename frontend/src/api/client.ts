@@ -2,7 +2,7 @@ import type {
   AiAnalyzeRequest, AiStreamEvent, AiTestRequest, AiTestResult, Case, ClearAllResult, ComputeStatus, DeepPartial, Entity, EventDetail,
   EventsHistogram, EventsPage, EventsQuery, ExportFormat, Health, MappingSuggestion, ParsersResponse, Report, Settings, Source, Timeline, MetricsResponse,
   Attachment, CaseSummary, CaseDetail, CaseNote, CaseSetEntry, CaseSetResponse, NoteRef, Scope, IocResponse, IocInput, Ioc, EventLocation, GraphV2, GraphQuery, GraphNodeDetail, GraphPath, GraphEdge, GraphReviewEvent, PendingMappings, AutoMapResponse, LibraryFile, TrashEntry, Rule, RuleInput, RuleTestRequest, RuleTestResult, RuleSuggestRequest, RuleSuggestResult, AnomaliesResponse, Severity, CaseChart, ChartCreate } from './types';
-import type { ReplayContext, FieldFacetsQuery, FieldFacetsResponse, JobsResponse, RawLogPage, UploadJob } from './types';
+import type { ReplayContext, EventLink, FieldFacetsQuery, FieldFacetsResponse, JobsResponse, RawLogPage, UploadJob } from './types';
 import type { AiInvestigateRequest, AiRun, AiRunEvent, AiThread, AiToolsResponse, AiUndoResult, IocMarkers } from './types';
 import type { SystemPrompt, SystemPromptsResponse } from './types';
 import type { AuthStatus, Exclusion, ExclusionInput, ExclusionsResponse, GraphFindingsResponse, McpStatus, RulePreviewResult } from './types';
@@ -471,6 +471,12 @@ export const api = {
   // Case set — curated events that are part of the investigation
   caseSet: () => request<CaseSetResponse>('/api/case-set'),
   caseSetReplay: () => request<ReplayContext>('/api/case-set/replay'),
+  /** Authored event links: a relation between two case-set events the analyst (or the assistant) concluded. */
+  eventLinks: () => request<{ links: EventLink[] }>('/api/case-set/links'),
+  addEventLink: (body: { sourceEventId: string; targetEventId: string; why: string; verb?: string; kind?: 'causal' | 'related' }) =>
+    request<{ link: EventLink; autoAdded: string[]; existing: boolean }>('/api/case-set/links', json('POST', body)),
+  deleteEventLink: (id: string) =>
+    request<{ ok: true }>(`/api/case-set/links/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   addToCase: (eventId: string, body: { labels?: string[]; note?: string } = {}) =>
     request<CaseSetEntry>(`/api/case-set/${encodeURIComponent(eventId)}`, json('POST', body)),
   updateCaseEntry: (eventId: string, body: { labels?: string[]; note?: string }) =>

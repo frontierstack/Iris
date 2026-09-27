@@ -146,6 +146,7 @@ const WRITE_TOOLS = new Set([
   'add_ioc', 'update_ioc', 'delete_ioc',
   'add_note', 'update_note', 'delete_note',
   'add_graph_link', 'delete_graph_link', 'build_case_graph',
+  'link_events', 'delete_event_link',
   'create_detection_rule', 'update_detection_rule', 'delete_detection_rule',
   'set_detection_rule_enabled', 'set_builtin_rule_params',
   'add_exclusion', 'delete_exclusion',

@@ -652,3 +652,42 @@
   .rp-ln__ts { flex-direction: row; gap: 6px; }
   .rp-ln__tag { padding: 0 5px; }
 }
+
+/* ── the story (2026-09-27): authored links, the story plate, the card's story line, dense cards ── */
+/* An AUTHORED link is what someone CONCLUDED (the graph's dashed-ring convention): dashed, in the text
+   colour rather than the phase hue, with a small marker at its midpoint so it is never mistaken for an
+   inferred shared link, which is dashed too but in the phase colour. */
+.rp-link--authored .rp-edge { stroke: var(--text-2); stroke-width: 1.6; stroke-dasharray: 7 3; animation: rp-fade calc(.6s * var(--rp-anim, 1)) linear both; }
+.rp-link--authored .rp-arrowhead { stroke: var(--text-2); }
+.rp-link--authored.rp-link--hot .rp-edge { stroke: var(--text-bright); stroke-width: 2.1; }
+.rp-link--authored.rp-link--hot .rp-arrowhead { stroke: var(--text-bright); }
+.rp-link--authored .rp-edge__mark { fill: var(--panel); stroke: var(--text-2); stroke-width: 1.2; }
+.rp-elabel--authored rect { stroke: var(--text-2); stroke-dasharray: none; fill: var(--panel-2); }
+.rp-elabel--authored text { font-family: var(--font-ui); font-weight: 600; }
+.rp-legend__authored { stroke-dasharray: 7 3; stroke-width: 1.6 !important; }
+.rp-legend__authored-dot { fill: var(--panel); stroke: var(--text-3); stroke-width: 1.2; }
+.rp-legend__thread { display: inline-block; font-style: normal; font-size: 10px; padding: 0 5px; border: 1px dashed var(--border-strong, var(--border)); border-radius: 3px; color: var(--text-3); }
+/* the story plate over the focused node: the one line that says what happened */
+.rp-story { pointer-events: none; animation: rp-fade calc(.18s * var(--rp-anim, 1)) linear both; }
+.rp-story rect { fill: var(--panel); stroke: color-mix(in srgb, var(--c) 55%, var(--border)); stroke-width: 1; }
+.rp-story text { fill: var(--text-bright); font-family: var(--font-ui); font-size: 10.5px; font-weight: 500; }
+.rp-story--thread rect { stroke-dasharray: 3 2; stroke: var(--border-strong, var(--border)); }
+.rp-story__dot { fill: var(--muted); }
+/* the stream card's story line: what happened, then how it ties to what came before */
+.rp-ln__story { display: flex; flex-direction: column; gap: 2px; font-size: var(--fs-sm); line-height: 1.45; overflow-wrap: anywhere; animation: rp-fade calc(.4s * var(--rp-anim, 1)) linear both; }
+.rp-ln__story__what { color: var(--text-bright); font-weight: 500; }
+.rp-ln__story__how { color: var(--text-3); }
+.rp-ln__story__how--actor { color: var(--text-2); }
+.rp-ln__story__how--authored { color: var(--text-2); font-weight: 500; }
+.rp-ln__story__how--thread i { font-style: normal; font-size: 10px; padding: 0 5px; margin-right: 5px; border: 1px dashed var(--border-strong, var(--border)); border-radius: 3px; color: var(--text-3); }
+.rp-ln__alink { display: block; font-size: var(--fs-sm); color: var(--text-2); overflow-wrap: anywhere; }
+.rp-ln__alink i { font-style: normal; font-size: 10px; padding: 0 5px; margin-right: 6px; border: 1px solid var(--text-3); border-radius: 3px; color: var(--text-2); }
+.rp-ln__alink__why { color: var(--text-3); }
+/* DENSE cards: a map that would run taller than the viewport draws each event as one 30px card - title
+   and one line - so the whole picture stays on screen. Same geometry rules, smaller pitch. */
+.rp-map--dense .rp-node__title { font-size: 10.5px; }
+.rp-map--dense .rp-node__sub { font-size: 9px; }
+.rp-map--dense .rp-node__glyph { font-size: 8.5px; }
+.rp-mapdense { margin-left: 6px; }
+/* the frame's last resort: taller than the viewport even dense, it scrolls itself instead of the page */
+.rp-mapview--tall { max-height: 72vh; overflow-y: auto; }

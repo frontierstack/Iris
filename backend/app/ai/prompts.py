@@ -242,21 +242,26 @@ INVESTIGATOR_SYSTEM = (
     "turn rather than one per turn — it is the same budget and a quarter of the waiting. Calls that "
     "WRITE to the case are run one after another in the order you sent them, and a read you send "
     "after a write waits for it, so order those deliberately.\n"
-    "6. RECORD AS YOU GO — THE CASE IS WRITTEN DURING THE INVESTIGATION, NOT AT THE END. A finding "
-    "that exists only in this chat is lost the moment the analyst closes the panel, and this "
-    "transcript is FINITE: it is compacted when the model's context fills and a provider failure can "
-    "end the run mid-way, taking every unrecorded finding with it. So do not save the writing up for "
-    "the end. Each time you establish something solid — a decisive event, an indicator, a pivot, a "
-    "verdict on one host — write it to the case RIGHT THEN and carry on investigating; then at the "
-    "END write ONE summary note and set the case summary. NO CASE IS NOT A REASON TO SKIP THIS: when "
+    "6. RECORD THE MOMENT IT IS CONFIRMED — THE CASE IS WRITTEN DURING THE INVESTIGATION, NOT AT THE END. "
+    "A finding that exists only in this chat is lost when the analyst closes the panel or the run dies, "
+    "and this transcript is compacted when the window fills. The rule is mechanical: when a result "
+    "CONFIRMS something — an entity with hits, a detection with its events, a pivot that connected two "
+    "things, a line that decides a question — your NEXT reply writes it, and the next reads go in that "
+    "SAME reply after the writes. Writes run in their own lane, so recording costs no turn. One reply, "
+    "both halves:\n"
+    "   'api.evil.fun: 28 proxy events, all UDP/53 drops from 10.0.0.100 — recording the domain and "
+    "the host with those ids, then reading what 10.0.0.100 resolved next.'\n"
+    "   → add_ioc(domain …), add_ioc(ip …), add_note(kind='finding', …), then search_events(…) — in that "
+    "one message. Iris lists what came back with hits and is not yet on the case and hands it to you "
+    "when you drift; do not wait for it. NO CASE IS NOT A REASON TO SKIP THIS: when "
     "get_case_state says the workspace is case-less and the objective is an investigation (anything "
     "beyond a one-line factual answer), call create_case FIRST — name it for the objective, e.g. "
     "'SSH brute force from 10.0.0.5' — before the first finding, so there is somewhere to put it, and "
     "say in the report that you created it. Do not ask permission and do not stop to offer it. Write in "
     "BATCHES, never one call per item:\n"
-    "   - THE FINDING ITSELF, the moment it is established: add_note(kind='finding', title=…) — what you "
-    "found, the event ids, why it matters, what it rules in or out. One note per finding, written "
-    "THEN, not collected for the end; the analyst reads the case while you work and after a crash.\n"
+    "   - THE FINDING ITSELF: add_note(kind='finding', title=…) — what you found, the event ids, why "
+    "it matters, what it rules in or out. One note per finding, written THEN; the analyst reads the "
+    "case while you work and after a crash.\n"
     "   - the indicators behind it, at the same moment: add_ioc for every IP / domain / hash / user / "
     "path / user agent you can stand behind, each with the citedEventIds it came from AND a `note` "
     "saying what it was seen doing (it is shown on the indicator row). Then ONE finding note titled "
@@ -346,7 +351,9 @@ INVESTIGATOR_SYSTEM = (
     "destroys their record of the old one.\n"
     "Curation is a full loop, not append-only: update_ioc / delete_ioc correct or retract an indicator, "
     "update_note / delete_note fix or remove a note, annotate_case_event labels a case-set event (that "
-    "is how the case timeline is written), and delete_graph_link removes a link the evidence did not "
+    "is how the case timeline is written), link_events ties two timeline events you have shown to be "
+    "related - especially across LOGS (the proxy row that fetched the file and the Sysmon row that ran it) - "
+    "with a verb and a why, and delete_graph_link removes a link the evidence did not "
     "support. Correct your OWN mistakes freely; when removing something the ANALYST wrote, give the "
     "reason in the `why` parameter and repeat it in your report. Deletion is for what is wrong or "
     "superseded, never a way to tidy away a finding you disagree with. Only manual artefacts can be "
@@ -493,6 +500,18 @@ NO_CASE_LINE = ("There is NO CASE yet — the workspace is case-less and every w
                 "one FIRST with create_case (name it for this investigation), in the same turn. ")
 
 RECORD_NUDGE = (
+    "RECORD AS YOU GO — these came back with evidence and NONE of it is on the case yet:\n"
+    "{findings}\n"
+    "{case}Write them in THIS reply, before the next read: add_ioc for each indicator (with a `note` "
+    "saying what it was seen doing, and citedEventIds), add_note(kind='finding', title=…) for each "
+    "finding (what, the ids, why it matters), ONE add_events_to_case call with the decisive event ids "
+    "and ONE annotate_case_events call giving each a short label and a full note (that is the timeline; "
+    + TIMELINE_NOTE_RULE + "). Your next reads can follow in the SAME reply — writes run in their own "
+    "lane. This is NOT a request to finish. If one of these is not a finding, say why in one line.")
+
+# The fallback, when reads have been returning evidence the ledger could not name (a shape it does not
+# read): the count-based text the nudge carried before it named findings.
+RECORD_NUDGE_COUNT = (
     "RECORD AS YOU GO — your last {calls} tool calls returned real evidence and NONE of it is in the "
     "case yet. {case}Write down what is already solid NOW, before continuing: add_note(kind='finding') "
     "for each finding you have established (what, the event ids, why it matters), add_ioc for each "
@@ -502,6 +521,21 @@ RECORD_NUDGE = (
     + TIMELINE_NOTE_RULE + ") — all with "
     "citedEventIds. Then carry on investigating: this is NOT a request to finish. If nothing so far "
     "is solid enough to record, say so in one line and continue.")
+
+# Appended to DOCUMENT_CHECK / SUMMARY_CHECK, and sent on its own (once) when neither applies: the run
+# is about to finish with findings the ledger saw come back with hits and no write naming them. A
+# prompt, never a write: an indicator Iris invented to fill a gap is the worst outcome available here.
+UNRECORDED_TAIL = (
+    "\n\nIn particular, these came back with evidence during this run and are NOT on the case yet:\n"
+    "{findings}\n"
+    "Record each one, or say in one line why it is not a finding. Never invent an indicator to fill a gap.")
+
+RECORD_BEFORE_FINISH = (
+    "BEFORE YOU FINISH — these came back with evidence during this run and are NOT on the case:\n"
+    "{findings}\n"
+    "Record each one now — add_ioc (with a `note` and citedEventIds), add_note(kind='finding'), "
+    "add_events_to_case + annotate_case_events for the decisive events — or say in one line per item why "
+    "it is not a finding. Never invent an indicator to fill a gap. Then give your final report.")
 
 # Injected once, at the end, when a run recorded findings as it went but never wrote the summary.
 # Sent at most MAX_LEAD_CHECKS times, when a run that did real work is about to finish with leads the

@@ -58,6 +58,7 @@ from typing import Any, Iterable, Optional
 
 import orjson
 
+from . import eventids
 from .loopguard import call_key
 
 # ---------------------------------------------------------------- bounds
@@ -219,17 +220,108 @@ _VALUE_LISTS: tuple[tuple[str, str, str], ...] = (
 )
 _TOP_PER_LIST = 6
 
+# ---------------------------------------------------------------- findings not yet on the case
+#
+# The analyst's report (2026-09-27): "the model will often not post the second it has something and
+# will wait a long time before posting". Measured on their own run: the objective's domain came back
+# with 28 events at step 1 and its first note landed at step 5, eight minutes later — and ONLY after
+# the record nudge fired. Every write burst in that run followed a nudge, and the nudge counted
+# CALLS ("8 tool calls returned evidence"), not findings, so it fired late and named nothing.
+#
+# A FINDING here is a read that came back WITH HITS about a nameable thing — an entity that was
+# profiled, a detection with events, a query that matched — and nothing written to the case since
+# has named that thing or cited its ids. It is closed the same way a lead is: by a WRITE whose
+# arguments carry the value or one of the ids, never by a sentence. This is the list the record
+# nudge names, so the model can write the items in one reply instead of being told "you have
+# written nothing" and answering with more reading.
+MAX_FINDINGS = 120
+RENDER_FINDINGS = 5        # lines in a rendered block (the brief); the nudge shows RECORD_SHOW of its own
+FINDING_IDS = 3            # sample ids shown per finding line — enough to cite, not a page
+
+# How strongly a result of each tool ASSERTS something. A profile or a detection with events is a
+# claim about a THING — an address, an account, a rule that fired — which is what an indicator or a
+# finding note is written about. A search, a count or a breakdown over a query is a number about a
+# QUERY: it may carry the decisive lines, but "query X matched 40 rows" is not itself a thing to
+# record, and a list of matched queries is what turned a brief 839 characters longer and tipped a
+# small window's restart into a refusal. So only the STRONG ones (FINDING_WEIGHT_FLOOR) are ever
+# named by the nudge or the brief; the query-shaped ones are tracked, and the call-count fallback in
+# the investigator still covers a run that reads lines for six turns and writes nothing.
+_FINDING_TOOL_WEIGHT = {
+    "entity_profile": 1.0, "profile_entities": 1.0,
+    "list_detections": 1.1, "list_anomalies": 1.1,
+    "search_events": 0.7, "sample_events": 0.65,
+    "batch_query": 0.6, "aggregate_events": 0.6, "count_events": 0.5, "events_over_time": 0.5,
+}
+FINDING_WEIGHT_FLOOR = 0.75
+
+# Writes to the case, for a ledger built without the registry (tests, `from_records`). The live
+# investigator passes the registry's own list; this is the fallback and it errs on the side of
+# treating a call as a write, because a write mistaken for a read would harvest a "finding" out of
+# its own arguments.
+_WRITE_HINT = frozenset({
+    "add_note", "update_note", "add_ioc", "update_ioc", "add_events_to_case", "annotate_case_event",
+    "annotate_case_events", "add_graph_link", "build_case_graph", "create_case", "update_case",
+    "create_chart", "create_detection_rule", "update_detection_rule", "add_exclusion",
+})
+
+
+@dataclass
+class Finding:
+    """A read that came back with hits, and whether anything on the case names it yet."""
+    key: str
+    kind: str            # entity | detection | query
+    value: str
+    hits: int
+    ids: list[str] = field(default_factory=list)
+    tool: str = ""
+    step: int = 0
+    weight: float = 1.0
+    state: str = "open"      # open | recorded
+    nudged: bool = False     # named in a record nudge already
+
+    def line(self) -> str:
+        n = f"{self.hits:,} event(s)" if self.hits else "hits"
+        cite = (" e.g. " + ", ".join(f"`{i}`" for i in self.ids[:FINDING_IDS])) if self.ids else ""
+        return f"{self.kind} {self.value} — {n} via {self.tool}{cite}"
+
+
+def _ids_of(rows: Any, cap: int = 12) -> list[str]:
+    """Event ids from a list of row dicts (or of bare id strings)."""
+    out: list[str] = []
+    if not isinstance(rows, list):
+        return out
+    for r in rows:
+        v = r.get("id") if isinstance(r, dict) else r
+        if isinstance(v, str) and v and v not in out:
+            out.append(v)
+            if len(out) >= cap:
+                break
+    return out
+
+
+def _hits(result: dict[str, Any], *keys: str) -> int:
+    for k in keys:
+        v = result.get(k)
+        if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+            return v
+    return 0
+
 
 class Ledger:
     """The record of one investigation. Owned by the run; never part of the transcript."""
 
-    def __init__(self) -> None:
+    def __init__(self, writers: Optional[Iterable[str]] = None) -> None:
         self.calls: dict[str, Call] = {}
         self.leads: dict[str, Lead] = {}
+        self.findings: dict[str, Finding] = {}
         self.writes: list[str] = []
         self.shed_calls = 0
         self.shed_leads = 0
+        self.shed_findings = 0
         self._seen_values: set[str] = set()   # every value any call has ASKED about, lower-cased
+        self._written: set[str] = set()       # every value a WRITE has carried (args, or its summary)
+        self._cited: set[str] = set()         # every id a write has cited
+        self.writers: frozenset[str] = frozenset(writers) if writers is not None else _WRITE_HINT
 
     # ------------------------------------------------------------ observing
     def observe(self, name: str, args: dict[str, Any], ok: bool, result: Any, *,
@@ -247,13 +339,56 @@ class Ledger:
         # Anything this call NAMED is a thing somebody has now looked at — a lead about it is closed
         # whether it was the call's subject or one of its filters.
         self._close_from_args(name, args)
+        if name in self.writers:
+            # A write that LANDED puts what it names on the case. A refused one wrote nothing, and
+            # counting it would mark a finding recorded on the strength of a call that did not run.
+            if ok:
+                self._record_from_args(args)
+            return
         if ok:
             self._harvest(name, args, result, step)
+            self._harvest_findings(name, args, result, step)
 
     def note_write(self, action: dict[str, Any]) -> None:
         line = f"{action.get('tool')}: {_clip(action.get('summary'), 160)}"
         if line not in self.writes:
             self.writes.append(line)
+        # The summary names what was written ("recorded indicator domain:evil.fun"), so a finding
+        # about that value is on the case — this is the only signal `from_records` has.
+        summary = str(action.get("summary") or "").lower()
+        if summary:
+            for f in self.findings.values():
+                if f.state == "open" and f.value.lower() in summary:
+                    f.state = "recorded"
+
+    # ------------------------------------------------------------ findings
+    def add_finding(self, kind: str, value: Any, hits: int, ids: list[str], tool: str,
+                    step: int = 0) -> None:
+        v = _norm(value)
+        if not v or v.lower() in _NOISE_VALUES or len(v) > 200 or hits <= 0:
+            return
+        key = _lead_key(kind, v)
+        weight = _FINDING_TOOL_WEIGHT.get(tool, 0.5) * _count_weight(hits)
+        if key in self.findings:
+            f = self.findings[key]
+            f.hits = max(f.hits, hits)
+            f.weight = max(f.weight, weight)
+            for i in ids:
+                if i not in f.ids and len(f.ids) < 12:
+                    f.ids.append(i)
+            return
+        low = v.lower()
+        recorded = low in self._written or any(i in self._cited for i in ids)
+        self.findings[key] = Finding(key=key, kind=kind, value=v, hits=hits, ids=list(ids),
+                                     tool=tool, step=step, weight=weight,
+                                     state="recorded" if recorded else "open")
+        self._shed_findings()
+
+    def unrecorded(self, floor: float = 0.0) -> list[Finding]:
+        """What came back with hits and is not on the case, strongest first."""
+        out = [f for f in self.findings.values() if f.state == "open" and f.weight >= floor]
+        out.sort(key=lambda f: (-f.weight, f.step, f.value))
+        return out
 
     def dismiss(self, kind: str, value: str, why: str = "") -> None:
         lead = self.leads.get(_lead_key(kind, _norm(value)))
@@ -286,7 +421,8 @@ class Ledger:
         states = {"open": 0, "followed": 0, "dismissed": 0}
         for l in self.leads.values():
             states[l.state] = states.get(l.state, 0) + 1
-        return {"calls": len(self.calls), "writes": len(self.writes), **states}
+        return {"calls": len(self.calls), "writes": len(self.writes),
+                "unrecorded": sum(1 for f in self.findings.values() if f.state == "open"), **states}
 
     # ------------------------------------------------------------ rendering
     def render(self, *, max_chars: int = 4000, leads: int = RENDER_LEADS,
@@ -294,26 +430,48 @@ class Ledger:
         """The block handed to the model. Empty when the run has not done anything yet."""
         work = self.render_work(calls)
         opened = self.render_leads(leads)
+        found = self.render_unrecorded()
         # `self.writes` counts too. Without it a ledger holding only writes rendered the empty
         # string, so a fold early in a run that had already put something on the case dropped the
         # one section that stops the model writing it a second time.
-        if not work and not opened and not self.writes:
+        if not work and not opened and not self.writes and not found:
             return ""
         parts = [H_LEDGER]
         if work:
             parts.append(H_DONE + work)
         if self.writes:
             parts.append(H_WROTE + "\n".join("- " + w for w in self.writes[-30:]))
+        if found:
+            parts.append(found)
         parts.append(opened or H_NO_LEADS)
         block = "\n".join(parts)
         if len(block) <= max_chars:
             return block
-        # The OPEN LEADS are what the run does next, so they survive a squeeze and the call list is
-        # what gives way — shortened from the least informative end, never silently.
-        room = max(400, max_chars - len(H_LEDGER) - len(opened) - 200)
+        # The OPEN LEADS and the UNRECORDED FINDINGS are what the run does next, so they survive a
+        # squeeze and the call list is what gives way — shortened from the least informative end,
+        # never silently.
+        room = max(400, max_chars - len(H_LEDGER) - len(opened) - len(found) - 200)
         work = self.render_work(calls, max_chars=room)
-        parts = [H_LEDGER] + ([H_DONE + work] if work else []) + [opened or H_NO_LEADS]
+        parts = ([H_LEDGER] + ([H_DONE + work] if work else []) + ([found] if found else [])
+                 + [opened or H_NO_LEADS])
         return "\n".join(parts)[:max_chars]
+
+    def render_unrecorded(self, limit: int = RENDER_FINDINGS, floor: float = FINDING_WEIGHT_FLOOR) -> str:
+        """The FOUND BUT NOT YET ON THE CASE section, or nothing when everything found is written.
+
+        STRONG findings only. A count or a breakdown over a query is already on its own line under
+        ALREADY ASKED with its total, and printing it again here is the duplication the fold was
+        measured to avoid (`test_a_fold_lists_each_call_ONCE`). A profiled entity or a detection with
+        events is a claim about a THING, and the claim is what the case is missing.
+        """
+        open_ = self.unrecorded(floor)
+        if not open_:
+            return ""
+        shown = open_[:limit]
+        lines = [f"{i + 1}. {f.line()}" for i, f in enumerate(shown)]
+        if len(open_) > len(shown):
+            lines.append(f"… and {len(open_) - len(shown)} more.")
+        return H_UNRECORDED + "\n".join(lines)
 
     def render_work(self, limit: int = RENDER_CALLS, max_chars: int = 0) -> str:
         if not self.calls:
@@ -423,6 +581,62 @@ class Ledger:
                               "still RAW — invisible to entity: and field: queries; read it as free text",
                               1.2, step)
 
+    def _record_from_args(self, args: dict[str, Any]) -> None:
+        """A write that LANDED names what it put on the case: every open finding whose value or ids
+        appear anywhere in its arguments is recorded. The whole serialised blob, for the same reason
+        `_close_from_args` reads it: the value arrives as `value`, inside a note's text, inside a
+        `why`, or as one id among twenty in `eventIds`."""
+        try:
+            blob = orjson.dumps(args).decode().lower()
+        except TypeError:
+            blob = str(args).lower()
+        for token in _values_in(args):
+            self._written.add(token)
+        for i in _ids_in(args):
+            self._cited.add(i)
+        for f in self.findings.values():
+            if f.state != "open":
+                continue
+            if f.value.lower() in blob or any(i.lower() in blob for i in f.ids):
+                f.state = "recorded"
+
+    def _harvest_findings(self, name: str, args: dict[str, Any], result: Any, step: int) -> None:
+        """A read that came back with hits about something nameable is a finding until a write names it."""
+        if name not in _FINDING_TOOL_WEIGHT or not isinstance(result, dict) or result.get("error"):
+            return
+        if name == "entity_profile":
+            cov = result.get("coverage") if isinstance(result.get("coverage"), dict) else {}
+            hits = _hits(result, "total") or _hits(cov, "textMentions")
+            self.add_finding("entity", args.get("value"), hits, _ids_of(result.get("sampleEvents")), name, step)
+        elif name == "profile_entities":
+            for row in _rows(result, "entities")[:12]:
+                if isinstance(row, dict):
+                    hits = _hits(row, "total", "exactEntityMatches", "textMentions")
+                    self.add_finding("entity", row.get("value"), hits, _ids_of(row.get("sampleEvents")), name, step)
+        elif name in ("list_detections", "list_anomalies"):
+            for row in _rows(result, "detections")[:RENDER_FINDINGS] + _rows(result, "anomalies")[:RENDER_FINDINGS]:
+                if isinstance(row, dict):
+                    label = " ".join(str(row.get(k) or "") for k in ("ruleId", "name") if row.get(k)).strip()
+                    ids = _ids_of(row.get("eventIds")) or _ids_of(row.get("events"))
+                    self.add_finding("detection", label, _hits(row, "hits", "count"), ids, name, step)
+        elif name == "batch_query":
+            for row in _rows(result, "results")[:12]:
+                if isinstance(row, dict) and not row.get("error"):
+                    self.add_finding("query", row.get("query"), _hits(row, "total"), [], name, step)
+        else:   # search_events, sample_events, aggregate_events, count_events, events_over_time
+            hits = _hits(result, "total", "count") or len(_ids_of(result.get("rows")))
+            self.add_finding("query", args.get("query"), hits, _ids_of(result.get("rows")), name, step)
+
+    def _shed_findings(self) -> None:
+        if len(self.findings) <= MAX_FINDINGS:
+            return
+        # recorded ones first, then the weakest open ones
+        ordered = sorted(self.findings.items(),
+                         key=lambda kv: (kv[1].state == "open", kv[1].weight, -kv[1].step))
+        for key, _f in ordered[: len(self.findings) - MAX_FINDINGS]:
+            self.findings.pop(key, None)
+            self.shed_findings += 1
+
     def _shed_calls(self) -> None:
         if len(self.calls) <= MAX_CALLS:
             return
@@ -443,7 +657,8 @@ class Ledger:
 
     # ------------------------------------------------------------ rebuilding from a record
     @classmethod
-    def from_records(cls, records: Iterable[dict[str, Any]]) -> "Ledger":
+    def from_records(cls, records: Iterable[dict[str, Any]],
+                     writers: Optional[Iterable[str]] = None) -> "Ledger":
         """The ledger of a conversation, rebuilt from the persisted run records.
 
         A follow-up turn inherits it, so "now build me the timeline" does not re-ask the twenty
@@ -453,7 +668,7 @@ class Ledger:
         starts with an accurate "already done" list and an empty lead list, which is the honest
         shape: an unfollowed lead nobody wrote down is not evidence that it is still open.
         """
-        led = cls()
+        led = cls(writers)
         for rec in records:
             for e in rec.get("transcript") or []:
                 if e.get("kind") != "tool":
@@ -490,7 +705,32 @@ H_OPEN = ("\nOPEN LEADS — things this investigation turned up and has NOT yet 
           "does not matter — never by ignoring it.\n")
 H_NO_LEADS = ("\nOPEN LEADS: none. Every lead the evidence produced has been followed. If the "
               "objective is answered, record what is left to record and write the report.")
-_HEADERS = (H_DONE, H_WROTE, H_OPEN)
+# Short on purpose: this block rides in the compaction brief AND in the in-run restart, and a restart
+# is only taken when the rebuilt transcript is SMALLER than the folded one (`_reset_transcript`'s
+# callers). A 330-character header plus eight lines tipped a small window's restart into a refusal —
+# measured in test_ai_recovery::test_the_context_recovery_is_bounded — and a run that ends is worse
+# than a list that is terse.
+H_UNRECORDED = ("\nFOUND BUT NOT YET ON THE CASE — came back with hits, nothing written names them. "
+                "Record each (add_ioc / add_note kind='finding' / annotate_case_events, with the ids) "
+                "or dismiss it in one line:\n")
+_HEADERS = (H_DONE, H_WROTE, H_UNRECORDED, H_OPEN)
+
+
+def _ids_in(args: Any, out: Optional[set[str]] = None) -> set[str]:
+    """Every string in an argument tree that is shaped like an event id (`e79f`, `l6e2c94f91078ed`)."""
+    if out is None:
+        out = set()
+    if isinstance(args, dict):
+        for v in args.values():
+            _ids_in(v, out)
+    elif isinstance(args, (list, tuple)):
+        for v in args:
+            _ids_in(v, out)
+    elif isinstance(args, str):
+        # the ONE definition of what an id looks like (ai/eventids.py) — three modules guessed once
+        for m in eventids.BARE.finditer(args):
+            out.add(m.group(1).lower())
+    return out
 
 
 def is_ledger(text: str) -> bool:

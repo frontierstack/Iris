@@ -47,23 +47,35 @@ _SEV_CODE = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 _SEP = b"\x1e"
 _FSEP = b"\x1f"
 _END = b"\x00"
-# One window of the packed buffer per comparison pass. Bounded on purpose: an unchunked compare
-# allocates a bool the size of the WHOLE buffer (5.4 GB on the analyst's pool) beside the index it is
-# scanning. 256 MiB is large enough that the per-call overhead is noise and small enough to never be
-# the reason a query fails.
+# One window of the packed buffer per comparison pass ON THE DEVICE. Bounded on purpose: an unchunked
+# compare allocates a bool the size of the WHOLE buffer (5.4 GB on the analyst's pool) beside the
+# index it is scanning. 256 MiB is large enough that the per-call overhead is noise and small enough
+# to never be the reason a query fails.
 _SCAN_CHUNK = 1 << 26
-# How many of the needle's rarest bytes anchor the window before any gather happens.
-_ANCHORS = 3
-# When the find loop stops being worth it. Two numbers, because a fixed cap got BOTH cases wrong: it
-# bailed on terms it should have finished (a 247 MB buffer only breaks even at ~1.7 M hits), and when
-# it did bail it had already paid for every hit up to the cap AND still had to run the scan.
-#   _FIND_BYTES_PER_HIT — the crossover expressed against buffer size: the vectorised scan costs
-#     ~3.1 ms/MB and a find-loop hit ~0.4 us, so one hit is "worth" ~160 bytes of buffer.
-#   _FIND_PROBE — how often to project the total from the density scanned so far. A term that is
-#     going to blow the cap is abandoned after about this many hits instead of after all of them,
-#     which bounds the wasted work to a few tens of milliseconds.
-_FIND_BYTES_PER_HIT = 160
-_FIND_PROBE = 50_000
+# ...and ON THE HOST, where the window is sized for the CPU's L2 cache, not for memory safety. Each
+# anchor pass reads a window and writes a bool the same size, and the AND / flatnonzero / gathers that
+# follow read them back: with a 256 MiB window every one of those is a trip to main memory through a
+# freshly page-faulted allocation, and ONE compare pass over a 193 MB index measured 49 ms while
+# "two compares & AND" measured 175 ms. In 512 KiB windows, into two PREALLOCATED bool buffers
+# (`np.equal(..., out=)`), the whole three-pass scan of the same buffer is ~80 ms - the intermediate
+# never leaves cache and nothing is allocated per window. Measured over eleven needles against the
+# same index (ms, current -> 512 KiB windows): `denied` 333 -> 71, `500` 164 -> 78, an IP 91 -> 65, a
+# field key 123 -> 83, a miss 112 -> 41. 256 KiB and 1 MiB were within noise of it; 2 MiB was ~25 %
+# slower. It also replaced the `bytes.find` loop this path used to prefer: memmem's scan itself ran
+# at ~1.8 GB/s here and every hit then cost a Python round trip (~1.7 us - 96,534 hits of `denied`
+# were 170 ms of a 285 ms call), so the loop lost to the windowed scan on every needle measured,
+# including the rare ones it was kept for. The window is a tuning constant, never a correctness one:
+# `tests/test_search_scan.py` shrinks it to a few bytes and the answer must not move.
+_HOST_SCAN_CHUNK = 512 << 10
+# How many of the needle's rarest bytes anchor the window before any gather happens - the FLOOR.
+# Every anchor is one more compare pass over the window (plus the AND), and every anchor NOT taken is
+# a gather over the candidates the earlier anchors left; the plan below adds anchors, up to
+# `_ANCHORS_MAX`, while the byte histogram projects more than one candidate in `_ANCHOR_DENSITY`
+# positions. Two is the floor because a single anchor on a needle of common characters
+# (`45.83.140.22`, every byte a digit or a dot) leaves hundreds of millions of positions to gather.
+_ANCHORS = 2
+_ANCHORS_MAX = 4
+_ANCHOR_DENSITY = 64
 # The per-index atom-mask cache (`_Engine.contains`). A mask is ONE BYTE AN EVENT, so the bound is in
 # bytes and the entry count follows from the pool: ~850 masks at 150 k events, 11 at 11 M. Never
 # fewer than _MASK_CACHE_MIN, or a huge pool would cache nothing and every drill-down would re-scan
@@ -71,7 +83,6 @@ _FIND_PROBE = 50_000
 _MASK_CACHE_BYTES = int(os.environ.get("IRIS_MASK_CACHE_MB", "128")) << 20
 _MASK_CACHE_MIN = 8
 _MASK_CACHE_MAX = 512
-_FIND_MIN_CAP = 200_000
 # How far past the requested page the SCAN path — and the vector path's CONFIRM pass — keeps counting
 # before it reports a floor instead of a total. Enough that the hit count is useful ("10,000+") and
 # small enough that a cold query answers in about a second rather than three minutes.
@@ -374,7 +385,7 @@ def build_index(events: list[Event], ts: np.ndarray, version: int, sig: str = ""
     # question rather than a number.
     #
     # `packed` is therefore `bytes`, not `bytearray` — immutable, which is right for an index nothing
-    # may write to. `bytes.find` is the same memmem `_find_all` wants and `np.frombuffer` shares the
+    # may write to. `bytes.find` was what the (since removed) find loop wanted and `np.frombuffer` shares the
     # same allocation, so `raw` and `text` are still ONE buffer. (`index_store.load` hands back a
     # bytearray for the restored path; both satisfy every reader here.)
     packed = b"".join(docs)
@@ -535,24 +546,56 @@ class _Engine:
                 idx.mask_cache.popitem(last=False)
         return mask
 
+    def _anchors(self, nd: np.ndarray, N: int) -> tuple[list[int], list[int]]:
+        """(anchor byte positions, the rest), rarest first, sized to the needle's own bytes.
+
+        Start from `_ANCHORS` of the needle's rarest bytes and add one more while the byte histogram
+        says the candidates they leave would still be dense: assuming the bytes independent, the
+        anchors taken so far project `N * prod(count_k / N)` positions to gather over, and a gather
+        over more than one position in `_ANCHOR_DENSITY` costs more than the extra compare pass that
+        would remove most of them. Never more than `_ANCHORS_MAX`, never more than the needle has.
+        An optimisation only: every byte NOT anchored is still verified by gather, so the answer does
+        not depend on the count (`tests/test_search_scan.py::test_every_anchor_count_agrees`).
+        """
+        m = int(nd.shape[0])
+        counts = self._byte_counts()
+        order = sorted(range(m), key=lambda k: counts[int(nd[k])])
+        take = min(m, max(1, int(_ANCHORS)))
+        projected = float(N)
+        for k in order[:take]:
+            projected *= float(counts[int(nd[k])]) / max(1.0, float(N))
+        while take < min(m, _ANCHORS_MAX) and projected * _ANCHOR_DENSITY > N:
+            projected *= float(counts[int(nd[order[take]])]) / max(1.0, float(N))
+            take += 1
+        return order[:take], order[take:]
+
     def _contains(self, needle: bytes) -> Any:
         """Events whose document contains `needle` (case already lowered).
 
-        Two things decide the cost, and both were learned the hard way on the analyst's 5.4 GB index:
+        Three things decide the cost, and all were learned the hard way on the analyst's index:
 
         * **The scan is CHUNKED.** `hay[k0:k0 + span] == b` materialises a bool array the size of the
           whole packed buffer — 5.4 GB, on a card that is already holding the 5.4 GB index. That is
           how a query on a 12 GB device ends up thrashing, and it is the same trap `byte_histogram`
           and `compute.to_device` already document. A 256 MiB window keeps every temporary bounded and
           the arithmetic identical.
-        * **Up to three rare bytes anchor the window, not one.** The first pass used the single rarest
+        * **On the host the window is L2-SIZED and the compare buffers are PREALLOCATED** — see
+          `_HOST_SCAN_CHUNK`. The three passes over a window and the AND between them then never leave
+          cache, and the per-window bool is written into the same two buffers every time instead of
+          a fresh, page-faulting allocation. That is the difference between ~3 ms/MB and ~0.4 ms/MB,
+          and it is also why the `bytes.find` loop this path used to prefer is gone: the loop's scan
+          ran at memmem speed but paid a Python round trip per HIT, and it lost to the windowed scan
+          on every needle measured (common and rare, hit and miss).
+        * **Several rare bytes anchor the window, not one.** The first version used the single rarest
           byte, so a needle made of common characters — `45.83.140.22`, every byte of it a digit or a
-          dot — produced hundreds of millions of candidate positions to gather over. ANDing the two or
-          three rarest byte comparisons costs one cheap sequential pass each and cuts the candidate set
-          by orders of magnitude before a single gather happens.
+          dot — produced hundreds of millions of candidate positions to gather over. ANDing the two to
+          four rarest byte comparisons (`_anchors` decides how many from the histogram) costs one
+          cheap sequential pass each and cuts the candidate set by orders of magnitude before a single
+          gather happens.
 
-        The result is bit-identical to the one-byte version: the anchors are a subset of the needle's
-        own bytes, and every remaining byte is still verified by gather.
+        The result is bit-identical to the one-byte, one-window version: the anchors are a subset of
+        the needle's own bytes, every remaining byte is still verified by gather, and a window boundary
+        is only ever a boundary between STARTING positions (each anchor reads `k` bytes past it).
         """
         ap, idx = self.ap, self.idx
         m = len(needle)
@@ -562,41 +605,44 @@ class _Engine:
             return self.all_true()
         if N < m:
             return ap.zeros(idx.n, dtype=bool)
-        # On the CPU, the C library's substring search beats anything expressible in numpy: it is
-        # SIMD and it stops at the first mismatched byte, where an elementwise compare always touches
-        # the whole buffer. It gives up above `_FIND_CAP` hits, where the per-hit Python cost would
-        # exceed the scan it is replacing.
-        if not idx.on_gpu and idx.raw is not None:
-            hits = self._find_all(needle)
-            if hits is not None:
-                mask = np.zeros(idx.n, dtype=bool)
-                if hits:
-                    ev = np.searchsorted(idx.offsets, np.asarray(hits, dtype=np.int64), side="right") - 1
-                    mask[ev] = True
-                return mask
         nd = np.frombuffer(needle, dtype=np.uint8)
         span = N - m + 1
-        counts = self._byte_counts()
-        order = sorted(range(m), key=lambda k: counts[int(nd[k])])
-        anchors, rest = order[:_ANCHORS], order[_ANCHORS:]
+        anchors, rest = self._anchors(nd, N)
 
         mask = ap.zeros(idx.n, dtype=bool)
-        step = max(_SCAN_CHUNK, m)
         # `int(array.shape[0])` on a device array is a HOST SYNC. Skipping the chunk early is worth a
         # sync on numpy (it is free there) and costs one on the GPU — ~84 chunks over a 5.4 GB buffer,
         # each stalling the pipeline, which is where most of a ~0.9 s device query actually went. On
         # the GPU the work is queued unconditionally instead: an empty candidate set costs a kernel
         # launch over nothing, which is far cheaper than stopping to ask whether it is empty.
         on_host = ap is np
+        step = max(_HOST_SCAN_CHUNK if on_host else _SCAN_CHUNK, m)
+        # The two host buffers every window's compares are written INTO (`out=`). Allocated once per
+        # scan, so no window page-faults a fresh array, and sized to the window so they stay in cache.
+        acc = np.empty(step, dtype=bool) if on_host else None
+        tmp = np.empty(step, dtype=bool) if on_host else None
+        k0 = anchors[0]
         start = 0
         while start < span:
             stop = min(span, start + step)
-            window = None
-            for k in anchors:
-                hit = hay[start + k:stop + k] == int(nd[k])
-                window = hit if window is None else (window & hit)
-            pos = ap.flatnonzero(window) + start
-            del window
+            if on_host:
+                L = stop - start
+                window = acc[:L]
+                np.equal(hay[start + k0:stop + k0], int(nd[k0]), out=window)
+                for k in anchors[1:]:
+                    t = tmp[:L]
+                    np.equal(hay[start + k:stop + k], int(nd[k]), out=t)
+                    np.bitwise_and(window, t, out=window)
+                pos = np.flatnonzero(window)
+                if pos.shape[0]:
+                    pos += start
+            else:
+                window = None
+                for k in anchors:
+                    hit = hay[start + k:stop + k] == int(nd[k])
+                    window = hit if window is None else (window & hit)
+                pos = ap.flatnonzero(window) + start
+                del window
             for k in rest:
                 if on_host and pos.shape[0] == 0:
                     break
@@ -607,34 +653,6 @@ class _Engine:
             del pos
             start = stop
         return mask
-
-    def _find_all(self, needle: bytes) -> Optional[list[int]]:
-        """Every offset of `needle` in the packed buffer, or None if there are too many to be worth it.
-
-        `bytes.find` is memmem — the same routine `grep` leans on. The loop is the only Python in the
-        hot path, which is why it has a ceiling rather than a promise.
-        """
-        buf = self.idx.raw
-        if buf is None:
-            return None
-        n_bytes = len(buf)
-        cap = max(_FIND_MIN_CAP, n_bytes // _FIND_BYTES_PER_HIT)
-        out: list[int] = []
-        append = out.append
-        find = buf.find
-        pos = find(needle)
-        probe = _FIND_PROBE
-        while pos != -1:
-            append(pos)
-            got = len(out)
-            if got >= probe:
-                # Project the total from the density so far rather than discovering it hit by hit;
-                # `pos` is how far into the buffer this many hits took.
-                if got * (n_bytes / max(1, pos)) > cap:
-                    return None
-                probe = got + _FIND_PROBE
-            pos = find(needle, pos + 1)
-        return out
 
     def _byte_counts(self) -> np.ndarray:
         # Normally precomputed by build_index (see byte_histogram): this fallback only fires for an index

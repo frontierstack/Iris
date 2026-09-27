@@ -349,6 +349,12 @@ class Store:
         # Same shape and same lifecycle as `graph_links` — persisted in case.json, overlaid per request,
         # never part of the built structure.
         self.graph_nodes: list[dict[str, Any]] = []
+        # AUTHORED EVENT LINKS: "these two timeline events are related, and here is why" — drawn by the
+        # analyst or the assistant between two case-set events (either may come from a different log).
+        # Persisted in case.json like `graph_links`, and for the same reason: what someone CONCLUDED,
+        # kept apart from what the logs say. The replay draws them dashed and lets them outrank an
+        # inferred link for the same pair. {id, source, target, verb, kind, why, ai, runId, createdAt}
+        self.event_links: list[dict[str, Any]] = []
         # Charts Iris computed for this case (app/charts.py) — persisted in case.json like the graph
         # links, and for the same reason: they are what someone CONCLUDED from the evidence, not part
         # of the evidence. Each one carries the queries it was built from, so it can be re-derived.
@@ -585,6 +591,7 @@ class Store:
             self._drop_derived()
             self.graph_links = []
             self.graph_nodes = []
+            self.event_links = []
             self.charts = []
             self._event_seq = 0
             self.source_id_base = {}
@@ -847,7 +854,8 @@ class Store:
                     "created_at": self.created_at.isoformat(), "updated_at": datetime.now(UTC).isoformat(),
                     "case_set": [e.model_dump() for e in self.case_set.values()],
                     "notes": [n.model_dump() for n in self.notes], "manual_iocs": list(self.manual_iocs), "graph_links": list(self.graph_links),
-                    "graph_nodes": list(self.graph_nodes), "charts": list(self.charts), "snapshot": snap,
+                    "graph_nodes": list(self.graph_nodes), "event_links": list(self.event_links),
+                    "charts": list(self.charts), "snapshot": snap,
                     "event_count": sum(self.sources[s].events for s in self.case_source_ids()),
                     "sources": [
                         {"id": sid, "file": self.sources[sid].file, "path": str(self.source_paths.get(sid, "")),
@@ -927,6 +935,9 @@ class Store:
             raw_nodes = meta.get("graph_nodes")
             self.graph_nodes = ([n for n in raw_nodes if isinstance(n, dict) and n.get("id")]
                                 if isinstance(raw_nodes, list) else [])
+            raw_ev = meta.get("event_links")
+            self.event_links = ([l for l in raw_ev if isinstance(l, dict) and l.get("source") and l.get("target")]
+                                if isinstance(raw_ev, list) else [])
             raw_charts = meta.get("charts")
             self.charts = ([c for c in raw_charts if isinstance(c, dict) and c.get("id")]
                            if isinstance(raw_charts, list) else [])
@@ -3545,6 +3556,66 @@ class Store:
         finally:
             self.save_meta()
         return out
+
+    # ── authored event links: "these two events are related, and here is why" ──
+    EVENT_LINK_KINDS = ("causal", "related")
+
+    def add_event_link(self, source: str, target: str, why: str, verb: str = "", kind: str = "related",
+                       ai: bool = False, run_id: str = "") -> tuple[dict[str, Any], dict[str, Any]]:
+        """Link two events of the case, adding either to the case set when it is not there yet.
+
+        Both ends must be REAL events in the pool (ValueError names the bad id — the same rule as a
+        graph link's citations: a link to an event nobody can open is an assertion). Deduped on
+        (source, target): a second identical link returns the existing one. Returns (link, info) where
+        info says what else the write did: `autoAdded` (the ids put into the case set for it) and
+        `existing` (the link was already there — nothing changed).
+        """
+        source, target = (source or "").strip(), (target or "").strip()
+        if not source or not target:
+            raise ValueError("a link needs a source and a target event id")
+        if source == target:
+            raise ValueError("a link needs two different events")
+        kind = kind if kind in self.EVENT_LINK_KINDS else "related"
+        with self.lock:
+            bad = [x for x in (source, target) if x not in self.event_index]
+            if bad:
+                raise ValueError("not an event in the pool: " + ", ".join(bad))
+            for l in self.event_links:
+                if l.get("source") == source and l.get("target") == target:
+                    return dict(l), {"autoAdded": [], "existing": True}
+            auto = [x for x in (source, target) if x not in self.case_set]
+            for x in auto:
+                self.add_to_case(x, persist=False)
+            link = {"id": f"evl-{uuid.uuid4().hex[:10]}", "source": source, "target": target,
+                    "verb": (verb or "").strip()[:60], "kind": kind, "why": (why or "").strip()[:600],
+                    "ai": bool(ai), "runId": run_id or "", "createdAt": to_iso(datetime.now(UTC))}
+            self.event_links.append(link)
+            self.case_set_rev += 1
+        self.save_meta()
+        return dict(link), {"autoAdded": auto, "existing": False}
+
+    def delete_event_link(self, link_id: str) -> Optional[dict[str, Any]]:
+        """Remove one authored link; returns it (for an undo) or None when there was no such link."""
+        with self.lock:
+            cur = next((l for l in self.event_links if l.get("id") == link_id), None)
+            if cur is None:
+                return None
+            self.event_links = [l for l in self.event_links if l.get("id") != link_id]
+            self.case_set_rev += 1
+        self.save_meta()
+        return dict(cur)
+
+    def restore_event_link(self, link: dict[str, Any]) -> bool:
+        """Put a deleted authored link back exactly as it was (the undo of delete_event_link)."""
+        with self.lock:
+            if any(l.get("id") == link.get("id") for l in self.event_links):
+                return False
+            if link.get("source") not in self.event_index or link.get("target") not in self.event_index:
+                return False
+            self.event_links.append(dict(link))
+            self.case_set_rev += 1
+        self.save_meta()
+        return True
 
     def remove_many_from_case(self, eids: Iterable[str]) -> int:
         """Drop many events from the case set with ONE case.json write."""

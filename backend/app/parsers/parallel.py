@@ -251,6 +251,15 @@ def normalize_batch(parsed: list[ParsedEvent], sid: str, filename: str, family: 
     long_stat: dict[str, list[int]] = {}
     long_off: set[str] = set()
     events: list[Event] = []
+    # `dict.setdefault(v, v)` IS `_shared(v, shared)` - the existing instance when there is one, else
+    # `v` inserted and returned - as one C call instead of a Python frame. Measured on a 30-field
+    # k8s audit line: 55 sharing calls per event, ~14 us of the 91 the field loop cost.
+    share = shared.setdefault
+    # to_iso of the previous event, reused while the timestamp does not move. Consecutive events share
+    # a second on nearly every corpus and the forward-fill above makes the runs longer still; two
+    # aware datetimes that compare equal are the same instant and format to the same UTC string.
+    prev_t: Optional[datetime] = None
+    prev_iso = ""
     for i in range(n):
         pe = parsed[i]
         # release each ParsedEvent as soon as it becomes an Event: holding the parser's output AND the
@@ -259,14 +268,26 @@ def normalize_batch(parsed: list[ParsedEvent], sid: str, filename: str, family: 
         if "parse_error" in pe.fields:
             unmapped += 1
         t = times[i]
+        if t is None:
+            iso = ""
+        elif t == prev_t:
+            iso = prev_iso
+        else:
+            iso = prev_iso = to_iso(t)
+            prev_t = t
         # Shared for the same reason as the fields: a log has a handful of hosts and accounts and it
         # repeats them on every line, and the entities extracted from those lines (addresses, users,
         # domains) repeat just as hard. Each unshared repeat is a fresh string object — ~49 bytes of
         # header before a single character of content.
         # decoded: an account or host taken out of a URL is percent-encoded (normalize.pct_decode)
-        host = _shared(pct_decode(pe.host), shared) if pe.host else ""
-        user = _shared(pct_decode(pe.user), shared) if pe.user else ""
-        ents = [_shared(e, shared) if len(e) <= _SHARE_MAX_LEN else e for e in extract_entities(pe)]
+        host = user = ""
+        if pe.host:
+            host = pct_decode(pe.host)
+            host = share(host, host)
+        if pe.user:
+            user = pct_decode(pe.user)
+            user = share(user, user)
+        ents = [share(e, e) if len(e) <= _SHARE_MAX_LEN else e for e in extract_entities(pe)]
         for ent in (host, user):
             if ent and ent not in ents and ent not in ("-", "—"):
                 ents.append(ent)
@@ -287,16 +308,16 @@ def normalize_batch(parsed: list[ParsedEvent], sid: str, filename: str, family: 
             # line keeps the encoding (normalize.decodes_field / pct_decode)
             if "%" in v and decodes_field(k):
                 v = pct_decode(v)
-            k = _shared(k, shared)
+            k = share(k, k)
             n_v = len(v)
             if n_v <= _SHARE_MAX_LEN:
-                v = _shared(v, shared)
+                v = share(v, v)
             elif n_v <= _SHARE_LONG_MAX_LEN and k not in long_off:
                 # long: shared only while THIS column keeps repeating (`_shared_long`)
                 v = _shared_long(v, k, shared, long_stat, long_off)
             fields[k] = v
         events.append(Event(
-            id="", ts=(to_iso(t) if t is not None else ""), source=family, sourceId=sid, file=filename,
+            id="", ts=iso, source=family, sourceId=sid, file=filename,
             host=host, user=user, msg=pe.msg or pe.raw[:200], sev=infer_severity(pe),  # type: ignore[arg-type]
             raw=pe.raw, fields=fields or None, entities=ents or None,
         ))

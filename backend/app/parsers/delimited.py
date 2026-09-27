@@ -153,10 +153,16 @@ class DelimitedParser(BaseParser):
 
     def _make(self, raw: str, cells: list[str], names: list[str]) -> ParsedEvent:
         fields: dict[str, str] = {}
+        nn = len(names)
+        # the cells as stripped, kept for the message body below so it is not re-stripped per cell
+        stripped: list[str] = []
         for i, cell in enumerate(cells):
-            name = names[i] if i < len(names) else f"field{i + 1}"
+            name = names[i] if i < nn else f"field{i + 1}"
             cell = cell.strip()
-            m = _KV.match(cell)
+            stripped.append(cell)
+            # `_KV` needs an "=" to match at all, and a C substring test is ~10x cheaper than a regex
+            # attempt on the ~90 % of cells that have none
+            m = _KV.match(cell) if "=" in cell else None
             if m and name.startswith(("field", "num")):
                 name = m.group(1)
                 cell = m.group(2)
@@ -184,8 +190,8 @@ class DelimitedParser(BaseParser):
             if b and b.isdigit() and int(b) >= 1_000_000:
                 msg += f" — {_fmt_bytes(int(b))}"
         else:
-            body = [c for i, c in enumerate(cells) if names[i] != ROLE_TIMESTAMP] if len(names) >= len(cells) else cells
-            msg = " ".join(c.strip() for c in body)[:300]
+            body = [c for i, c in enumerate(stripped) if names[i] != ROLE_TIMESTAMP] if nn >= len(cells) else stripped
+            msg = " ".join(body)[:300]
         sev = None
         if action.lower() in ("deny", "drop", "reject", "block", "denied", "blocked"):
             sev = "low"

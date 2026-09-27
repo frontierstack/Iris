@@ -840,10 +840,53 @@ interface CaseSetResponse { entries:CaseSetEntry[]; events:Event[] /*resolved, s
   API-call hosts), `session` (logon id), `address` (destination IP). For each value the link runs to the
   most recent earlier carrier, so a recurring value is a chain. Absent from an older server: the screen
   then falls back to guessing from `action.actor` and `entities`.
+  THE CAUSAL PREFERENCE (2026-09-27): `rel` also includes `lateral` (kind `actor` — a logon / share
+  access on host B from host A, tied to A's connection to B, else to the latest activity on A; the
+  source host is learned from `WorkstationName`, Sysmon 3 `SourceIp`/`DestinationHostname`, or the
+  connection that reached this host's own address), `in-session` (kind `actor` — a command, privilege or
+  persistence in the logon session an earlier LOGON opened, by logon id, or — only when nothing else
+  linked the event — by the same user's latest logon on that host), `filename` (a file matched by NAME
+  when no path matched: a proxy download names no path), and `account-move` (an account whose latest
+  activity was on another host, only when nothing else linked the logon). `executed` now also fires
+  for a command line, a service `ImagePath`, a scheduled task `<Command>` or a Run key's data that names
+  a file an earlier event wrote or downloaded. Security 4688 PIDs (hex) are matched against Sysmon's
+  decimal ones. Rank order: spawned 0, executed 1, same-process 2, injected 3, lateral 4, in-session 5,
+  hash 6, file 7, filename 8, resolved 9, domain 10, session 11, account-move 12, address 13.
+  Each `ReplayEvent` also carries `story` (one line, actor → verb → object, e.g. `WINWORD.EXE (pid 3320)
+  spawned powershell.exe (pid 4412) on WS01`), `linked` (`{from, rel, kind, why}` — the most specific
+  incoming link, i.e. the event's cause on the map — or null) and `threadStart` (a sentence saying WHY
+  nothing ties the event to an earlier one — the first event, a raw source, nothing shared / first
+  activity on host X — or `''` when it is linked). Every event is therefore either linked with a stated
+  reason or a stated thread start; nothing is silently unlinked. Top level `threadStarts` counts them.
+  Action kinds also include `share` (5140/5145), `mail` (parsers/eml) and finer `access` verbs
+  (`RDP logon`, `network logon`, `session opened`, `Kerberos TGT requested`, `NTLM authentication`),
+  Sysmon 7/8/10/15/17/18 and Security 4634/4647/4657/4663/4699/4702/4719/4722/4724/4738/4740/4756/4768/
+  4769/4771/4776/5140/5145/4103, nginx access rows (`web`, `GET request → 200`, path as object) and k8s
+  audit rows (`cloud`, `k8s create pods`).
+  AUTHORED EVENT LINKS ride along: `links` also contains `{a, b, rel:'authored', kind:'authored',
+  rank:-1, label:<verb>, detail:<verb>: <why>, id, source, target, linkKind:'causal'|'related', ai}` for
+  every `EventLink` whose ends are both stamped timeline events (`a` is the one that plays first), and
+  `eventLinks: EventLink[]` is the case's whole list. Rank −1 means an authored link outranks every
+  inferred one for the same pair and is the event's `linked` cause.
   Top level also carries `version` (the pool version it was built at), `missing` (entries whose event is
   not in the pool yet), `rawEvents`, `awaiting` (raw events whose source is queued/enriching right now),
   `poolLoading`, and `complete` (`!poolLoading && !missing && !rawEvents`) — while it is false the answer
   will change and the screen asks again.
+- Authored event links — a case-level relation between two case-set events, by event id, either end
+  from any source file (`Store.event_links`, persisted in `case.json` beside `graph_links`):
+  ```ts
+  interface EventLink { id:string; source:string; target:string; verb:string; kind:'causal'|'related'; why:string;
+                        ai:boolean; runId:string; createdAt:string }
+  ```
+  - `GET    /api/case-set/links` → `{links: EventLink[]}`
+  - `POST   /api/case-set/links` body `{sourceEventId, targetEventId, why, verb?, kind?}` →
+    `{link: EventLink, autoAdded: string[], existing: boolean}`. Both ends must be real events in the pool
+    (400 naming the bad id); an end not yet in the case set is ADDED to it (`autoAdded`); the same
+    (source, target) twice returns the existing link with `existing:true`. 409 with no active case.
+  - `DELETE /api/case-set/links/{id}` → `{ok:true}` (404 when there is no such link).
+  The assistant writes the same thing through `link_events` (one or many) / `delete_event_link`
+  (`writes=True`, `ai:true` + run id, undoable via `POST /api/ai/runs/{id}/undo` — the undo also removes
+  the case-set entries the write auto-added, when they are still unannotated).
 - `Case.caseSet: CaseSetEntry[]` replaces `Case.pinned`; `Event.inCase:boolean` + `Event.labels:string[]` are set on
   every event the case set contains, so lists can render membership without a second request.
 

@@ -104,10 +104,24 @@ class CsvParser(BaseParser):
         def rows_from(chunk: Iterable[str]) -> Iterator[ParsedEvent]:
             # feed a csv.reader line by line so `raw` stays the physical line (multi-line quoted cells are rejoined)
             pending = ""
+            # a line shorter than the reader's field limit cannot hold a field it would refuse
+            fast_max = _csv.field_size_limit()
             for line in chunk:
                 l = line.rstrip("\r\n")
-                if not l.strip() and not pending:
-                    continue
+                if not pending:
+                    if not l.strip():
+                        continue
+                    # A line with no quote character and no NUL is exactly what csv.reader would
+                    # hand back from `str.split`: nothing to quote, nothing to double, no
+                    # escapechar in the dialect, and skipinitialspace is off. NUL is excluded
+                    # because the container's Python (3.10) refuses it with "line contains NUL",
+                    # which the slow path turns into an accumulating `pending` - the fast path must
+                    # not answer where the reader would have raised. Measured: a StringIO + reader +
+                    # next() per line was ~4 us of a 46 us row. `tests/test_parse_speed.py` fuzzes
+                    # both paths against each other, quotes and NULs included.
+                    if '"' not in l and "\x00" not in l and len(l) < fast_max:
+                        yield roles.event(l, l.split(d))
+                        continue
                 pending = (pending + "\n" + l) if pending else l
                 try:
                     cells = next(_csv.reader(io.StringIO(pending), delimiter=d))

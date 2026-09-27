@@ -1349,10 +1349,21 @@ def _count_by(rows: list[Any], field: str) -> tuple[list[tuple[str, int]], int]:
     clipped, empty values dropped, sorted by count descending then by the shown value, ties left in
     first-seen order by a stable sort - and `tests/test_ai_source_profile_fast.py` holds the two
     against each other. Anything that needs first/last keeps calling `_aggregate`.
+
+    Two more things are in C here than the first version had, and `tests/test_ai_tool_speed.py`
+    pins both against `_aggregate` on randomised rows:
+      * a PARSED field is counted with `Counter(map(get, map(fields, rows)))` - no generator, no
+        per-event `if` - and the two empties (`None`, `""`) are popped off the Counter afterwards,
+        which is the same filter `v not in (None, "")` applied once per distinct value instead of
+        once per event. A non-string value (an int a parser left in) is `str()`'d after counting,
+        merging with any string spelling of it exactly as `str(v)` per event did;
+      * the sort has no key function: value ascending, then count descending, both stable and both
+        `itemgetter` - which is the (-count, value) order because a stable sort keeps the earlier
+        pass's order within a tie. Measured on 32,178 rows and a 30,000-value column: 74 -> 50 ms.
     """
     from collections import Counter
     from itertools import chain
-    from operator import attrgetter
+    from operator import attrgetter, itemgetter, methodcaller
     if field in _COUNT_ATTRS:
         c: Any = Counter(map(attrgetter(field), rows))
     elif field == "detection":
@@ -1360,8 +1371,17 @@ def _count_by(rows: list[Any], field: str) -> tuple[list[tuple[str, int]], int]:
     elif field == "entity":
         c = Counter(chain.from_iterable(map(attrgetter("entities"), rows)))
     else:
-        c = Counter(str(v) for v in (e.fields.get(field) for e in rows) if v not in (None, ""))
-    ordered = sorted(((_s(v, 200), n) for v, n in c.items() if v), key=lambda g: (-g[1], g[0]))
+        c = Counter(map(methodcaller("get", field), map(attrgetter("fields"), rows)))
+        c.pop(None, None)
+        c.pop("", None)
+        if any(not isinstance(k, str) for k in c):
+            merged: Any = Counter()
+            for k, n in c.items():
+                merged[str(k)] += n
+            c = merged
+    ordered = [(_s(v, 200), n) for v, n in c.items() if v]
+    ordered.sort(key=itemgetter(0))
+    ordered.sort(key=itemgetter(1), reverse=True)
     return ordered, len(ordered)
 
 
@@ -2061,11 +2081,14 @@ def _entity_profile(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
     rows = res["rows"]
 
     facets: dict[str, Any] = {}
+    # `_count_by`, not `_aggregate`: value and count are all this reads, and `_aggregate` keeps a
+    # first/last timestamp per group per event in Python (see `_count_by`'s note, and `source_profile`,
+    # where the same swap was measured 306 -> 25 ms at 150,000 rows).
     for field in ("source", "file", "host", "user", "sev", "detection"):
-        groups, distinct, _missing = _aggregate(rows, field)
+        groups, distinct = _count_by(rows, field)
         if groups:
             facets[field] = {"distinct": distinct,
-                             "top": [{"value": g["value"], "count": g["count"]} for g in groups[:8]]}
+                             "top": [{"value": v, "count": n} for v, n in groups[:8]]}
 
     # The graph half: typed relations to other entities, which no amount of searching produces.
     #
@@ -2127,11 +2150,11 @@ def _entity_profile(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
     try:
         raw_sources = _uninterpreted_sources()
         mention = _matching({**args, "query": f'"{value}"', "scope": scope})
-        m_groups, _d, _m = _aggregate(mention["rows"], "source")
+        m_groups, _d = _count_by(mention["rows"], "source")
         coverage = {
             "exactEntityMatches": res["total"],
             "textMentions": mention["total"],
-            "mentionsBySource": [{"value": g["value"], "count": g["count"]} for g in m_groups[:12]],
+            "mentionsBySource": [{"value": v, "count": n} for v, n in m_groups[:12]],
             "mentionQuery": f'"{value}"',
         }
         if raw_sources:
@@ -2499,20 +2522,21 @@ def _entity_row(value: str, args: dict[str, Any], samples: int) -> dict[str, Any
     rows = exact["rows"]
     row: dict[str, Any] = {"value": value, "extractedEvents": exact["total"]}
     if rows:
-        srcs, _n, _m = _aggregate(rows, "source")
-        hosts, _n, _m = _aggregate(rows, "host")
-        users, _n, _m = _aggregate(rows, "user")
-        sevs, _n, _m = _aggregate(rows, "sev")
-        dets, ndet, _m = _aggregate(rows, "detection")
+        # value + count only, so the one-C-pass `_count_by` rather than `_aggregate` (see `_count_by`)
+        srcs, _n = _count_by(rows, "source")
+        hosts, _n = _count_by(rows, "host")
+        users, _n = _count_by(rows, "user")
+        sevs, _n = _count_by(rows, "sev")
+        dets, ndet = _count_by(rows, "detection")
         stamped = [e.ts for e in rows if e.ts]
         row.update({
             "first": min(stamped) if stamped else None,
             "last": max(stamped) if stamped else None,
-            "sources": [{"value": g["value"], "count": g["count"]} for g in srcs[:4]],
-            "hosts": [{"value": g["value"], "count": g["count"]} for g in hosts[:4]],
-            "users": [{"value": g["value"], "count": g["count"]} for g in users[:4]],
-            "severity": {g["value"]: g["count"] for g in sevs},
-            "detections": [{"ruleId": g["value"], "count": g["count"]} for g in dets[:4]],
+            "sources": [{"value": v, "count": n} for v, n in srcs[:4]],
+            "hosts": [{"value": v, "count": n} for v, n in hosts[:4]],
+            "users": [{"value": v, "count": n} for v, n in users[:4]],
+            "severity": dict(sevs),
+            "detections": [{"ruleId": v, "count": n} for v, n in dets[:4]],
             "detectionRules": ndet,
             "sampleEventIds": [e.id for e in rows[:samples]],
         })
@@ -2643,10 +2667,10 @@ def _find_related_events(args: dict[str, Any], ctx: RunContext) -> dict[str, Any
     others = [e for e in rows if e.id not in seed_ids]
 
     def top(field: str, n: int = 6) -> list[dict[str, Any]]:
-        groups, _d, _m = _aggregate(others, field)
-        return [{"value": g["value"], "count": g["count"]} for g in groups[:n]]
+        groups, _d = _count_by(others, field)          # value + count only: see `_count_by`
+        return [{"value": v, "count": n_} for v, n_ in groups[:n]]
 
-    co, n_co, _m = _aggregate(others, "entity")
+    co, n_co = _count_by(others, "entity")
     pivot_set = set(pivots)
     limit = _int(args, "limit", 8, 0, 25)
     step = max(1, len(others) // limit) if limit and len(others) > limit else 1
@@ -2658,10 +2682,9 @@ def _find_related_events(args: dict[str, Any], ctx: RunContext) -> dict[str, Any
         "query": query,
         "relatedEvents": max(0, res["total"] - len(seed_ids & {e.id for e in rows})),
         "bySource": top("source"), "byHost": top("host"), "byUser": top("user"),
-        "bySeverity": {g["value"]: g["count"] for g in (_aggregate(others, "sev")[0])},
+        "bySeverity": dict(_count_by(others, "sev")[0]),
         "byDetection": top("detection", 5),
-        "coOccurringEntities": [{"value": g["value"], "count": g["count"]}
-                                for g in co if g["value"] not in pivot_set][:12],
+        "coOccurringEntities": [{"value": v, "count": n} for v, n in co if v not in pivot_set][:12],
         "distinctCoOccurring": max(0, n_co - len(pivot_set)),
         "timeline": _histogram(others, "auto", 24) if others else None,
         "sampleEventIds": [e.id for e in picked],
@@ -3803,6 +3826,125 @@ def _as_link(item: Any) -> Optional[dict[str, Any]]:
     return out
 
 
+# ------------------------------------------------------------------ authored EVENT links (replay)
+# "The model should be able to make links for events that are clearly related to each other so that
+# linkage shows in the replay, spanning across multiple logs." A graph link ties two ENTITIES; this ties
+# two EVENTS of the case timeline — the proxy row that fetched the file and the Sysmon row that ran it,
+# from two different logs — with a verb and a sentence. The replay draws it dashed (authored = what
+# someone concluded, the graph's own convention) and lets it outrank the inferred link for that pair.
+# Both ends must be real events (refused by id, like a citation); an end not yet in the case set is
+# added to it and the result says so. Deduped on (source, target). Reversible per run.
+_EVENT_LINK_KEYS = {"sourceEventId": ("sourceEventId", "source", "from", "a"),
+                    "targetEventId": ("targetEventId", "target", "to", "b")}
+
+
+def _event_link_spec(item: Any) -> Optional[dict[str, Any]]:
+    """One link from an object, or from `e12 -> e15 | spawned | why` (the pipe form small models can type)."""
+    if isinstance(item, str) and item.strip():
+        head, *rest = [p.strip() for p in item.split("|")]
+        ends = [p.strip() for p in re.split(r"->|→", head)]
+        if len(ends) != 2:
+            return None
+        out: dict[str, Any] = {"sourceEventId": ends[0], "targetEventId": ends[1]}
+        if rest:
+            out["verb"] = rest[0]
+        if len(rest) > 1:
+            out["why"] = " | ".join(rest[1:])
+        return out
+    if not isinstance(item, dict):
+        return None
+    out = dict(item)
+    for want, keys in _EVENT_LINK_KEYS.items():
+        for k in keys:
+            if item.get(k):
+                out[want] = str(item[k]).strip()
+                break
+    return out
+
+
+@tool("link_events",
+      "LINK TWO TIMELINE EVENTS that you have established are related — especially ACROSS LOGS (the proxy "
+      "row that fetched a file and the Sysmon row that ran it; the RDP connection on one host and the 4624 "
+      "on the other; a DNS answer and the connection to it). The replay draws the link with your verb and "
+      "why, ahead of anything Iris inferred. One or many in one call: `links: [{sourceEventId, "
+      "targetEventId, verb, kind, why}]` — kind 'causal' (source CAUSED target) or 'related'. Both ids "
+      "must be real events; an end not yet in the case set is added to it (the result says which). "
+      "Reversible.",
+      {"links": {"type": "array", "items": {"type": "object"},
+                 "description": "[{sourceEventId, targetEventId, verb?: 'spawned'|'downloaded'|'logged on from'|'exfiltrated to'|…, "
+                                "kind?: 'causal'|'related', why: one sentence}] — or 'e12 -> e15 | verb | why' strings"},
+       "sourceEventId": {"type": "string", "description": "single-link form: the earlier / causing event"},
+       "targetEventId": {"type": "string", "description": "single-link form: the later / caused event"},
+       "verb": {"type": "string", "description": "single-link form"},
+       "kind": {"type": "string", "description": "single-link form: causal | related"},
+       "why": {"type": "string", "description": "single-link form: the evidence, in one sentence"}},
+      [], writes=True)
+def _link_events(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
+    _budget(ctx)
+    _require_case("an event link")
+    store = _store()
+    raw = args.get("links")
+    items = raw if isinstance(raw, list) else []
+    if not items and (args.get("sourceEventId") or args.get("source")):
+        items = [args]
+    specs = [s for s in (_event_link_spec(x) for x in items) if s]
+    if not specs:
+        raise ToolError("link_events needs `links: [{sourceEventId, targetEventId, why, verb?, kind?}]` (or one link "
+                        "as top-level sourceEventId / targetEventId / why) — nothing usable arrived")
+    if len(specs) > 60:
+        raise ToolError("at most 60 links per call")
+    ok: list[dict[str, Any]] = []
+    refused: list[dict[str, str]] = []
+    auto_added: list[str] = []
+    existing = 0
+    for sp in specs:
+        why = _prose(sp.get("why"), 600).strip()
+        s, t = str(sp.get("sourceEventId") or ""), str(sp.get("targetEventId") or "")
+        if not why:
+            refused.append({"source": s, "target": t, "reason": "no `why` — say in one sentence what ties them"})
+            continue
+        kind = str(sp.get("kind") or "related").strip().lower()
+        if kind not in ("causal", "related"):
+            kind = "causal" if sp.get("verb") else "related"
+        try:
+            link, info = store.add_event_link(s, t, why, _s(sp.get("verb"), 60).strip(), kind, ai=True, run_id=ctx.run_id)
+        except ValueError as ex:
+            refused.append({"source": s, "target": t, "reason": str(ex)})
+            continue
+        if info["existing"]:
+            existing += 1
+            continue
+        auto_added += info["autoAdded"]
+        ok.append(link)
+    if not ok and refused:
+        raise ToolError("no link was written: " + "; ".join(f"{r['source']} -> {r['target']}: {r['reason']}" for r in refused[:6]))
+    action = None
+    if ok:
+        action = ctx.record("link_events", f"linked {len(ok)} pair(s) of timeline events" +
+                            (f", adding {len(auto_added)} event(s) to the case set for it" if auto_added else ""),
+                            {"kind": "event_link", "linkIds": [l["id"] for l in ok], "autoAdded": auto_added})
+    return {"ok": True, "links": ok, "linked": len(ok), "alreadyThere": existing, "autoAddedToCaseSet": auto_added,
+            "refused": refused, "action": action,
+            "note": ("Shown on the case timeline's Replay as dashed, authored links with your verb." +
+                     (" Refused links are listed with the reason — an unknown event id is never linked." if refused else ""))}
+
+
+@tool("delete_event_link",
+      "Remove an authored event link (yours or the analyst's — give the reason in `why`). Reversible.",
+      {"linkId": {"type": "string"}, "why": {"type": "string"}}, ["linkId"], writes=True)
+def _delete_event_link(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
+    _budget(ctx)
+    _require_case("an event link")
+    lid = _s(args.get("linkId"), 80).strip()
+    before = _store().delete_event_link(lid)
+    if before is None:
+        raise ToolError(f"no event link {lid!r} — list them with get_case_set (eventLinks)")
+    action = ctx.record("delete_event_link", f"removed event link {lid} ({before.get('verb') or before.get('kind')})"
+                        + (f": {_prose(args.get('why'), 200)}" if args.get("why") else ""),
+                        {"kind": "event_link_deleted", "before": before})
+    return {"ok": True, "linkId": lid, "action": action}
+
+
 @tool("build_case_graph",
       "BUILD THE INVESTIGATION GRAPH — the picture of how the things you found connect, drawn in ONE "
       "call. Pass every link you want: each is {source, target, relation, why, citedEventIds, "
@@ -4426,7 +4568,11 @@ def _get_case_set(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
         rows.append({"eventId": e.eventId, "labels": e.labels, "note": _s(e.note, 400), "addedAt": e.addedAt,
                      "ts": ev.ts if ev else None, "sev": ev.sev if ev else None,
                      "source": ev.source if ev else "", "msg": _s(ev.msg, 200) if ev else ""})
-    return {"total": len(entries), "shown": len(rows), "labels": store.case_labels(), "entries": rows}
+    with store.lock:
+        ev_links = [dict(l) for l in getattr(store, "event_links", [])]
+    return {"total": len(entries), "shown": len(rows), "labels": store.case_labels(), "entries": rows,
+            # the authored links between these events (link_events / delete_event_link)
+            "eventLinks": ev_links[:60], "eventLinkCount": len(ev_links)}
 
 
 @tool("list_graph_links",
@@ -5083,6 +5229,23 @@ def undo_action(action: dict[str, Any]) -> bool:
             if store.add_to_case(eid, list(before.get("labels") or []), str(before.get("note") or "")) is not None:
                 changed = True
         return changed
+    if kind == "event_link":
+        # The links go, and so do the case-set entries the write added for them — while they are still
+        # the bare entries it made (no labels, no note): an entry the analyst has since annotated stays.
+        ids = {str(x) for x in (undo.get("linkIds") or [])}
+        removed = 0
+        for lid in ids:
+            if store.delete_event_link(lid) is not None:
+                removed += 1
+        auto = [str(x) for x in (undo.get("autoAdded") or [])]
+        if auto:
+            with store.lock:
+                bare = [x for x in auto if x in store.case_set and not store.case_set[x].labels and not store.case_set[x].note]
+            if bare:
+                store.remove_many_from_case(bare)
+        return removed > 0
+    if kind == "event_link_deleted":
+        return store.restore_event_link(dict(undo.get("before") or {}))
     if kind == "graph_link_deleted":
         before = dict(undo.get("before") or {})
         lid = str(before.get("id") or "")

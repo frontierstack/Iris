@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Optional
@@ -13,6 +14,15 @@ from dateutil import tz as dttz
 from .parsers.base import ParsedEvent
 
 UTC = timezone.utc
+
+# The `regex` module is a pinned requirement (rules.py runs the sandbox on it) and its charset scan is
+# 3-7x faster than `re`'s on the one pattern that runs over EVERY raw line at ingest (see
+# `ipv4_findall`). Guarded like every optional import here: without it the `re` spelling of the same
+# pattern is used and the answer is the same, only slower.
+try:  # pragma: no cover - depends on the environment
+    import regex as _regex
+except ImportError:  # pragma: no cover
+    _regex = None
 
 # ---------------------------------------------------------------- timestamps
 
@@ -41,6 +51,39 @@ _KIBANA_RE = re.compile(
 # count in `epoch_to_datetime`, never by magnitude guessing past that.
 _EPOCH_RE = re.compile(r"^(\d{10}|\d{13}|\d{16}|\d{19})(\.\d+)?$")
 _MONTHS = {m: i + 1 for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"])}
+# "08/21/2024 1:14 pm", "21/08/2024 10:14:02" - the Windows / Excel / US export shape, and the one common
+# stamp that had NO fast path: it fell all the way to dateutil at ~150 us a call, i.e. ~40 % of a plain
+# text parse whose lines carry it. `_us_datetime` reproduces dateutil's reading of exactly this shape
+# (dayfirst=False: the first number is the month unless it is over 12; a 12-hour clock refuses an hour
+# over 12, `12 am` is midnight, `h pm` adds twelve below noon; an impossible date is a failure) and
+# DEFERS to dateutil for anything it is not certain of (a year under 1000, a first or second number
+# over 31, any other separator). `tests/test_parse_speed.py` fuzzes it against dateutil itself, which
+# is the only oracle that counts here.
+_US_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4}) (\d{1,2}):(\d{2})(?::(\d{2}))?(?: ?([AaPp])[Mm])?$")
+_DEFER = object()
+
+
+def _us_datetime(m: "re.Match[str]"):
+    a, b, y, h, mi, s, ap = m.groups()
+    a, b, y, h, mi = int(a), int(b), int(y), int(h), int(mi)
+    if y < 1000 or a > 31 or b > 31:
+        return _DEFER
+    if a > 12:
+        day, month = a, b
+    else:
+        month, day = a, b
+    if ap is not None:
+        if h > 12:
+            return None
+        if ap in "aA":
+            if h == 12:
+                h = 0
+        elif h < 12:
+            h += 12
+    try:
+        return datetime(y, month, day, h, mi, int(s) if s is not None else 0, tzinfo=UTC)
+    except ValueError:
+        return None
 # "looks like a date" gate for the dateutil fallback. THREE number groups joined by separators, a clock
 # time, or a month name — one separator is not enough, or the version string "1.6" parses as 6 January.
 _DATEISH_RE = re.compile(
@@ -126,12 +169,50 @@ def leading_ts(line: str, cache: Optional[dict] = None) -> str:
     return out
 
 
+_YEAR_CACHE: list = [0, 0.0]        # [year, epoch at which it stops being the current year]
+
+
+def _now_year() -> int:
+    """`datetime.now(UTC).year`, for ~0.1 us instead of ~0.6: re-derived only past the next New Year."""
+    t = time.time()
+    if t >= _YEAR_CACHE[1]:
+        y = datetime.now(UTC).year
+        _YEAR_CACHE[0] = y
+        _YEAR_CACHE[1] = datetime(y + 1, 1, 1, tzinfo=UTC).timestamp()
+    return _YEAR_CACHE[0]
+
+
+# (text, year) -> datetime | None for text that does NOT parse. Consecutive log lines share a second,
+# an export shares a second across dozens of rows, and every parser asks for the same stamp again on
+# every line of it, so on a real corpus most calls are a dict hit (~0.15 us) instead of a regex
+# dispatch plus a datetime construction (~2-3 us) or, for the dateutil fallback, ~150 us. Keyed on the
+# RESOLVED year, because the syslog shape and the dateutil default read it, so a process that crosses
+# New Year cannot serve last year's answer. Two kinds of result are never stored: a stamp `_plausible`
+# refused (that verdict depends on the clock - a stamp two days ahead is refused today and accepted
+# next week) and nothing else; an unparseable string IS stored, because "-" and a header cell repeat
+# as hard as a real stamp. Bounded by clearing: a pool of distinct stamps cannot grow it without limit.
+_TS_MEMO: dict = {}
+_TS_MEMO_MAX = 200_000
+_MISS = object()
+
+
 def parse_ts(text: str, default_year: Optional[int] = None) -> Optional[datetime]:
     """Parse many timestamp formats into an aware UTC datetime. Returns None on failure.
 
     "Failure" INCLUDES a successful parse of something that cannot be a log timestamp — see `_plausible`.
     """
-    return _plausible(_parse_ts_raw(text, default_year))
+    year = default_year or _now_year()
+    key = (text, year)
+    got = _TS_MEMO.get(key, _MISS)
+    if got is not _MISS:
+        return got
+    dt = _parse_ts_raw(text, year)
+    out = _plausible(dt)
+    if dt is None or out is not None:
+        if len(_TS_MEMO) >= _TS_MEMO_MAX:
+            _TS_MEMO.clear()
+        _TS_MEMO[key] = out
+    return out
 
 
 def _parse_ts_raw(text: str, default_year: Optional[int] = None) -> Optional[datetime]:
@@ -185,6 +266,11 @@ def _parse_ts_raw(text: str, default_year: Optional[int] = None) -> Optional[dat
     m = _EPOCH_RE.match(text)
     if m:
         return epoch_to_datetime(m.group(1), m.group(2) or "")
+    m = _US_RE.match(text)
+    if m:
+        dt = _us_datetime(m)
+        if dt is not _DEFER:
+            return dt
     # dateutil is the last resort and by far the loosest: it happily reads "1.6", "2096" or a version
     # string as a date. Require a separator-bearing shape (2026-08-18, 18/08/2026, 08.18.26 …) or a month
     # name before handing it the string at all.
@@ -273,8 +359,34 @@ _LEVEL_MAP = {
     "notice": "low", "info": "info", "information": "info", "informational": "info",
     "debug": "info", "trace": "info", "verbose": "info",
 }
-_KEYWORDS_HIGH = re.compile(r"\b(denied|failed|failure|unauthorized|forbidden|invalid|attack|malware|exploit|breach|compromise|segfault|panic|kill(?:ed)?)\b", re.I)
-_KEYWORDS_MED = re.compile(r"\b(warn(?:ing)?|retry|timeout|timed out|deprecated|refused|throttl|rate.?limit|slow)\b", re.I)
+_KEYWORDS_HIGH_SRC = r"\b(denied|failed|failure|unauthorized|forbidden|invalid|attack|malware|exploit|breach|compromise|segfault|panic|kill(?:ed)?)\b"
+_KEYWORDS_MED_SRC = r"\b(warn(?:ing)?|retry|timeout|timed out|deprecated|refused|throttl|rate.?limit|slow)\b"
+_KEYWORDS_HIGH = re.compile(_KEYWORDS_HIGH_SRC, re.I)
+_KEYWORDS_MED = re.compile(_KEYWORDS_MED_SRC, re.I)
+# The same two alternations WITHOUT re.I, run over `msg.lower()` when `msg` is ASCII. `re.I` on a long
+# alternation is where the time goes (measured here: 8.4 us a search on a 200-char JSON line, 1.2 us
+# case-sensitive over the lowered text). On ASCII text the two are the same question: every pattern
+# letter is lower-case, `str.lower` folds ASCII exactly as re.I does, and no ASCII character folds to
+# or from anything outside ASCII. Non-ASCII text keeps the re.I search - the Kelvin sign and the long s
+# fold onto `k` and `s` under re.I and not under `lower()` (see the DOMAIN_RE lesson in CLAUDE.md), and
+# `str.isascii()` is an O(1) flag read. `tests/test_parse_speed.py` fuzzes the two paths against each other.
+_KEYWORDS_HIGH_L = re.compile(_KEYWORDS_HIGH_SRC)
+_KEYWORDS_MED_L = re.compile(_KEYWORDS_MED_SRC)
+# One literal per alternative that the alternative cannot match without (`fail` covers failed AND
+# failure, `kill` covers kill/killed, `rate` covers rate.?limit). A lowered line containing none of
+# them cannot match the regex, and a dozen C substring tests (~1 us) are cheaper than sre attempting
+# the alternation at 200 positions (~4 us) - which is what a line with no keyword costs, i.e. most
+# lines. Gate-true lines still run the regex, so `\b` is judged exactly as before.
+_KW_HIGH_GATE = ("denied", "fail", "unauthorized", "forbidden", "invalid", "attack", "malware", "exploit",
+                 "breach", "compromise", "segfault", "panic", "kill")
+_KW_MED_GATE = ("warn", "retry", "timeout", "timed out", "deprecated", "refused", "throttl", "rate", "slow")
+
+
+def _any_in(needles: tuple[str, ...], hay: str) -> bool:
+    for w in needles:
+        if w in hay:
+            return True
+    return False
 
 
 def infer_severity(ev: ParsedEvent) -> str:
@@ -303,6 +415,13 @@ def infer_severity(ev: ParsedEvent) -> str:
     if base is not None:
         return base
     text = ev.msg
+    if text.isascii():
+        low = text.lower()
+        if _any_in(_KW_HIGH_GATE, low) and _KEYWORDS_HIGH_L.search(low):
+            return "medium"
+        if _any_in(_KW_MED_GATE, low) and _KEYWORDS_MED_L.search(low):
+            return "low"
+        return "info"
     if _KEYWORDS_HIGH.search(text):
         return "medium"
     if _KEYWORDS_MED.search(text):
@@ -324,11 +443,55 @@ USER_FIELDS = ("user", "user.name", "username", "userName", "TargetUserName", "S
 HOST_FIELDS = ("host", "hostname", "Computer", "computer", "svc", "service", "node", "instance")
 IP_FIELDS = ("src_ip", "src", "dst", "dst_ip", "sourceIPAddress", "IpAddress", "client_ip", "remote_addr", "ip",
              "sourceIPs", "source.ip", "destination.ip", "client.ip", "server.ip")
+# frozensets of the same names: `extract_entities` asks "does this event carry ANY of these?" once per
+# group with `dict.keys().isdisjoint`, instead of one `.get` per name per event (36 lookups on a
+# 20-column CSV whose columns are called "Source IP"). The tuples above still drive the ORDER in which
+# hits are added, so the entity list comes out the same.
+_USER_FIELDS_SET = frozenset(USER_FIELDS)
+_HOST_FIELDS_SET = frozenset(HOST_FIELDS)
+_IP_FIELDS_SET = frozenset(IP_FIELDS)
 
 IOC_FIELDS = ("url", "email", "domain", "onion", "registry_key")
 
 _ENTITY_STOP = {"", "-", "—", "unknown", "none", "null", "n/a", "root?"}
 _KIND_HINTS = {"kind", "type"}
+_POD_SUFFIX_RE = re.compile(r"(-[a-f0-9]{4,10})?(-[a-z0-9]{5})?$")
+
+# ---- IPv4 over a whole raw line, the single largest regex cost of normalization.
+# `IPV4_RE.findall(raw)` runs over every line at ingest and measured 15 us on a 280-char proxy line and
+# 40 us on a 680-char JSON line (~45 % of `extract_entities`). The cost is sre attempting the octet
+# alternation at every position. The same set of matches falls out of a plain dotted-quad scan plus a
+# Python check of the octet grammar, because BOTH patterns can only match a maximal digit run: an
+# octet followed by another digit fails `\.`, and the trailing `(?![\d.])` refuses a run longer than
+# three digits. So the spans agree, and the only thing the alternation adds is the VALUE grammar
+# (`25[0-5]|2[0-4]\d|1?\d?\d`: any 1-2 digits, or 100-255), which `_octets_ok` reproduces.
+#
+# `[0-9]` stands in for `\d` only because the fast path is taken for ASCII text alone: `\d` also
+# matches Unicode digits, and a line carrying one goes through the original pattern untouched.
+# `tests/test_parse_speed.py` fuzzes `ipv4_findall` against `IPV4_RE.findall`.
+_IPV4_FAST_SRC = r"(?<![0-9.])([0-9]{1,3}(?:\.[0-9]{1,3}){3})(?![0-9.])"
+_IPV4_FAST = (_regex.compile(_IPV4_FAST_SRC) if _regex is not None else re.compile(_IPV4_FAST_SRC))
+_IPV4_FAST_FINDALL = _IPV4_FAST.findall
+
+
+def _octets_ok(quad: str) -> bool:
+    for o in quad.split("."):
+        if len(o) == 3 and not (o[0] == "1" or "200" <= o <= "255"):
+            return False
+    return True
+
+
+def ipv4_findall(text: str) -> list[str]:
+    """Exactly `IPV4_RE.findall(text)`, several times faster on a long ASCII line.
+
+    Below ~40 characters (a field VALUE - one address, an address:port) the original is the faster
+    one: measured 0.57 us against 1.42 for the fast path, whose isascii + listcomp + octet check
+    outweigh the scan it saves. Long text is where the scan dominates (4.5 us against 41 on a
+    680-char JSON line), so the switch is on length, and both branches answer the same.
+    """
+    if len(text) < 40 or not text.isascii():
+        return IPV4_RE.findall(text)
+    return [q for q in _IPV4_FAST_FINDALL(text) if _octets_ok(q)]
 
 
 # Both of these are asked the same few thousand questions over and over — the detection pass alone
@@ -391,37 +554,44 @@ def decodes_field(key: str) -> bool:
 def extract_entities(ev: ParsedEvent) -> list[str]:
     """Return an ordered, de-duplicated list of entity names for an event."""
     found: list[str] = []
+    seen: set[str] = set()      # mirrors `found` so membership is a hash lookup, not a list scan
+    fields = ev.fields
+    keys = fields.keys()
 
     def add(x: str) -> None:
         x = x.strip()
-        if x and x.lower() not in _ENTITY_STOP and x not in found and len(x) <= 128:
+        if x and x not in seen and len(x) <= 128 and x.lower() not in _ENTITY_STOP:
+            seen.add(x)
             found.append(x)
 
-    for f in IP_FIELDS:
-        v = ev.fields.get(f)
-        if v:
-            for ip in IPV4_RE.findall(v):
-                add(ip)
-            for ip in IPV6_RE.findall(v):
-                if not ip.startswith("::"):
+    if not keys.isdisjoint(_IP_FIELDS_SET):
+        for f in IP_FIELDS:
+            v = fields.get(f)
+            if v:
+                for ip in ipv4_findall(v):
                     add(ip)
+                for ip in IPV6_RE.findall(v):
+                    if not ip.startswith("::"):
+                        add(ip)
     text = ev.raw if len(ev.raw) < 4000 else ev.raw[:4000]
-    for ip in IPV4_RE.findall(text):
+    for ip in ipv4_findall(text):
         if ip not in ("0.0.0.0", "127.0.0.1", "255.255.255.255"):
             add(ip)
     # users and hosts decoded (see pct_decode): an account out of a URL is `name%40domain`
     if ev.user:
         add(pct_decode(ev.user))
-    for f in USER_FIELDS:
-        v = ev.fields.get(f)
-        if v and len(v) < 64 and " " not in v:
-            add(pct_decode(v))
+    if not keys.isdisjoint(_USER_FIELDS_SET):
+        for f in USER_FIELDS:
+            v = fields.get(f)
+            if v and len(v) < 64 and " " not in v:
+                add(pct_decode(v))
     if ev.host:
         add(pct_decode(ev.host))
-    for f in HOST_FIELDS:
-        v = ev.fields.get(f)
-        if v and len(v) < 64 and " " not in v:
-            add(pct_decode(v))
+    if not keys.isdisjoint(_HOST_FIELDS_SET):
+        for f in HOST_FIELDS:
+            v = fields.get(f)
+            if v and len(v) < 64 and " " not in v:
+                add(pct_decode(v))
     # Both of these scan the WHOLE raw line, on every event, at ingest. Neither is case-insensitive
     # and each has a mandatory literal prefix, so a line without it cannot match - and `in` is a C
     # memmem while `findall` is Python re retrying at every position. Measured on an ordinary
@@ -433,18 +603,18 @@ def extract_entities(ev: ParsedEvent) -> list[str]:
     if "SHA256:" in text:
         for k in KEYFP_RE.findall(text):
             add(k)
-    pod = ev.fields.get("pod") or ev.fields.get("objectRef.name") or ev.fields.get("kubernetes.pod_name")
+    pod = fields.get("pod") or fields.get("objectRef.name") or fields.get("kubernetes.pod_name")
     if pod:
         add(pod)
-        base = re.sub(r"(-[a-f0-9]{4,10})?(-[a-z0-9]{5})?$", "", pod)
+        base = _POD_SUFFIX_RE.sub("", pod)
         if base and base != pod:
             add(base)
-    pid = ev.fields.get("pid") or ev.fields.get("process.pid")
-    if pid and pid.isdigit() and ev.fields.get("program"):
-        add(f"{ev.fields['program']}[{pid}]")
+    pid = fields.get("pid") or fields.get("process.pid")
+    if pid and pid.isdigit() and fields.get("program"):
+        add(f"{fields['program']}[{pid}]")
     # IOC-style fields produced by the strings / document parsers (comma-joined lists)
     for f in IOC_FIELDS:
-        v = ev.fields.get(f)
+        v = fields.get(f)
         if v:
             for item in v.split(",")[:5]:
                 add(item)

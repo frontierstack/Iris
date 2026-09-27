@@ -240,13 +240,25 @@ interface Item {
   ents: string[];         // the SPECIFIC entities it carries (file, process, hash, domain, address)
   allEnts: string[];      // ...plus its host and account, for the footprint
   raw: boolean;           // its source is not interpreted yet
+  /** the server's one-line story (actor → verb → object), '' from an older server */
+  story: string;
+  /** its cause on the map (the most specific incoming link), or null */
+  linked: { from: string; rel: string; kind: string; why: string } | null;
+  /** why nothing ties it to an earlier event ('' when linked) */
+  threadStart: string;
+  /** the AUTHORED links touching it: `in` = an earlier event points here, `out` = this points on */
+  authored: { dir: 'in' | 'out'; other: string; label: string; why: string }[];
 }
 /** One node per EVENT: every event on the timeline is drawn on the map. */
-interface MapNode { key: string; role: string; value: string; verb: string; t: number; first: number; lane: number; host: string }
+interface MapNode {
+  key: string; role: string; value: string; verb: string; t: number; first: number; lane: number; host: string;
+  /** the story line and the thread-start reason, shown on the focused node's plate */
+  story: string; threadStart: string;
+}
 /** `actor`: b was done BY a's process (spawned, wrote, loaded, connected); `shared`: they touched the
  *  same thing. `label` is the reason in two or three words, drawn on the line; `detail` the sentence. */
 interface MapEdge {
-  a: string; b: string; at: number; kind: 'actor' | 'shared'; label: string; detail: string;
+  a: string; b: string; at: number; kind: 'actor' | 'shared' | 'authored'; label: string; detail: string;
   /** b is a NEW thing a produced (a spawned process, a file it ran): the layout puts it one column right */
   step: boolean;
   /** lower = more specific; the layout builds its tree from the most specific link into each event */
@@ -438,8 +450,11 @@ function serverEdges(links: ReplayLink[], out: Item[]): MapEdge[] {
     const k = edgeKey(l.a, l.b);
     if (seen.has(k)) continue;
     seen.add(k);
+    // A NEW THING the source produced — or a new HOST it reached, or a pair the analyst called causal —
+    // sits one column to the right; everything else stacks under what it continues.
     edges.push({ a: l.a, b: l.b, at: ib, kind: l.kind, label: l.label, detail: l.detail,
-      step: l.rel === 'spawned' || l.rel === 'executed', rank: l.rank });
+      step: l.rel === 'spawned' || l.rel === 'executed' || l.rel === 'lateral' || (l.rel === 'authored' && l.linkKind === 'causal'),
+      rank: l.rank });
   }
   // Most specific first: the layout takes the FIRST link into each event as the one it builds from.
   return edges.sort((p, q) => p.rank - q.rank || p.at - q.at);
@@ -454,6 +469,18 @@ const MAP_EMPTY_H = 120;
 /** The geometry the layered layout works in (utils/replayLayout.ts). The column gap holds the trunks
  *  that carry a process's links to its children, and a reason plate on the one in focus. */
 const LAYOUT = { nodeW: NODE_W, nodeH: NODE_H, colGap: 84, rowGap: 18, pad: 12, head: 26, blockGap: 26 };
+/** DENSE cards: the same layout with a 30px card (title + one line) and a tighter pitch. Used when the
+ *  full-size map would run taller than the viewport, so the whole picture stays on screen — "the
+ *  replay node area is making the list very long vertically, which is hard to see everything". The
+ *  analyst can pin either mode (`iris.replay.mapDense`: auto | on | off). */
+const DENSE_H = 30;
+/** ...and a narrower card, so a wide window holds one more column before a chain has to wrap. */
+const DENSE_W = 156;
+const DENSE_LAYOUT = { nodeW: DENSE_W, nodeH: DENSE_H, colGap: 60, rowGap: 8, pad: 10, head: 22, blockGap: 18 };
+const DENSE_KEY = 'iris.replay.mapDense';
+type DenseMode = 'auto' | 'on' | 'off';
+/** Above this natural height the map goes dense (auto mode): about two thirds of the window. */
+const denseCap = () => Math.max(420, Math.round((typeof window !== 'undefined' ? window.innerHeight : 900) * 0.64));
 /** How an event is drawn, by what it DID. Hues are the entity graph's, plus the level colours for the
  *  actions an analyst must not miss (a deletion, persistence, a cleared log, a failed sign-in). */
 const ACTION_META: Record<string, { tag: string; glyph: string; hue: string }> = {
@@ -477,6 +504,8 @@ const ACTION_META: Record<string, { tag: string; glyph: string; hue: string }> =
   injection: { tag: 'injection', glyph: 'IN', hue: 'var(--sev-high)' },
   api: { tag: 'api call', glyph: 'A', hue: '#c98a5f' },
   alert: { tag: 'alert', glyph: '!', hue: 'var(--sev-high)' },
+  share: { tag: 'share', glyph: 'S', hue: '#a58fd8' },
+  mail: { tag: 'mail', glyph: 'M', hue: '#6f9fd8' },
   event: { tag: 'event', glyph: '•', hue: 'var(--muted)' },
 };
 
@@ -527,12 +556,27 @@ const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, curren
   const chosen = hover != null || pinned != null;
   const toggle = (key: string) => onHold(pinned === key ? null : key);
   // Over EVERY event, not the reached ones: that is what keeps a node where it first appeared.
-  const L = useMemo(() => layoutReplay(
-    nodes.map((n) => ({ key: n.key, first: n.first, host: n.host })),
+  const [denseMode, setDenseMode] = useState<DenseMode>(() => stored(DENSE_KEY, (v) => (v === 'on' || v === 'off' || v === 'auto' ? v : undefined), 'auto'));
+  const { L, dense } = useMemo(() => {
+    const ln = nodes.map((n) => ({ key: n.key, first: n.first, host: n.host }));
     // An actor link to the process's OWN activity ('then') keeps it under the process; one to a thing
     // it produced (spawned, wrote, loaded, connected to) moves that thing to the next column.
-    edges.map((ed) => ({ a: ed.a, b: ed.b, kind: ed.kind, step: ed.step })),
-    { ...LAYOUT, avail: avail - 2 * MAP_PAD }), [nodes, edges, avail]);
+    // An AUTHORED link is placed like the relation it asserts: causal = next column, related = below.
+    const le = edges.map((ed) => ({ a: ed.a, b: ed.b, kind: (ed.kind === 'authored' ? (ed.step ? 'actor' : 'shared') : ed.kind) as 'actor' | 'shared', step: ed.step }));
+    const room = avail - 2 * MAP_PAD;
+    if (denseMode === 'on') return { L: layoutReplay(ln, le, { ...DENSE_LAYOUT, avail: room }), dense: true };
+    const full = layoutReplay(ln, le, { ...LAYOUT, avail: room });
+    // Width first, then density: the full-size map is kept whenever it fits about two thirds of the
+    // window; past that every card shrinks to title + one line rather than the page growing.
+    if (denseMode === 'off' || full.height + 2 * MAP_PAD <= denseCap()) return { L: full, dense: false };
+    return { L: layoutReplay(ln, le, { ...DENSE_LAYOUT, avail: room }), dense: true };
+  }, [nodes, edges, avail, denseMode]);
+  const NH = dense ? DENSE_H : NODE_H;
+  const NW = dense ? DENSE_W : NODE_W;
+  const cycleDense = () => {
+    const next: DenseMode = denseMode === 'auto' ? (dense ? 'off' : 'on') : 'auto';
+    setDenseMode(next); remember(DENSE_KEY, next);
+  };
   const pos = useMemo(() => {
     const m = new Map<string, { x: number; y: number }>();
     for (const [k, p] of L.pos) m.set(k, { x: p.x + MAP_PAD, y: p.y + MAP_PAD });
@@ -542,7 +586,7 @@ const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, curren
   const overflow = vbW > avail + 1;
   // The frame is CROPPED to what has been reached — the drawing is laid out for every event, the frame
   // only ever shows as far down as the replay has got, and eases to its new height.
-  const contentH = shown.length ? Math.max(...shown.map((n) => pos.get(n.key)!.y + NODE_H)) + MAP_PAD + 2 : 0;
+  const contentH = shown.length ? Math.max(...shown.map((n) => pos.get(n.key)!.y + NH)) + MAP_PAD + 2 : 0;
   const svgH = Math.max(contentH, L.height + 2 * MAP_PAD);
 
   /* ── zoom and pan ──
@@ -777,8 +821,8 @@ const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, curren
       const v = view.current;
       const sx = v.x + p.x * v.k; const sy = v.y + p.y * v.k;
       const m = 12;
-      if (sx < m || sy < m || sx + NODE_W * v.k > vw - m || sy + NODE_H * v.k > vh - m) {
-        apply(clampView({ k: v.k, x: vw / 2 - (p.x + NODE_W / 2) * v.k, y: vh / 2 - (p.y + NODE_H / 2) * v.k }), true);
+      if (sx < m || sy < m || sx + NW * v.k > vw - m || sy + NH * v.k > vh - m) {
+        apply(clampView({ k: v.k, x: vw / 2 - (p.x + NW / 2) * v.k, y: vh / 2 - (p.y + NH / 2) * v.k }), true);
       }
       return;
     }
@@ -800,8 +844,8 @@ const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, curren
       const on = b.keys.filter((k) => reachedKeys.has(k));
       if (!on.length) continue;
       const bx = b.x + MAP_PAD; const by = b.y + MAP_PAD;
-      const right = Math.max(...on.map((k) => pos.get(k)!.x + NODE_W)) + LAYOUT.pad;
-      const bottom = Math.max(...on.map((k) => pos.get(k)!.y + NODE_H)) + LAYOUT.pad;
+      const right = Math.max(...on.map((k) => pos.get(k)!.x + NW)) + LAYOUT.pad;
+      const bottom = Math.max(...on.map((k) => pos.get(k)!.y + NH)) + LAYOUT.pad;
       const hosts = b.hosts.length ? b.hosts.slice(0, 2).join(', ') + (b.hosts.length > 2 ? ` +${b.hosts.length - 2}` : '') : 'no host recorded';
       out.push({ id: b.id, x: bx, y: by, w: right - bx, h: bottom - by, label: hosts, n: on.length, total: b.keys.length });
     }
@@ -848,9 +892,14 @@ const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, curren
         aria-label="Actual size, keeping the centre of the view" title="Actual size, keeping the centre of the view">100%</button>
       <button type="button" className="rp-zoom__fit" onClick={fit} disabled={!zoomed}
         aria-label="Fit: back to the whole map at natural size" title="Back to the whole map at natural size, growing as it plays (0)">Fit</button>
+      <button type="button" className={cx('btn btn--sm rp-mapdense', dense && 'btn--on')} onClick={cycleDense} aria-pressed={dense}
+        title={denseMode === 'auto' ? `Cards are ${dense ? 'compact' : 'full size'} (automatic: compact when the map would run taller than the window). Click to pin the other size.`
+          : `Cards pinned ${dense ? 'compact' : 'full size'}. Click to go back to automatic.`}>
+        {dense ? 'Compact' : 'Full cards'}{denseMode !== 'auto' ? ' · pinned' : ''}
+      </button>
     </span>, zoomSlot);
   return (
-    <div className={cx('rp-mapview', overflow && !zoomed && 'rp-mapview--scroll', zoomed && 'rp-mapview--zoomed', chosen && 'rp-mapview--chosen')} ref={box}
+    <div className={cx('rp-mapview', overflow && !zoomed && 'rp-mapview--scroll', zoomed && 'rp-mapview--zoomed', chosen && 'rp-mapview--chosen', !zoomed && svgH > denseCap() * 1.15 && 'rp-mapview--tall')} ref={box}
       tabIndex={0} role="group" onKeyDown={onMapKey}
       aria-label="Event map. Ctrl + wheel or pinch zooms, + and - zoom, 0 fits; drag pans a zoomed map, arrow keys too."
       onPointerLeave={() => setHover(null)}>
@@ -867,7 +916,7 @@ const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, curren
           onPointerDown={onFrameDown} onPointerMove={onFrameMove} onPointerUp={onFrameUp} onPointerCancel={onFrameUp}
           onClickCapture={onFrameClickCapture}>
           <div className="rp-mapzoom" ref={zoomRef} style={{ width: vbW, height: svgH }}>
-          <svg className="rp-map" width={vbW} height={svgH}
+          <svg className={cx('rp-map', dense && 'rp-map--dense')} width={vbW} height={svgH}
             viewBox={`0 0 ${vbW} ${svgH}`}
             role="img" aria-label={`Map of the ${shown.length} events the replay has reached so far, laid out by what caused what`}>
             {threads.map((z) => (
@@ -895,6 +944,9 @@ const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, curren
                   <path className="rp-edge" d={d} style={pathStyle(d)}
                     pathLength={ed.kind === 'actor' && L.primary.has(edgeKey(ed.a, ed.b)) ? 1 : undefined} />
                   <path className="rp-arrowhead" d={head} style={pathStyle(head)} />
+                  {/* an authored link carries a small hollow marker at its midpoint: what someone CONCLUDED,
+                      told apart from an inferred shared link (also dashed) at a glance */}
+                  {ed.kind === 'authored' && (() => { const { mid } = route(ed); return <circle className="rp-edge__mark" cx={mid.x} cy={mid.y} r={3} />; })()}
                 </g>
               );
             })}
@@ -920,13 +972,13 @@ const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, curren
                   }}>
                   <g className={cx('rp-node', n.key === current && 'rp-node--now', n.key === focus && chosen && 'rp-node--focus', pinned === n.key && 'rp-node--held')}>
                     <title>{`${c.clock}${c.ms} UTC — ${n.verb}: ${n.value}\nphase: ${phase}${n.host ? `\nhost: ${n.host}` : ''}${pinned === n.key ? '\n(click again to release; double-click to open the event)' : '\n(click to hold its links; double-click to open the event)'}`}</title>
-                    <rect className="rp-node__box" width={NODE_W} height={NODE_H} rx={5} />
+                    <rect className="rp-node__box" width={NW} height={NH} rx={5} />
                     {/* the phase it belongs to: a rule down the left edge, in the phase's colour */}
-                    <rect className="rp-node__phase" x={0.6} y={6} width={2.6} height={NODE_H - 12} />
-                    <circle className="rp-node__badge" cx={21} cy={NODE_H / 2} r={11.5} />
-                    <text className="rp-node__glyph" x={21} y={NODE_H / 2 + 3.5} textAnchor="middle">{meta.glyph}</text>
-                    <text className="rp-node__title" x={40} y={19}>{trunc(n.value, 20)}</text>
-                    <text className="rp-node__sub" x={40} y={33}>{trunc(n.verb, 17)} · {c.clock}</text>
+                    <rect className="rp-node__phase" x={0.6} y={6} width={2.6} height={NH - 12} />
+                    <circle className="rp-node__badge" cx={dense ? 17 : 21} cy={NH / 2} r={dense ? 9 : 11.5} />
+                    <text className="rp-node__glyph" x={dense ? 17 : 21} y={NH / 2 + 3.5} textAnchor="middle">{meta.glyph}</text>
+                    <text className="rp-node__title" x={dense ? 32 : 40} y={dense ? 12.5 : 19}>{trunc(n.value, dense ? 19 : 20)}</text>
+                    <text className="rp-node__sub" x={dense ? 32 : 40} y={dense ? 24 : 33}>{trunc(n.verb, 17)} · {c.clock}</text>
                   </g>
                 </g>
               );
@@ -940,7 +992,7 @@ const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, curren
               // route (and beside it), and take the first that covers no node.
               const covers = (cx0: number, cy0: number) => shown.some((n) => {
                 const p = pos.get(n.key)!;
-                return cx0 < p.x + NODE_W && cx0 + w > p.x && cy0 - 9 < p.y + NODE_H && cy0 + 9 > p.y;
+                return cx0 < p.x + NW && cx0 + w > p.x && cy0 - 9 < p.y + NH && cy0 + 9 > p.y;
               });
               let at = { x: mid.x + MAP_PAD + (side === 'r' ? 0 : -w / 2), y: mid.y + MAP_PAD };
               if (covers(at.x, at.y)) {
@@ -960,13 +1012,32 @@ const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, curren
                 </g>
               );
             })}
+            {/* THE STORY PLATE: the focused event's one line — actor → verb → object — above its node, in
+                the row gap, so reading the map never needs the stream. A thread start says so. */}
+            {(() => {
+              const n = focus ? shown.find((x) => x.key === focus) : undefined;
+              if (!n || !(n.story || n.threadStart)) return null;
+              const p = pos.get(n.key)!;
+              const text = trunc(n.story || n.threadStart, 96);
+              const w = Math.min(Math.round(text.length * 6.0 + 22), Math.max(NW, vbW - p.x - 4));
+              const shownText = w < text.length * 6.0 + 22 ? trunc(text, Math.max(12, Math.floor((w - 22) / 6.0))) : text;
+              return (
+                <g className={cx('rp-story', n.threadStart && !n.story && 'rp-story--thread')}
+                  style={{ transform: `translate(${p.x}px, ${p.y - 10}px)`, ['--c' as string]: hue(n.lane) }}>
+                  <title>{`${n.story}${n.threadStart ? `\nnew thread — ${n.threadStart}` : ''}`}</title>
+                  <rect x={0} y={-8} width={w} height={16} rx={3} />
+                  {n.threadStart && <circle cx={9} cy={0} r={2.6} className="rp-story__dot" />}
+                  <text x={n.threadStart ? 16 : 7} y={3.5}>{shownText}</text>
+                </g>
+              );
+            })()}
           </svg>
           {/* The held event can be OPENED: a real button beside its node (keyboard reachable, never
               hover-only), placed in the same coordinates as the drawing. */}
           {pinned && pos.has(pinned) && (
             <button type="button" className="rp-openev" onClick={() => onOpenEvent(pinned)}
               // right-aligned under the node, in the row gap: the frame clips its sides, never the gap
-              style={{ left: pos.get(pinned)!.x + NODE_W, top: pos.get(pinned)!.y + NODE_H + 1 }}
+              style={{ left: pos.get(pinned)!.x + NW, top: pos.get(pinned)!.y + NH + 1 }}
               title="Open this event's detail page">Open event</button>
           )}
           </div>
@@ -1093,6 +1164,24 @@ function StreamLine({ it, fresh, age, skipped, onOpen, anim, hl, follow, onHold 
         <span className={cx('rp-ln__cmd', !it.said && 'mono')}>
           {typing ? shown : (it.said ? inlineMd(it.said, `rps-${it.en.eventId}`) : text)}
         </span>
+        {/* THE STORY LINE: actor → verb → object, then how it ties to what came before — its cause,
+            with the reason in a sentence, or that it starts a new thread and why. Never silent. */}
+        {!typing && (it.story || it.linked || it.threadStart) && (
+          <span className="rp-ln__story">
+            {it.story && <span className="rp-ln__story__what">{it.story}</span>}
+            {it.linked && (
+              <span className={cx('rp-ln__story__how', `rp-ln__story__how--${it.linked.kind}`)}
+                title={it.linked.why}>← {it.linked.why}</span>
+            )}
+            {it.threadStart && <span className="rp-ln__story__how rp-ln__story__how--thread"><i>new thread</i> {it.threadStart}</span>}
+          </span>
+        )}
+        {!typing && it.authored.map((a, i) => (
+          <span key={`a${i}`} className="rp-ln__alink" title={a.why}>
+            <i>authored</i>{a.dir === 'in' ? `← ${a.label} · from ${a.other}` : `→ ${a.label} · to ${a.other}`}
+            <span className="rp-ln__alink__why"> · {a.why.replace(/^[^:]{1,40}: /, '')}</span>
+          </span>
+        ))}
         {!typing && it.beats.slice(0, 3).map((b, i) => (
           <span key={i} className={`rp-ln__out rp-ln__out--${beatTone(b)}`}>
             <b>{BEAT_TAG[b.kind] ?? b.kind}</b>{inlineMd(b.text, `rpo-${it.en.eventId}-${i}`)}
@@ -1203,7 +1292,7 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
   /* ── the sequence, its phases and the entities it reaches ── */
   const links = ctx.data?.links;
   const { items, lanes, nodes, edges } = useMemo(() => {
-    const raw: Omit<Item, 'lane' | 'idx' | 'ents' | 'allEnts' | 'action'>[] = [];
+    const raw: Omit<Item, 'lane' | 'idx' | 'ents' | 'allEnts' | 'action' | 'story' | 'linked' | 'threadStart' | 'authored'>[] = [];
     entries.forEach((en, order) => {
       const e = byId.get(en.eventId);
       const rc = ctxById.get(en.eventId);
@@ -1233,12 +1322,20 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
         ...(real(r.e.host) ? [key('host', r.e.host)] : []), ...(real(r.e.user) ? [key('account', r.e.user)] : [])])];
       const tick = /`([^`]{1,120})`/.exec(r.en.note || '');
       const action = rc?.action ?? { kind: 'event', verb: 'event', object: tick ? tick[1]! : trunc(r.e.msg || r.e.raw, 60) };
-      return { ...r, idx, lane, action, ents, allEnts };
+      const authored: Item['authored'] = [];
+      for (const l of links ?? []) {
+        if (l.rel !== 'authored') continue;
+        if (l.b === r.en.eventId) authored.push({ dir: 'in', other: l.a, label: l.label, why: l.detail });
+        else if (l.a === r.en.eventId) authored.push({ dir: 'out', other: l.b, label: l.label, why: l.detail });
+      }
+      return { ...r, idx, lane, action, ents, allEnts, story: rc?.story ?? '', linked: rc?.linked ?? null,
+        threadStart: rc?.threadStart ?? '', authored };
     });
     return {
       items: out, lanes: names,
       nodes: out.map((it) => ({ key: it.en.eventId, role: it.action.kind, value: it.action.object || it.action.verb,
-        verb: it.action.verb, t: it.t, first: it.idx, lane: it.lane, host: real(it.e.host) ? it.e.host : '' })),
+        verb: it.action.verb, t: it.t, first: it.idx, lane: it.lane, host: real(it.e.host) ? it.e.host : '',
+        story: it.story, threadStart: it.threadStart })),
       edges: links ? serverEdges(links, out) : buildEdges(out, display),
     };
   }, [entries, byId, ctxById, links]);
@@ -1246,6 +1343,7 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
   const anyPrecise = items.some((it) => it.precise);
   const wholeSeconds = items.filter((it) => !it.precise).length;
   const rawCount = items.filter((it) => it.raw).length;
+  const threadStarts = items.filter((it) => it.threadStart).length;
 
   const start = items[0]?.t ?? 0;
   const end = items[items.length - 1]?.t ?? 0;
@@ -1793,7 +1891,8 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
   // What the legend counts is what the map has DRAWN so far: the links into the events reached.
   const edgeCounts = useMemo(() => {
     const drawn = edges.filter((e) => e.at < reached);
-    return { actor: drawn.filter((e) => e.kind === 'actor').length, shared: drawn.filter((e) => e.kind === 'shared').length };
+    return { actor: drawn.filter((e) => e.kind === 'actor').length, shared: drawn.filter((e) => e.kind === 'shared').length,
+      authored: drawn.filter((e) => e.kind === 'authored').length };
   }, [edges, reached]);
 
   if (!items.length) {
@@ -1996,8 +2095,10 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
               held={held} holdFrom={hold.from} onHold={holdFromMap} onOpenEvent={openEvent} zoomSlot={mapZoomSlot} />
           </div>
           <div className="rp-legend" aria-hidden>
-            <span className="rp-legend__k"><svg width="26" height="8"><path d="M1,4 L25,4" className="rp-legend__actor" /></svg>done by — spawned it, ran it, or the same process again{edgeCounts.actor ? ` (${edgeCounts.actor})` : ''}</span>
-            <span className="rp-legend__k"><svg width="26" height="8"><path d="M1,4 L25,4" className="rp-legend__shared" /></svg>same file, hash, domain, address or session as an earlier event{edgeCounts.shared ? ` (${edgeCounts.shared})` : ''}</span>
+            <span className="rp-legend__k"><svg width="26" height="8"><path d="M1,4 L25,4" className="rp-legend__actor" /></svg>caused by — spawned it, ran the file, the same process again, the hop that reached this host, the logon it ran in{edgeCounts.actor ? ` (${edgeCounts.actor})` : ''}</span>
+            <span className="rp-legend__k"><svg width="26" height="8"><path d="M1,4 L25,4" className="rp-legend__shared" /></svg>same file, hash, domain, address, session or account as an earlier event{edgeCounts.shared ? ` (${edgeCounts.shared})` : ''}</span>
+            <span className="rp-legend__k"><svg width="26" height="8"><path d="M1,4 L25,4" className="rp-legend__authored" /><circle cx="13" cy="4" r="2.2" className="rp-legend__authored-dot" /></svg>authored — a link the analyst or the assistant drew, with its own verb (outranks an inferred one){edgeCounts.authored ? ` (${edgeCounts.authored})` : ''}</span>
+            {threadStarts > 0 && <span className="rp-legend__k"><i className="rp-legend__thread">new thread</i>{threadStarts} event{threadStarts === 1 ? '' : 's'} nothing earlier ties to — each says why on its card</span>}
             <span className="rp-legend__k"><svg width="26" height="8"><path d="M1,4 L25,4" className="rp-legend__extra" /></svg>lighter: a further tie beyond the one it is placed by</span>
             {lanes.length > 1 && (
               <span className="rp-legend__phases" title="The rule down an event's left edge is the phase it belongs to">

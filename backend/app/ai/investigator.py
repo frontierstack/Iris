@@ -80,7 +80,7 @@ import orjson
 
 from ..config import get_settings
 from . import autodelegate, capacity, compaction, continuation, eventids, readcache, runs, subagents
-from .ledger import Ledger
+from .ledger import FINDING_WEIGHT_FLOOR, Ledger
 from .argrepair import repair_arguments
 from .client import (AIError, BadToolArguments, ContextTooLong, LLMClient, ProviderUnavailable, ReplyCut, guarded,
                      absorb_text_calls, has_tool_call_syntax, parse_text_tool_calls)
@@ -90,7 +90,7 @@ from .loopguard import (LoopGuard, MAX_RECOVERIES as MAX_LOOP_RECOVERIES, call_k
 from .system_prompts import PROMPTS
 from .prompts import (CONTINUE_OUTPUT, RESET_NOTE, ARG_TOO_BIG, BUDGET_NOTICE, CHECK_IN, COMPACTED_CONTINUE, CONTINUE_WORK,
                       DOCUMENT_CHECK, LEADS_OPEN, LOOP_RECOVERY, LOOP_STOP, NO_CASE_LINE, run_budget,
-                      RECORD_NUDGE, REPORT_NOW,
+                      RECORD_NUDGE, RECORD_NUDGE_COUNT, RECORD_BEFORE_FINISH, UNRECORDED_TAIL, REPORT_NOW,
                       NARRATE_NUDGE, PARALLEL_NUDGE, PARALLEL_NUDGE_SOLO, SUMMARY_CHECK, WRAP_UP, delegation_block,
                       investigator_user_prompt)
 from .tools import (REGISTRY, ROW_TOOLS, RunContext, ToolError, _s, refit_rows, set_result_room,
@@ -293,11 +293,26 @@ def provider_delay(exc: "ProviderUnavailable", attempt: int) -> float:
 # ---- record AS YOU GO. The analyst's report: findings need to be documented "as it is finding, then
 # build a full summary at the end". The compaction and provider-failure paths above are why it is not
 # tidiness: the transcript is finite and a run can end mid-way, so a finding that lives only in the
-# chat is one crash from gone. After RECORD_EVERY productive reads with no write, the loop asks ONCE
-# for what is solid so far (never to finish), at most MAX_RECORD_NUDGES times per run.
-RECORD_MIN_CALLS = 4
+# chat is one crash from gone.
+#
+# THE TRIGGER IS EVIDENCE, NOT A COUNT (2026-09-27). The analyst: "the model will often not post the
+# second it has something and will wait a long time before posting." On their own run the objective's
+# domain came back with 28 events at step 1 and the first note landed at step 5, eight minutes later —
+# and only after the nudge, which then counted CALLS ("8 tool calls returned evidence") and named
+# nothing, so the model answered it with more reading. The ledger now keeps the FINDINGS: reads that
+# came back with hits about a nameable thing and that no write since has named (ai/ledger.py). Once
+# RECORD_AFTER_FINDINGS strong ones are open that have not been raised before, the loop names them —
+# value, hits, sample ids — so they can be written in one reply. The call count stays as the FALLBACK
+# for results the ledger cannot name. Bounded by MAX_RECORD_NUDGES (more with the run limits off: no
+# budget is coming to end a run that writes nothing), and never inside RECORD_COOLDOWN_STEPS of the
+# last one, because a message that arrives every turn is a nag the model learns to skim.
+RECORD_MIN_CALLS = 2
 RECORD_EVERY = 6
+RECORD_AFTER_FINDINGS = 2
+RECORD_COOLDOWN_STEPS = 3
+RECORD_SHOW = 6
 MAX_RECORD_NUDGES = 3
+MAX_RECORD_NUDGES_UNLIMITED = 8
 
 # KEEPING TWO THINGS IN FLIGHT. `_lanes` parallelises whatever one turn asks for and
 # `delegate_investigation` runs several agents, but nothing makes the model USE either — and a model
@@ -1135,6 +1150,25 @@ def _case_line(store: Any) -> str:
     return "" if _case_open(store) else NO_CASE_LINE
 
 
+def _findings_block(ledger: Ledger, limit: int = RECORD_SHOW) -> tuple[str, list[Any]]:
+    """The STRONG unrecorded findings, rendered for a nudge, and the list itself.
+
+    Strong = above `FINDING_WEIGHT_FLOOR`: a profiled entity with hits, a detection with events. A
+    search, a count or a breakdown over a query is tracked but never raised — "query X matched 40" is
+    not a thing to write to a case, and a nudge listing it teaches the model to skim the next one.
+    """
+    strong = ledger.unrecorded(FINDING_WEIGHT_FLOOR)
+    lines = [f"  {i + 1}. {f.line()}" for i, f in enumerate(strong[:limit])]
+    if len(strong) > limit:
+        lines.append(f"  … and {len(strong) - limit} more.")
+    return "\n".join(lines), strong
+
+
+def _writer_names() -> frozenset[str]:
+    """The registry's own list of tools that write to the case — what the ledger closes a finding on."""
+    return frozenset(n for n, t in REGISTRY.items() if getattr(t, "writes", False))
+
+
 async def investigate(store: Any, objective: str, run_id: str,
                       max_steps: Optional[int] = None, max_seconds: Optional[int] = None,
                       client: Optional[LLMClient] = None, focus: str = "",
@@ -1172,14 +1206,15 @@ async def investigate(store: Any, objective: str, run_id: str,
     # restart all re-shape `messages` and none of them can reach this object. On a follow-up it is
     # seeded from the earlier turns of the thread, so "now build me the timeline" does not re-ask the
     # twenty questions the previous turn already answered.
-    ledger = Ledger()
+    writers = _writer_names()
+    ledger = Ledger(writers)
     if continue_from:
         prior_brief, thread_id, parent_id, _parent = await asyncio.to_thread(
             continuation.for_run, continue_from, exclude=run_id)
         try:
-            ledger = Ledger.from_records(await asyncio.to_thread(runs.thread, continue_from))
+            ledger = Ledger.from_records(await asyncio.to_thread(runs.thread, continue_from), writers)
         except Exception:  # noqa: BLE001 — a follow-up must run even with an unreadable parent record
-            ledger = Ledger()
+            ledger = Ledger(writers)
     runs.start(run_id, objective, client.model, focus=focus, case_id=case_id, case_name=case_name,
                parent_id=parent_id, thread_id=thread_id)
     yield {"type": "run", "runId": run_id, "model": client.model,
@@ -1294,6 +1329,8 @@ async def investigate(store: Any, objective: str, run_id: str,
     silent_turns = 0         # tool turns in a row with no narration line (a write counts as a full streak)
     narrate_nudges = 0       # ...and how many times the assistant has been asked to narrate
     productive_since_write = 0   # reads that returned evidence since the last write (or the start)
+    last_record_step = -RECORD_COOLDOWN_STEPS   # the step the last record nudge went out on
+    wrapup_listed = False    # the unrecorded findings were named at the wrap-up (once, whichever check carried them)
     ceiling = lim["maxContextTokens"]   # lowered when the provider refuses the transcript (ContextTooLong)
     result_chars = TOOL_RESULT_CHARS
     row_chars = _row_chars(ceiling, result_chars)
@@ -1458,20 +1495,36 @@ async def investigate(store: Any, objective: str, run_id: str,
                         f"report and record what it found")
                 HISTORY.append(run_id, {"kind": "status", "text": note, })
                 yield {"type": "status", "text": note, "budgetNotice": True}
-            # RECORD AS YOU GO. Evidence has been coming back and none of it has been written down.
-            # Asked between steps, never as a request to finish: the copy says to record what is solid
-            # and carry on. Only with a case to write into, and at most MAX_RECORD_NUDGES times.
-            elif (record_nudges < MAX_RECORD_NUDGES and productive_since_write >= RECORD_EVERY
-                  and tool_calls >= RECORD_MIN_CALLS):
+            # RECORD AS YOU GO. Fired on EVIDENCE: the ledger holds RECORD_AFTER_FINDINGS strong findings
+            # (a profiled entity with hits, a detection with events, a search that returned lines) that
+            # no write has named and no earlier nudge has raised — and the message NAMES them, with
+            # their ids, so they can be written in one reply. The call count is the fallback for
+            # evidence the ledger cannot name. Never a request to finish, never inside the cooldown.
+            elif (record_nudges < (MAX_RECORD_NUDGES if lim.get("enforced", 1) else MAX_RECORD_NUDGES_UNLIMITED)
+                  and tool_calls >= RECORD_MIN_CALLS
+                  and step - last_record_step >= RECORD_COOLDOWN_STEPS
+                  and (sum(1 for f in ledger.unrecorded(FINDING_WEIGHT_FLOOR) if not f.nudged) >= RECORD_AFTER_FINDINGS
+                       or productive_since_write >= RECORD_EVERY)):
                 record_nudges += 1
+                last_record_step = step
                 calls_since = productive_since_write
                 productive_since_write = 0
-                messages.append({"role": "user", "content": RECORD_NUDGE.format(calls=calls_since,
-                                                                                 case=_case_line(store))})
-                note = (f"{calls_since} tool calls returned evidence and none of it is recorded in the "
-                        f"case yet — asked the assistant to write down what is solid before continuing")
+                body, strong = _findings_block(ledger)
+                if strong:
+                    for f in strong:
+                        f.nudged = True
+                    messages.append({"role": "user", "content": RECORD_NUDGE.format(findings=body,
+                                                                                     case=_case_line(store))})
+                    names = ", ".join(f.value for f in strong[:RECORD_SHOW])
+                    note = (f"{len(strong)} finding(s) came back with evidence and none of it is recorded in "
+                            f"the case yet — asked the assistant to write them down before continuing: {names}")
+                else:
+                    messages.append({"role": "user", "content": RECORD_NUDGE_COUNT.format(calls=calls_since,
+                                                                                           case=_case_line(store))})
+                    note = (f"{calls_since} tool calls returned evidence and none of it is recorded in the "
+                            f"case yet — asked the assistant to write down what is solid before continuing")
                 HISTORY.append(run_id, {"kind": "status", "text": note})
-                yield {"type": "status", "text": note, "recordNudge": record_nudges}
+                yield {"type": "status", "text": note, "recordNudge": record_nudges, "unrecorded": len(strong)}
             # KEEP TWO THINGS WORKING WITHOUT WAITING TO BE ASKED. The lead has taken a couple of tool
             # turns alone, so it has found the shape of the problem and there is something to split;
             # asking it to delegate is what the parallel nudge does, and on the analyst's model that
@@ -1847,7 +1900,16 @@ async def investigate(store: Any, objective: str, run_id: str,
                         and est() < ceiling):
                     documented = True
                     document_checks += 1
-                    messages.append({"role": "user", "content": DOCUMENT_CHECK.format(case=_case_line(store))})
+                    # ...naming what the ledger saw come back with hits, so the write-up can be
+                    # specific rather than "you wrote nothing" (which is answered with more reading).
+                    body, strong = _findings_block(ledger)
+                    tail = ""
+                    if strong and not wrapup_listed:
+                        wrapup_listed = True
+                        for f in strong:
+                            f.nudged = True
+                        tail = UNRECORDED_TAIL.format(findings=body)
+                    messages.append({"role": "user", "content": DOCUMENT_CHECK.format(case=_case_line(store)) + tail})
                     note = ("nothing recorded in the case yet — asking the assistant to write up what it found"
                             + ("" if _case_open(store) else " (and to create the case first)"))
                     HISTORY.append(run_id, {"kind": "status", "text": note})
@@ -1864,10 +1926,35 @@ async def investigate(store: Any, objective: str, run_id: str,
                         and est() < ceiling):
                     summarised = True
                     summary_checks += 1
-                    messages.append({"role": "user", "content": SUMMARY_CHECK})
+                    body, strong = _findings_block(ledger)
+                    tail = ""
+                    if strong and not wrapup_listed:
+                        wrapup_listed = True
+                        for f in strong:
+                            f.nudged = True
+                        tail = UNRECORDED_TAIL.format(findings=body)
+                    messages.append({"role": "user", "content": SUMMARY_CHECK + tail})
                     note = "findings were recorded as the run went — asking the assistant for the case summary"
                     HISTORY.append(run_id, {"kind": "status", "text": note})
                     yield {"type": "status", "text": note, "summaryCheck": True}
+                    continue
+                # FOUND, NOT ON THE CASE, AND NEITHER CHECK ABOVE APPLIED (the summary is written, or
+                # the run wrote plenty and the ledger still holds things with hits nobody named). Once:
+                # name them, and let the model record each or dismiss it in a line. A PROMPT, never a
+                # write by Iris — an indicator invented to fill a gap is the worst outcome here.
+                body, strong = _findings_block(ledger)
+                if (strong and not wrapup_listed and tool_calls >= DOCUMENT_MIN_CALLS
+                        and not runs.stop_requested(run_id)
+                        and elapsed() < lim["maxSeconds"] and step < lim["maxSteps"]
+                        and est() < ceiling):
+                    wrapup_listed = True
+                    for f in strong:
+                        f.nudged = True
+                    messages.append({"role": "user", "content": RECORD_BEFORE_FINISH.format(findings=body)})
+                    note = (f"{len(strong)} finding(s) came back with evidence and are not on the case — "
+                            f"asking the assistant to record them or rule them out before it finishes")
+                    HISTORY.append(run_id, {"kind": "status", "text": note})
+                    yield {"type": "status", "text": note, "recordCheck": len(strong)}
                     continue
                 # AN EMPTY TURN IS HOW THE LOOP KNOWS THE MODEL IS FINISHED — and a model handed a
                 # freshly folded transcript answered "No summary note exists yet. Let me write one and
@@ -2450,6 +2537,8 @@ async def investigate(store: Any, objective: str, run_id: str,
                # investigation finished or merely stopped, and it is reported whether or not the
                # nudge above ever fired.
                "ledger": ledger.counts(), "openLeads": len(ledger.open_leads()),
+               # ...and what came back with hits that nothing on the case names (strong only)
+               "unrecorded": len(ledger.unrecorded(FINDING_WEIGHT_FLOOR)),
                "contextCeiling": ceiling, "recordNudges": record_nudges, "resets": resets,
                "outputContinues": output_continues, "loopGuard": guard.stats()}
     except AIError as exc:

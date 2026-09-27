@@ -100,14 +100,19 @@ class ColumnRoles:
 
     def event(self, raw: str, cells: list[str], extra: Optional[dict[str, str]] = None) -> ParsedEvent:
         fields: dict[str, str] = dict(extra or {})
-        for i, cell in enumerate(cells):
-            name = self.header[i] if i < len(self.header) and self.header[i] else f"col{i + 1}"
-            v = clean(cell)
+        # Every cell is cleaned ONCE. The fields loop, the role columns, the timestamp fallback scan
+        # and the message body used to each call `clean` again on the same cells - 25 calls per row
+        # on a 20-column export, ~10 us of a 46 us row. `clean` is a pure function of the cell.
+        vals = [clean(c) for c in cells]
+        header = self.header
+        nh = len(header)
+        for i, v in enumerate(vals):
             if v != "":
-                fields[name] = v
+                fields[header[i] if i < nh and header[i] else f"col{i + 1}"] = v
+        nv = len(vals)
 
         def col(i: Optional[int]) -> str:
-            return clean(cells[i]) if i is not None and i < len(cells) else ""
+            return vals[i] if i is not None and i < nv else ""
 
         ts_text = col(self.ts)
         ts = parse_ts(ts_text) if ts_text else None
@@ -115,15 +120,14 @@ class ColumnRoles:
             # fall back to any timestamp-looking cell. One combined fullmatch, not six — see _TS_CELL.
             # A cell that matches but does not PARSE still stamps ts_text and lets the scan carry on to
             # the next cell, exactly as the six-pattern loop did.
-            for c in cells:
-                c = clean(c)
+            for c in vals:
                 if len(c) < 40 and _TS_CELL.fullmatch(c):
                     ts, ts_text = parse_ts(c), c
                     if ts is not None:
                         break
         msg = col(self.msg)
         if not msg:
-            body = [clean(c) for i, c in enumerate(cells) if i != self.ts and clean(c)]
+            body = [c for i, c in enumerate(vals) if i != self.ts and c]
             msg = " ".join(body)
         level = col(self.level)
         if level:
