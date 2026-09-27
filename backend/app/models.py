@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Severity = Literal["critical", "high", "medium", "low", "info"]
 SEV_ORDER: dict[str, int] = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
@@ -742,6 +742,13 @@ class AISettings(BaseModel):
     # The saved system prompt the investigator uses by default (ai/system_prompts.py); '' = the
     # built-in prompt alone. A run may name another one per request.
     systemPromptId: str = ""
+
+    @field_validator("systemPromptId", mode="before")
+    @classmethod
+    def _no_default_prompt(cls, v: object) -> object:
+        # null is how a client says "no default prompt"; it means the same as ''. As a bare str field
+        # it failed validation and PUT /api/settings answered 500.
+        return "" if v is None else v
     # ---- the investigator's RUN BUDGET, editable on Settings -> AI assistant.
     # These were env-only (IRIS_AI_MAX_STEPS / _MAX_SECONDS), which meant changing them took a restart
     # and a shell — so in practice a deep investigation hit "budget reached (max_steps)" and the
