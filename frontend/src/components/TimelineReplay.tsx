@@ -53,11 +53,16 @@ import { EmptyState, Loading } from './ui';
 import { noteLine } from './timelineText';
 
 /** Replay rates: how many seconds of the incident pass per second on screen. */
-const SPEEDS = [0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600, 1800, 3600, 7200, 21600, 43200, 86400];
-/** The ones offered as one-click segments; the rest are in the "more" menu. */
-const SPEED_SEGS = [0.5, 1, 2, 10, 60];
-/** The speed that plays the whole span in about this much screen time is offered in the menu. */
-const TARGET_MS = 60_000;
+/*  "I need slow speeds, also remove anything higher than 10x ... better organization for slower
+ *  replays". Nothing above 10x: "Skip quiet stretches" already crosses the dead air, so a high rate
+ *  only made the events themselves flash past. The slow end is where a burst is actually read, so it
+ *  gets the most steps, and the control is grouped Slow / Real time / Fast rather than one row. */
+const SPEED_GROUPS: { label: string; speeds: number[] }[] = [
+  { label: 'Slow', speeds: [0.1, 0.25, 0.5, 0.75] },
+  { label: 'Real time', speeds: [1] },
+  { label: 'Fast', speeds: [1.5, 2, 5, 10] },
+];
+const SPEEDS = SPEED_GROUPS.flatMap((g) => g.speeds);
 /** The seek bar starts this long (INCIDENT time) before the first event and ends this long after the
  *  last. It used to be padded by 3 % of the whole span: on a 21-hour case that is 38 minutes of empty
  *  bar before the first event — "a massive space ... it can take a long time to get to the first event". */
@@ -270,9 +275,8 @@ function dur(ms: number): string {
 }
 function rateLabel(v: number): string {
   if (v === 1) return '1× · real time';
-  if (v < 1) return `${v}× · slow motion`;
-  const per = v >= 86400 ? `${v / 86400} d` : v >= 3600 ? `${v / 3600} h` : v >= 60 ? `${v / 60} min` : `${v} s`;
-  return `${v.toLocaleString()}× · 1 s = ${per}`;
+  if (v < 1) return `${v}× · slow motion: 1 s of the incident takes ${+(1 / v).toFixed(2)} s on screen`;
+  return `${v}× · 1 s on screen = ${v} s of the incident`;
 }
 function reachedBy(items: Item[], t: number): number {
   let lo = 0; let hi = items.length;
@@ -868,10 +872,6 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
   // The bar's geometry: bursts at their real proportions, long quiet gaps compressed to a labelled
   // break (utils/replayScale.ts). Time itself is never compressed - only where it is DRAWN.
   const scale = useMemo(() => buildScale(items.map((it) => it.t), d0, d1), [items, d0, d1]);
-  const autoSpeed = useMemo(() => {
-    const need = (d1 - d0) / TARGET_MS;
-    return SPEEDS.find((v) => v >= need) ?? SPEEDS[SPEEDS.length - 1]!;
-  }, [d0, d1]);
 
   /* ── the clock ──
      The playhead lives in refs and one animation-frame loop; React hears about it only when an event
@@ -1260,6 +1260,11 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
     else if (k === '+' || k === '=') zoomBy(0.5, toU(scale, tRef.current), true);
     else if (k === '-' || k === '_') zoomBy(2, toU(scale, tRef.current), true);
     else if (k === '0') fit();
+    else if (k === '[' || k === ']') {         // step the speed: the slow end is where bursts are read
+      const i = SPEEDS.indexOf(speed);
+      const j = Math.min(SPEEDS.length - 1, Math.max(0, (i < 0 ? SPEEDS.indexOf(1) : i) + (k === ']' ? 1 : -1)));
+      changeSpeed(SPEEDS[j]!);
+    }
     else return;
     ev.preventDefault();
   };
@@ -1394,18 +1399,18 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
               <Icon.Restart /> Restart
             </button>
           </div>
-          <div className="rp-speeds" role="group" aria-label="Replay speed">
-            {SPEED_SEGS.map((v) => (
-              <button key={v} className={cx(speed === v && 'on')} aria-pressed={speed === v} onClick={() => changeSpeed(v)}
-                title={rateLabel(v)}>{v}×</button>
+          <div className="rp-speeds" role="group" aria-label="Replay speed" title="[ slower · ] faster">
+            {SPEED_GROUPS.map((g) => (
+              <div key={g.label} className="rp-speeds__grp" role="group" aria-label={g.label}>
+                <span className="rp-speeds__lbl">{g.label}</span>
+                <div className="rp-speeds__btns">
+                  {g.speeds.map((v) => (
+                    <button key={v} className={cx(speed === v && 'on')} aria-pressed={speed === v} onClick={() => changeSpeed(v)}
+                      title={rateLabel(v)}>{v}×</button>
+                  ))}
+                </div>
+              </div>
             ))}
-            <select value={SPEED_SEGS.includes(speed) ? '' : String(speed)} aria-label="Other speeds"
-              onChange={(e) => e.target.value && changeSpeed(Number(e.target.value))}>
-              <option value="">more…</option>
-              {SPEEDS.filter((v) => !SPEED_SEGS.includes(v)).map((v) => (
-                <option key={v} value={v}>{rateLabel(v)}{v === autoSpeed ? ' · whole span in ~1 min' : ''}</option>
-              ))}
-            </select>
           </div>
           <label className="rp-skip"
             title="Skip the empty space between events: a gap that would take more than a few seconds to watch at the chosen speed is crossed quickly, and the replay slows back to the chosen speed about 1.6 seconds (on screen) before the next event, so every arrival and every burst plays at the speed you picked. The clock always shows real time, and moments reached this way are marked, so a skipped gap never looks like a short one.">
