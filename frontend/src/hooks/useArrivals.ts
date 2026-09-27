@@ -82,12 +82,13 @@ export function useArrivals(ids: readonly string[], loaded = true): ReadonlySet<
 }
 
 /** `text`, revealed progressively when `active` on its FIRST render — the whole of it otherwise. */
-export function useTypewriter(text: string, active: boolean): string {
+/** `pace` stretches (> 1) or shortens (< 1) the reveal — the replay passes its playback pace. */
+export function useTypewriter(text: string, active: boolean, pace = 1): string {
   const animate = useRef(active && !reducedMotion());   // decided once, at mount: an arrival, or not
   const [n, setN] = useReducer((_: number, v: number) => v, animate.current ? 0 : text.length);
   useEffect(() => {
     if (!animate.current) return;
-    const ms = Math.min(REVEAL_MAX_MS, Math.max(REVEAL_MIN_MS, (text.length / REVEAL_CHARS_PER_SEC) * 1000));
+    const ms = pace * Math.min(REVEAL_MAX_MS, Math.max(REVEAL_MIN_MS, (text.length / REVEAL_CHARS_PER_SEC) * 1000));
     const frames = Math.max(1, Math.round(ms / 16));
     const step = Math.max(1, Math.ceil(text.length / frames));
     let shown = 0;

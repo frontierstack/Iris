@@ -47,6 +47,7 @@ import { useCase } from '../hooks/queries';
 import { cx } from '../utils/format';
 import { inlineMd } from '../utils/markdown';
 import { buildScale, fromU, gapLabel, ticks as rulerTicks, toU } from '../utils/replayScale';
+import { edgeKey, layoutReplay } from '../utils/replayLayout';
 import { Icon } from './icons';
 import { ReplaySummary } from './ReplaySummary';
 import { EmptyState, Loading } from './ui';
@@ -119,6 +120,16 @@ const ZOOM_MIN_UNITS = 20;
 const FOLLOW_HOLD_MS = 2_500;
 /** A milestone callout stays over the map this long (screen time). */
 const FLARE_MS = 3_800;
+/** How much slower (> 1) or quicker (< 1) every REVEAL plays than at 1x: a node settling in, a link
+ *  drawing itself, a stream row typing in, a phase bar filling, the milestone callout's stay. It is the
+ *  inverse of the speed, so 0.25x shows each arrival four times as slowly and 5x five times as briskly,
+ *  bounded so 0.1x is slow rather than frozen and 10x still leaves a node long enough to be seen.
+ *  Navigation is NOT scaled — a seek's glide (GLIDE_MS), the follow-pan and the clock are the analyst
+ *  moving through the replay, not the replay playing. Written to the root as `--rp-anim`; every
+ *  duration in replay.css that belongs to a reveal is `calc(<base> * var(--rp-anim))`. */
+const ANIM_MIN = 0.2;
+const ANIM_MAX = 4;
+export const animFactor = (speed: number) => Math.min(ANIM_MAX, Math.max(ANIM_MIN, 1 / Math.max(1e-3, speed)));
 const UNLABELLED = 'unlabelled';
 const SPEED_KEY = 'iris.replay.speed';
 const SKIP_KEY = 'iris.replay.skipQuiet';
@@ -229,7 +240,7 @@ interface Item {
   raw: boolean;           // its source is not interpreted yet
 }
 /** One node per EVENT: every event on the timeline is drawn on the map. */
-interface MapNode { key: string; role: string; value: string; verb: string; t: number; first: number; lane: number }
+interface MapNode { key: string; role: string; value: string; verb: string; t: number; first: number; lane: number; host: string }
 /** `actor`: b was done BY a's process (spawned, wrote, loaded, connected); `shared`: they touched the
  *  same thing. `label` is the reason in two or three words, drawn on the line; `detail` the sentence. */
 interface MapEdge { a: string; b: string; at: number; kind: 'actor' | 'shared'; label: string; detail: string }
@@ -403,17 +414,12 @@ function buildEdges(out: Item[], display: Map<string, string>): MapEdge[] {
 /* ───────── the map: what the intrusion has reached, BUILT as the replay reaches it ───────── */
 const NODE_W = 190;
 const NODE_H = 44;
-/** A phase stacks at most this many entities per column, then wraps into another column inside its
- *  own zone — so a phase that touches forty things makes the map wider, not four screens tall. */
-const ROWS_MAX = 6;
-const SUB_GAP = 16;
-const COL_GAP = 52;
-const ZONE_PAD = 16;          // the left margin carries same-phase brackets
-const ZONE_HEAD = 28;
-const ROW_GAP = 14;
-/** Vertical space between two ROWS of phase zones, once they wrap. */
-const ZONE_ROW_GAP = 30;
+/** Outer padding of the drawing inside its frame. */
+const MAP_PAD = 16;
 const MAP_EMPTY_H = 120;
+/** The geometry the layered layout works in (utils/replayLayout.ts). The column gap holds the trunks
+ *  that carry a process's links to its children, and a reason plate on the one in focus. */
+const LAYOUT = { nodeW: NODE_W, nodeH: NODE_H, colGap: 84, rowGap: 18, pad: 12, head: 26, blockGap: 26 };
 /** How an event is drawn, by what it DID. Hues are the entity graph's, plus the level colours for the
  *  actions an analyst must not miss (a deletion, persistence, a cleared log, a failed sign-in). */
 const ACTION_META: Record<string, { tag: string; glyph: string; hue: string }> = {
@@ -437,57 +443,15 @@ const ACTION_META: Record<string, { tag: string; glyph: string; hue: string }> =
   event: { tag: 'event', glyph: '•', hue: 'var(--muted)' },
 };
 
-/** Positions for the nodes REACHED so far. Each phase zone is exactly as big as what it holds now and
- *  grows as its events arrive. The first version reserved every zone's final size up front so that
- *  nothing would ever move, and the result was large empty boxes waiting for events ("too large
- *  looking"). Phases keep the order they first happened in and nodes the order they arrived, so a
- *  node only ever moves when a zone to its LEFT gains a column — and when it does, it GLIDES there. */
-function layoutMap(nodes: MapNode[], lanes: string[], avail: number) {
-  // The map is ALWAYS drawn at its natural size — shrinking it to fit is what made it cramped. It grows
-  // DOWNWARD instead: phase zones flow left to right and wrap onto a new row when the width runs out,
-  // and a phase with more events than fit across gets taller rather than wider.
-  const cols = [...new Set(nodes.map((n) => n.lane))].sort((a, b) => a - b);
-  const count = new Map<number, number>();
-  for (const n of nodes) count.set(n.lane, (count.get(n.lane) ?? 0) + 1);
-  const maxSubs = Math.max(1, Math.floor((avail - 4 * ZONE_PAD + SUB_GAP) / (NODE_W + SUB_GAP)));
-  const zones: { lane: number; name: string; x: number; y: number; w: number; h: number; rows: number }[] = [];
-  let x = ZONE_PAD;
-  let y = ZONE_PAD;
-  let rowH = 0;
-  for (const lane of cols) {
-    const n = count.get(lane)!;
-    const subs = Math.min(Math.ceil(n / ROWS_MAX), maxSubs);
-    const rows = Math.ceil(n / subs);
-    const w = subs * NODE_W + (subs - 1) * SUB_GAP + 2 * ZONE_PAD;
-    const h = ZONE_HEAD + rows * (NODE_H + ROW_GAP) - ROW_GAP + ZONE_PAD;
-    if (x > ZONE_PAD && x + w > avail - ZONE_PAD) {          // no room left on this row: wrap
-      x = ZONE_PAD;
-      y += rowH + ZONE_ROW_GAP;
-      rowH = 0;
-    }
-    zones.push({ lane, name: lanes[lane] ?? UNLABELLED, x, y, w, h, rows });
-    x += w + COL_GAP;
-    rowH = Math.max(rowH, h);
-  }
-  const zoneOf = new Map(zones.map((z) => [z.lane, z]));
-  const seen = new Map<number, number>();
-  const pos = new Map<string, { x: number; y: number }>();
-  for (const n of nodes) {
-    const z = zoneOf.get(n.lane)!;
-    const r = seen.get(n.lane) ?? 0;
-    seen.set(n.lane, r + 1);
-    pos.set(n.key, {
-      x: z.x + ZONE_PAD + Math.floor(r / z.rows) * (NODE_W + SUB_GAP),
-      y: z.y + ZONE_HEAD + (r % z.rows) * (NODE_H + ROW_GAP),
-    });
-  }
-  return { pos, zones };
-}
-
 /** A path as a CSS `d` value, so a line whose end moved GLIDES to its new route (CSS transitions `d`)
  *  instead of snapping. The attribute is set too, for an engine without CSS `d`. */
 const pathStyle = (d: string): CSSProperties => ({ d: `path("${d}")` } as unknown as CSSProperties);
 
+/** The map is a LAYERED FLOW, laid out once over every event (utils/replayLayout.ts): columns are
+ *  causal depth — a process, then what it spawned, then what those did — and a process's own later
+ *  activity stacks under it. Each connected thread of events is one block, blocks sit in the order
+ *  they began. Because the layout covers every event from the start, nothing moves when the replay
+ *  reaches the next one: the map draws what has been reached, in place, and its frame grows to hold it. */
 const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, current }: {
   nodes: MapNode[]; edges: MapEdge[]; lanes: string[]; reached: number; current: string | null;
 }) {
@@ -507,69 +471,50 @@ const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, curren
   const [pinned, setPinned] = useState<string | null>(null);
   const focus = hover ?? pinned ?? current;
   const chosen = hover != null || pinned != null;
-  const { pos, zones: open } = useMemo(() => layoutMap(shown, lanes, avail), [shown, lanes, avail]);
-  const contentW = open.length ? Math.max(...open.map((z) => z.x + z.w)) + ZONE_PAD : 0;
-  const contentH = open.length ? Math.max(...open.map((z) => z.y + z.h)) + ZONE_PAD : 0;
-  const vbW = Math.max(contentW, avail);        // wider only when one zone alone cannot fit
+  // Over EVERY event, not the reached ones: that is what keeps a node where it first appeared.
+  const L = useMemo(() => layoutReplay(
+    nodes.map((n) => ({ key: n.key, first: n.first, host: n.host })),
+    // An actor link to the process's OWN activity ('then') keeps it under the process; one to a thing
+    // it produced (spawned, wrote, loaded, connected to) moves that thing to the next column.
+    edges.map((ed) => ({ a: ed.a, b: ed.b, kind: ed.kind, step: ed.kind === 'actor' && ed.label !== 'then' })),
+    { ...LAYOUT, avail: avail - 2 * MAP_PAD }), [nodes, edges, avail]);
+  const pos = useMemo(() => {
+    const m = new Map<string, { x: number; y: number }>();
+    for (const [k, p] of L.pos) m.set(k, { x: p.x + MAP_PAD, y: p.y + MAP_PAD });
+    return m;
+  }, [L]);
+  const vbW = Math.max(L.width + 2 * MAP_PAD, avail);   // wider only when one thread alone cannot fit
   const overflow = vbW > avail + 1;
+  // The frame is CROPPED to what has been reached — the drawing is laid out for every event, the frame
+  // only ever shows as far down as the replay has got, and eases to its new height.
+  const contentH = shown.length ? Math.max(...shown.map((n) => pos.get(n.key)!.y + NODE_H)) + MAP_PAD + 2 : 0;
+
+  // A thread's box is the bounds of what it has REACHED, so it grows with it instead of standing empty.
+  const threads = useMemo(() => {
+    const out: { id: number; x: number; y: number; w: number; h: number; label: string; n: number; total: number }[] = [];
+    const reachedKeys = new Set(shown.map((n) => n.key));
+    for (const b of L.blocks) {
+      if (b.keys.length < 2) continue;
+      const on = b.keys.filter((k) => reachedKeys.has(k));
+      if (!on.length) continue;
+      const bx = b.x + MAP_PAD; const by = b.y + MAP_PAD;
+      const right = Math.max(...on.map((k) => pos.get(k)!.x + NODE_W)) + LAYOUT.pad;
+      const bottom = Math.max(...on.map((k) => pos.get(k)!.y + NODE_H)) + LAYOUT.pad;
+      const hosts = b.hosts.length ? b.hosts.slice(0, 2).join(', ') + (b.hosts.length > 2 ? ` +${b.hosts.length - 2}` : '') : 'no host recorded';
+      out.push({ id: b.id, x: bx, y: by, w: right - bx, h: bottom - by, label: hosts, n: on.length, total: b.keys.length });
+    }
+    return out;
+  }, [L, shown, pos]);
 
   /* ── connections ──
-     Ports: a node with several links spreads them down its side instead of sending every one from
-     the same point. Lines leave and arrive HORIZONTALLY, so the curve reads as a flow from one phase
-     into the next. A link inside one phase runs as a bracket down the zone's left margin rather than
-     looping over the node text. The head is drawn separately from the line, so it can arrive AFTER
-     the line has drawn itself. */
+     Every route comes from the layout and never changes: out of a node's right edge, down the trunk it
+     shares with its siblings in the gap between two columns, into the child's left edge. A process's
+     later activity hangs under it on a short spine. The head is a stroked chevron, drawn separately
+     from the line so it can land AFTER the line has drawn itself. */
   const visibleEdges = useMemo(
-    () => edges.filter((ed) => ed.at < reached && pos.has(ed.a) && pos.has(ed.b)),
-    [edges, reached, pos]);
-  const ports = useMemo(() => {
-    const out = new Map<string, number>();
-    const spread = (list: MapEdge[], side: 'a' | 'b') => {
-      const groups = new Map<string, MapEdge[]>();
-      for (const ed of list) {
-        const k = `${ed[side]}|${side}`;
-        const g = groups.get(k);
-        if (g) g.push(ed); else groups.set(k, [ed]);
-      }
-      for (const [k, g] of groups) {
-        const other = side === 'a' ? 'b' : 'a';
-        // Ordered by where the OTHER end is, so two lines leaving one node never cross each other.
-        g.sort((x, y) => (pos.get(x[other])!.y - pos.get(y[other])!.y) || (pos.get(x[other])!.x - pos.get(y[other])!.x));
-        const step = g.length > 1 ? Math.min(8, (NODE_H - 12) / (g.length - 1)) : 0;
-        g.forEach((ed, i) => out.set(`${k}|${ed.a}|${ed.b}`, (i - (g.length - 1) / 2) * step));
-      }
-    };
-    spread(visibleEdges, 'a');
-    spread(visibleEdges, 'b');
-    return out;
-  }, [visibleEdges, pos]);
-  const route = (ed: MapEdge): { d: string; head: string; mid: { x: number; y: number } } => {
-    const a = pos.get(ed.a)!; const b = pos.get(ed.b)!;
-    const oa = ports.get(`${ed.a}|a|${ed.a}|${ed.b}`) ?? 0;
-    const ob = ports.get(`${ed.b}|b|${ed.a}|${ed.b}`) ?? 0;
-    const ya = a.y + NODE_H / 2 + oa;
-    const yb = b.y + NODE_H / 2 + ob;
-    const H = 5.5;   // arrowhead half-height
-    // The label sits at the curve's own midpoint: B(½) = (P0 + 3·P1 + 3·P2 + P3) / 8.
-    const bez = (x0: number, x1: number, x2: number, x3: number, y0: number, y3: number) =>
-      ({ x: (x0 + 3 * x1 + 3 * x2 + x3) / 8, y: (y0 + 3 * y0 + 3 * y3 + y3) / 8 });
-    if (Math.abs(a.x - b.x) < 1) {                 // same phase column: a bracket in the left margin
-      const x = a.x - 2; const bx = x - 12 - Math.abs(ob) * 0.4;
-      const xe = b.x - 1;
-      return { d: `M${x},${ya} C${bx},${ya} ${bx},${yb} ${xe - 7},${yb}`,
-        head: `M${xe - 8},${yb - H} L${xe},${yb} L${xe - 8},${yb + H} Z`, mid: bez(x, bx, bx, xe - 7, ya, yb) };
-    }
-    if (a.x < b.x) {                               // into a later phase, left to right
-      const x1 = a.x + NODE_W; const x2 = b.x - 1;
-      const dx = Math.max(26, (x2 - x1) * 0.5);
-      return { d: `M${x1},${ya} C${x1 + dx},${ya} ${x2 - dx},${yb} ${x2 - 7},${yb}`,
-        head: `M${x2 - 8},${yb - H} L${x2},${yb} L${x2 - 8},${yb + H} Z`, mid: bez(x1, x1 + dx, x2 - dx, x2 - 7, ya, yb) };
-    }
-    const x1 = a.x; const x2 = b.x + NODE_W + 1;   // back into an earlier phase, right to left
-    const dx = Math.max(26, (x1 - x2) * 0.5);
-    return { d: `M${x1},${ya} C${x1 - dx},${ya} ${x2 + dx},${yb} ${x2 + 7},${yb}`,
-      head: `M${x2 + 8},${yb - H} L${x2},${yb} L${x2 + 8},${yb + H} Z`, mid: bez(x1, x1 - dx, x2 + dx, x2 + 7, ya, yb) };
-  };
+    () => edges.filter((ed) => ed.at < reached && pos.has(ed.a) && pos.has(ed.b) && L.routes.has(edgeKey(ed.a, ed.b))),
+    [edges, reached, pos, L]);
+  const route = (ed: MapEdge) => L.routes.get(edgeKey(ed.a, ed.b))!;
   const laneOfNode = useMemo(() => new Map(nodes.map((n) => [n.key, n.lane])), [nodes]);
   // The events joined to the focus, so the rest of the map can step back.
   const near = useMemo(() => {
@@ -588,6 +533,7 @@ const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, curren
   // and a re-inserted element replays its entrance - every line would redraw itself on every event.
   // The stepped-back lines are faint enough that a focused one reads through them.
   const ordered = visibleEdges;
+  const hue = (lane: number) => PHASE_HUES[lane % PHASE_HUES.length];
   return (
     <div className={cx('rp-mapview', overflow && 'rp-mapview--scroll', chosen && 'rp-mapview--chosen')} ref={box}
       onPointerLeave={() => setHover(null)}>
@@ -599,13 +545,17 @@ const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, curren
         // The FRAME eases to its new height (CSS), so the map grows instead of jumping; the drawing
         // inside is always at its natural size and never re-scaled mid-play.
         <div className="rp-mapframe" style={{ height: contentH, width: vbW }}>
-          <svg className="rp-map" width={vbW} height={contentH} viewBox={`0 0 ${vbW} ${contentH}`}
-            role="img" aria-label={`Map of the ${shown.length} events the replay has reached so far, grouped by phase`}>
-            {open.map((z) => (
-              <g key={z.lane} className="rp-zone" style={{ ['--c' as string]: PHASE_HUES[z.lane % PHASE_HUES.length] }}>
-                <rect x={z.x} y={z.y} width={z.w} height={z.h} rx={10} className="rp-zone__box" />
-                <circle cx={z.x + 14} cy={z.y + 14} r={3.5} className="rp-zone__dot" />
-                <text x={z.x + 24} y={z.y + 18}>{trunc(z.name, Math.floor(z.w / 7.5))}</text>
+          <svg className="rp-map" width={vbW} height={Math.max(contentH, L.height + 2 * MAP_PAD)}
+            viewBox={`0 0 ${vbW} ${Math.max(contentH, L.height + 2 * MAP_PAD)}`}
+            role="img" aria-label={`Map of the ${shown.length} events the replay has reached so far, laid out by what caused what`}>
+            {threads.map((z) => (
+              <g key={z.id} className="rp-thread">
+                <rect className="rp-thread__box" x={z.x} y={z.y} width={z.w} height={z.h} rx={6}
+                  style={{ width: z.w, height: z.h } as CSSProperties} />
+                <text className="rp-thread__hd" x={z.x + 12} y={z.y + 17}>
+                  {trunc(z.label, Math.max(8, Math.floor((z.w - 90) / 6.6)))}
+                  <tspan className="rp-thread__n" dx={8}>{z.n === z.total ? `${z.n} events` : `${z.n} of ${z.total}`}</tspan>
+                </text>
               </g>
             ))}
             {ordered.map((ed) => {
@@ -614,7 +564,7 @@ const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, curren
               return (
                 <g key={`${ed.a}|${ed.b}`}
                   className={cx('rp-link', `rp-link--${ed.kind}`, on && 'rp-link--hot', !on && focus && 'rp-link--back')}
-                  style={{ ['--c' as string]: PHASE_HUES[(laneOfNode.get(ed.b) ?? 0) % PHASE_HUES.length] }}>
+                  style={{ transform: `translate(${MAP_PAD}px, ${MAP_PAD}px)`, ['--c' as string]: hue(laneOfNode.get(ed.b) ?? 0) }}>
                   <title>{ed.detail}</title>
                   {/* an actor link draws itself (a normalised dash); a shared one is DASHED, so it fades in */}
                   <path className="rp-edge" d={d} style={pathStyle(d)} pathLength={ed.kind === 'actor' ? 1 : undefined} />
@@ -627,13 +577,16 @@ const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, curren
               const meta = ACTION_META[n.role] ?? ACTION_META.event!;
               const c = utcParts(n.t);
               const dim = chosen && !near.has(n.key);
+              const phase = lanes[n.lane] ?? UNLABELLED;
               return (
-                <g key={n.key} className={cx('rp-nodepos', dim && 'rp-nodepos--dim')} style={{ transform: `translate(${p.x}px, ${p.y}px)`, ['--c' as string]: meta.hue }}
+                <g key={n.key} className={cx('rp-nodepos', dim && 'rp-nodepos--dim')} style={{ transform: `translate(${p.x}px, ${p.y}px)`, ['--c' as string]: meta.hue, ['--ph' as string]: hue(n.lane) }}
                   onPointerEnter={() => setHover(n.key)}
                   onClick={() => setPinned((cur) => (cur === n.key ? null : n.key))}>
                   <g className={cx('rp-node', n.key === current && 'rp-node--now', n.key === focus && chosen && 'rp-node--focus')}>
-                    <title>{`${c.clock}${c.ms} UTC — ${n.verb}: ${n.value}${pinned === n.key ? ' (click again to release)' : ' (click to hold its links)'}`}</title>
-                    <rect className="rp-node__box" width={NODE_W} height={NODE_H} rx={9} />
+                    <title>{`${c.clock}${c.ms} UTC — ${n.verb}: ${n.value}\nphase: ${phase}${n.host ? `\nhost: ${n.host}` : ''}${pinned === n.key ? '\n(click again to release)' : '\n(click to hold its links)'}`}</title>
+                    <rect className="rp-node__box" width={NODE_W} height={NODE_H} rx={5} />
+                    {/* the phase it belongs to: a rule down the left edge, in the phase's colour */}
+                    <rect className="rp-node__phase" x={0.6} y={6} width={2.6} height={NODE_H - 12} />
                     <circle className="rp-node__badge" cx={21} cy={NODE_H / 2} r={11.5} />
                     <text className="rp-node__glyph" x={21} y={NODE_H / 2 + 3.5} textAnchor="middle">{meta.glyph}</text>
                     <text className="rp-node__title" x={40} y={19}>{trunc(n.value, 20)}</text>
@@ -644,14 +597,15 @@ const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, curren
             })}
             {/* The reasons, on the focus's links only, above everything so a node never hides one. */}
             {ordered.filter(hot).map((ed) => {
-              const { mid } = route(ed);
+              const { mid, side } = route(ed);
               const w = Math.round(ed.label.length * 6.1 + 14);
+              const x0 = side === 'r' ? 0 : -w / 2;
               return (
                 <g key={`l|${ed.a}|${ed.b}`} className={cx('rp-elabel', `rp-elabel--${ed.kind}`)}
-                  style={{ transform: `translate(${mid.x}px, ${mid.y}px)`, ['--c' as string]: PHASE_HUES[(laneOfNode.get(ed.b) ?? 0) % PHASE_HUES.length] }}>
+                  style={{ transform: `translate(${mid.x + MAP_PAD}px, ${mid.y + MAP_PAD}px)`, ['--c' as string]: hue(laneOfNode.get(ed.b) ?? 0) }}>
                   <title>{ed.detail}</title>
-                  <rect x={-w / 2} y={-9} width={w} height={18} rx={4} />
-                  <text x={0} y={3.5} textAnchor="middle">{ed.label}</text>
+                  <rect x={x0} y={-9} width={w} height={18} rx={3} />
+                  <text x={x0 + w / 2} y={3.5} textAnchor="middle">{ed.label}</text>
                 </g>
               );
             })}
@@ -667,8 +621,10 @@ interface PhaseStat {
   name: string; li: number; total: number; done: number; first: number; last: number; desc: string;
   ticks: { t: number; on: boolean }[];
 }
-const PhaseActivity = memo(function PhaseActivity({ phases, active, pct, newestFirst }: {
+const PhaseActivity = memo(function PhaseActivity({ phases, active, pct, newestFirst, picked, onPick }: {
   phases: PhaseStat[]; active: number; pct: (t: number) => number; newestFirst: boolean;
+  /** Phases the stream is filtered to (empty = no filter). The filter touches the STREAM only. */
+  picked: ReadonlySet<number>; onPick: (li: number) => void;
 }) {
   // The same order as the stream and the list: by when the phase OPENED, flipped with "newest first".
   const open = phases.filter((ph) => ph.done > 0).sort((a, b) => a.first - b.first || a.li - b.li);
@@ -683,24 +639,31 @@ const PhaseActivity = memo(function PhaseActivity({ phases, active, pct, newestF
         const now = ph.li === active;
         const complete = ph.done === ph.total;
         return (
-          <div key={ph.li} className={cx('rp-phase', now && 'rp-phase--active', complete && !now && 'rp-phase--done')}
-            style={{ ['--c' as string]: PHASE_HUES[ph.li % PHASE_HUES.length] }}>
-            <div className="rp-phase__row">
+          // A real button: pressing it narrows the live stream to this phase (several may be chosen).
+          // The inner parts are spans, because a button may only hold phrasing content.
+          <button type="button" key={ph.li} aria-pressed={picked.has(ph.li)}
+            className={cx('rp-phase', now && 'rp-phase--active', complete && !now && 'rp-phase--done',
+              picked.has(ph.li) && 'rp-phase--picked', picked.size > 0 && !picked.has(ph.li) && 'rp-phase--other')}
+            style={{ ['--c' as string]: PHASE_HUES[ph.li % PHASE_HUES.length] }}
+            title={picked.has(ph.li) ? 'Showing this phase in the stream - click to stop filtering by it'
+              : 'Show only this phase in the live event stream (click more to add them)'}
+            onClick={() => onPick(ph.li)}>
+            <span className="rp-phase__row">
               <span className="rp-phase__dot" />
               <span className="rp-phase__nm">{ph.name}</span>
               <span className="rp-phase__when mono">{utcParts(ph.first).clock}{ph.last > ph.first ? ` → ${utcParts(ph.last).clock}` : ''}</span>
               <span className="rp-phase__ct mono">{ph.done}<i>/{ph.total}</i></span>
-            </div>
-            {ph.desc && <div className="rp-phase__ds" title={ph.desc}>{ph.desc}</div>}
-            <div className="rp-phase__bar"><span style={{ transform: `scaleX(${ph.done / ph.total})` }} /></div>
-            <div className="rp-phase__trk" aria-hidden>
+            </span>
+            {ph.desc && <span className="rp-phase__ds" title={ph.desc}>{ph.desc}</span>}
+            <span className="rp-phase__bar"><span style={{ transform: `scaleX(${ph.done / ph.total})` }} /></span>
+            <span className="rp-phase__trk" aria-hidden>
               {ph.ticks.map((tk, i) => (
                 <span key={i} className={cx('rp-phase__tick', tk.on && 'rp-phase__tick--on')} style={{ left: `${pct(tk.t)}%` }} />
               ))}
               {/* driven by --rp-pu on the replay root: moves every frame without a render */}
               <span className="rp-phase__head" />
-            </div>
-          </div>
+            </span>
+          </button>
         );
       })}
       {ahead > 0 && <div className="rp-phases__ahead">{ahead} more phase{ahead === 1 ? '' : 's'} ahead</div>}
@@ -709,11 +672,11 @@ const PhaseActivity = memo(function PhaseActivity({ phases, active, pct, newestF
 });
 
 /* ───────── the live stream: typed in as it happens, in the timeline's order ───────── */
-function StreamLine({ it, fresh, age, skipped, onOpen }: {
-  it: Item; fresh: boolean; age: number; skipped: boolean; onOpen: (id: string) => void;
+function StreamLine({ it, fresh, age, skipped, onOpen, anim }: {
+  it: Item; fresh: boolean; age: number; skipped: boolean; onOpen: (id: string) => void; anim: number;
 }) {
   const text = it.said || trunc(it.e.raw || it.e.msg, 220);
-  const shown = useTypewriter(text, fresh);
+  const shown = useTypewriter(text, fresh, anim);
   const typing = shown.length < text.length;
   const p = utcParts(it.t);
   const flare = milestone(it);
@@ -724,7 +687,11 @@ function StreamLine({ it, fresh, age, skipped, onOpen }: {
         {skipped && <em>after a skipped lull</em>}</span>
       <span className="rp-ln__body">
         <span className="rp-ln__head">
-          <span className="rp-ln__tag">{it.en.labels[0] || UNLABELLED}</span>
+          {/* the phase it belongs to, in the phase's own colour and marker - the same ones the
+              phase activity list and the map's phase rule use, so a row matches its phase at a glance */}
+          <span className="rp-ln__tag" title={`Phase: ${it.en.labels[0] || UNLABELLED}`}>
+            <span className="rp-ln__tagdot" aria-hidden />{it.en.labels[0] || UNLABELLED}
+          </span>
           <button type="button" className="rp-ln__open" onClick={() => onOpen(it.en.eventId)}
             title="Open this entry in Full events">open</button>
         </span>
@@ -740,8 +707,10 @@ function StreamLine({ it, fresh, age, skipped, onOpen }: {
     </div>
   );
 }
-const Stream = memo(function Stream({ items, reached, skipped, onOpen, newestFirst }: {
+const Stream = memo(function Stream({ items, reached, skipped, onOpen, newestFirst, picked, onClear, anim }: {
   items: Item[]; reached: number; skipped: Set<number>; onOpen: (id: string) => void; newestFirst: boolean;
+  /** Phases chosen in Phase activity: only their rows are shown. Empty = every row. */
+  picked: ReadonlySet<number>; onClear: () => void; anim: number;
 }) {
   // Remember which rows were already on screen: only a row that ARRIVES is typed in. A seek or a
   // step back re-mounts rows, and retyping a screenful of history would be noise.
@@ -749,7 +718,8 @@ const Stream = memo(function Stream({ items, reached, skipped, onOpen, newestFir
   const wrap = useRef<HTMLDivElement>(null);
   const atEdge = useRef(true);         // following the newest row (top or bottom, by the order)
   const done = items.slice(0, reached);
-  const shown = newestFirst ? [...done].reverse() : done;
+  const kept = picked.size ? done.filter((it) => picked.has(it.lane)) : done;
+  const shown = newestFirst ? [...kept].reverse() : kept;
   useEffect(() => { for (const it of shown) seen.current.add(it.en.eventId); });
   // Oldest first puts the newest row at the BOTTOM: follow it there, smoothly, unless the analyst has
   // scrolled up to read something (then stay put — yanking the view away mid-read is worse).
@@ -758,26 +728,38 @@ const Stream = memo(function Stream({ items, reached, skipped, onOpen, newestFir
     if (!el || !atEdge.current) return;
     const top = newestFirst ? 0 : el.scrollHeight;
     el.scrollTo({ top, behavior: reducedMotion() ? 'auto' : 'smooth' });
-  }, [reached, newestFirst]);
+  }, [reached, newestFirst, picked]);
   const onScroll = () => {
     const el = wrap.current;
     if (!el) return;
     atEdge.current = newestFirst ? el.scrollTop < 40 : el.scrollHeight - el.clientHeight - el.scrollTop < 60;
   };
   return (
+    <>
+    {/* A filtered stream always says so: it must never be mistaken for the whole replay. */}
+    {picked.size > 0 && (
+      <div className="rp-logfilter" role="status">
+        <span>Showing <b className="mono">{kept.length}</b> of <b className="mono">{done.length}</b> event{done.length === 1 ? '' : 's'} so far
+          · {picked.size} phase{picked.size === 1 ? '' : 's'}</span>
+        <button type="button" className="rp-logfilter__clear" onClick={onClear}>Clear</button>
+      </div>
+    )}
     <div className="rp-logwrap" ref={wrap} onScroll={onScroll}>
-      {!shown.length ? <div className="rp-log rp-log--idle">Waiting for the first event…</div> : (
+      {!shown.length ? (
+        <div className="rp-log rp-log--idle">{done.length && picked.size ? 'No event in the chosen phases yet.' : 'Waiting for the first event…'}</div>
+      ) : (
         <div className="rp-log" aria-live="polite" aria-relevant="additions">
           {shown.map((it, i) => {
             const age = newestFirst ? i : shown.length - 1 - i;
             return (
-              <StreamLine key={it.en.eventId} it={it} age={age} skipped={skipped.has(it.idx)} onOpen={onOpen}
+              <StreamLine key={it.en.eventId} it={it} age={age} skipped={skipped.has(it.idx)} onOpen={onOpen} anim={anim}
                 fresh={age === 0 && !seen.current.has(it.en.eventId)} />
             );
           })}
         </div>
       )}
     </div>
+    </>
   );
 });
 
@@ -856,7 +838,7 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
     return {
       items: out, lanes: names,
       nodes: out.map((it) => ({ key: it.en.eventId, role: it.action.kind, value: it.action.object || it.action.verb,
-        verb: it.action.verb, t: it.t, first: it.idx, lane: it.lane })),
+        verb: it.action.verb, t: it.t, first: it.idx, lane: it.lane, host: real(it.e.host) ? it.e.host : '' })),
       edges: buildEdges(out, display),
     };
   }, [entries, byId, ctxById]);
@@ -1137,6 +1119,9 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
 
   /* ── the milestone callout: shown for a few seconds of SCREEN time when a moment carries one ── */
   const [flare, setFlare] = useState<{ id: string; text: string; tone: string; clock: string } | null>(null);
+  const anim = animFactor(speed);
+  const animRef = useRef(anim);
+  animRef.current = anim;
   const lastFlare = useRef(-1);
   const flareTimer = useRef(0);
   useEffect(() => () => window.clearTimeout(flareTimer.current), []);
@@ -1151,7 +1136,7 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
     // not cancel it, or the callout would stay up for good.
     window.clearTimeout(flareTimer.current);
     setFlare({ id: it.en.eventId, text: b.text, tone: beatTone(b), clock: utcParts(it.t).clock });
-    flareTimer.current = window.setTimeout(() => setFlare(null), FLARE_MS);
+    flareTimer.current = window.setTimeout(() => setFlare(null), FLARE_MS * animRef.current);
   }, [reached, items]);
 
   /* ── the scrub track ── */
@@ -1283,6 +1268,17 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
     } catch { /* not allowed here: the page stays as it is */ }
   };
 
+  /* ── the stream's phase filter: per view, never persisted, and it touches ONLY the stream ── */
+  const [picked, setPicked] = useState<ReadonlySet<number>>(() => new Set());
+  const togglePicked = useCallback((li: number) => setPicked((cur) => {
+    const next = new Set(cur);
+    if (next.has(li)) next.delete(li); else next.add(li);
+    return next;
+  }), []);
+  const clearPicked = useCallback(() => setPicked(new Set()), []);
+  const laneKey = lanes.join('|');
+  useEffect(() => { setPicked(new Set()); }, [laneKey]);   // a different set of phases: drop the old choice
+
   /* ── figures derived from which events have been reached ── */
   const cur = reached > 0 ? items[reached - 1] : undefined;
   const phaseStats = useMemo(() => lanes.map((name, li) => {
@@ -1365,7 +1361,8 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
   const d = ctx.data;
 
   return (
-    <section className={cx('rp', full && 'rp--full')} ref={rootRef} aria-label="Timeline replay">
+    <section className={cx('rp', full && 'rp--full')} ref={rootRef} aria-label="Timeline replay"
+      style={{ ['--rp-anim' as string]: anim.toFixed(3) }}>
       {/* ── header ── */}
       <header className="rp-hero">
         <div className="rp-kicker">Incident replay · {c?.id ?? 'case'} · reconstructed from {items.length} curated event{items.length === 1 ? '' : 's'}</div>
@@ -1549,7 +1546,14 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
           <div className="rp-legend" aria-hidden>
             <span className="rp-legend__k"><svg width="26" height="8"><path d="M1,4 L25,4" className="rp-legend__actor" /></svg>done by — the process that did it{edgeCounts.actor ? ` (${edgeCounts.actor})` : ''}</span>
             <span className="rp-legend__k"><svg width="26" height="8"><path d="M1,4 L25,4" className="rp-legend__shared" /></svg>same file, hash, domain or address as an earlier event{edgeCounts.shared ? ` (${edgeCounts.shared})` : ''}</span>
-            <span className="rp-legend__hint">Point at an event to read its links; click to hold them.</span>
+            {lanes.length > 1 && (
+              <span className="rp-legend__phases" title="The rule down an event's left edge is the phase it belongs to">
+                {lanes.map((name, li) => (
+                  <span key={name} className="rp-legend__ph" style={{ ['--c' as string]: PHASE_HUES[li % PHASE_HUES.length] }}>{name}</span>
+                ))}
+              </span>
+            )}
+            <span className="rp-legend__hint">Left to right is cause to effect. Point at an event to read its links; click to hold them.</span>
           </div>
       </div>
 
@@ -1558,13 +1562,15 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
         <div className="rp-card">
           <div className="rp-card__hd"><span className="rp-mk" style={{ background: '#d8974f' }} /><h3>Live event stream</h3>
             <span className="rp-tagline">every event, {newestFirst ? 'newest' : 'oldest'} first — the timeline's order</span></div>
-          <Stream items={items} reached={reached} skipped={skipped} onOpen={onOpen} newestFirst={newestFirst} />
+          <Stream items={items} reached={reached} skipped={skipped} onOpen={onOpen} newestFirst={newestFirst}
+            picked={picked} onClear={clearPicked} anim={anim} />
         </div>
         <div className="rp-side">
         <div className="rp-card">
           <div className="rp-card__hd"><span className="rp-mk" style={{ background: '#6f9fd8' }} /><h3>Phase activity</h3>
             <span className="rp-tagline">first seen → last seen, to scale · {newestFirst ? 'newest' : 'oldest'} first</span></div>
-          <PhaseActivity phases={phaseStats} active={cur ? cur.lane : -1} pct={pct} newestFirst={newestFirst} />
+          <PhaseActivity phases={phaseStats} active={cur ? cur.lane : -1} pct={pct} newestFirst={newestFirst}
+            picked={picked} onPick={togglePicked} />
         </div>
         <div className="rp-card">
           <div className="rp-card__hd"><span className="rp-mk" style={{ background: '#cbb96e' }} /><h3>Activity over time</h3>
