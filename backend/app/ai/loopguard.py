@@ -575,7 +575,17 @@ class LoopGuard:
             self.written[key] = len(self.written) + 1
             self.counts = {k: v for k, v in self.counts.items() if k in self._write_keys}
         if not self.tripped:
-            if self.repeat_streak >= self.repeat_limit():
+            # A recovery plan is still owed: do NOT end the run on the repeat streak. The plan is
+            # injected between turns (`needs_recovery`), so a streak built inside ONE turn used to
+            # skip it entirely - a reply carrying twelve calls, six of them repeats, went from 0 to
+            # the limit before any checkpoint ran, and a run that had written seven things to the
+            # case was stopped on its first loop with `recoveries: 0` (2026-09-27). The streak keeps
+            # counting and every repeat is still refused, so nothing extra runs; past
+            # MAX_RECOVERIES the limit applies exactly as before. Bounded even while owed: the
+            # investigator skips the plan when the transcript is at its ceiling, so at twice the
+            # limit the run ends whatever is owed.
+            owed = self.recoveries < MAX_RECOVERIES and self.repeat_streak < 2 * self.repeat_limit()
+            if self.repeat_streak >= self.repeat_limit() and not owed:
                 self.tripped = (f"the last {self.repeat_streak} tool calls each repeated a call already "
                                 f"made in this run" +
                                 (f", and {self.recoveries} recovery plan(s) naming other calls did not "

@@ -107,7 +107,9 @@ def _code_digest() -> str:
 
 
 def signature(store: Any) -> str:
-    """What the index was built FROM. Same string -> the same events in the same order."""
+    """What the index was built FROM: the same EVENTS. Not their ORDER - events sharing a timestamp
+    can reload in a different order with every field here unchanged, so the header also carries
+    `order` (`search.order_digest`) and a restore checks it."""
     from . import graph_store
 
     try:
@@ -136,6 +138,8 @@ def save(idx: Any, sig: str, arrays: dict[str, np.ndarray]) -> bool:
         header = {
             "format": INDEX_FORMAT, "sig": sig, "n": int(idx.n), "version": int(idx.version),
             "sources": list(idx.sources), "savedAt": time.time(),
+            # the event-id ORDER it was built over; `search.index_from_cache` refuses any other
+            "order": str(getattr(idx, "order", "") or ""),
             "arrays": [{"name": k, "dtype": arrays[k].dtype.str, "count": int(arrays[k].size)} for k in _ARRAYS],
         }
         blob = json.dumps(header).encode("utf-8")

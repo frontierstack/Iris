@@ -26,6 +26,7 @@ library), not one case, so it has no natural size ceiling. Two consequences are 
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import threading
 import time
@@ -439,6 +440,30 @@ def build_index(events: list[Event], ts: np.ndarray, version: int, sig: str = ""
     return idx
 
 
+def order_digest(events: list[Event], n: Optional[int] = None) -> str:
+    """A digest of the event IDS in pool order, over the first `n` events.
+
+    The index is POSITIONAL: `offsets`, `sev` and `source` say what position i holds, and a mask
+    position is turned back into `events[i]`. So a saved index is only valid for a pool whose events
+    sit in the SAME ORDER, and `index_store.signature()` cannot say that - it describes each source's
+    id, file, count and time range, all of which are identical when events that share a timestamp come
+    back in a different order. They do: a restart restores the library's sources in whatever order they
+    land and a stable sort keeps that order among ties. On 2026-09-27 that served an index describing
+    one order against a pool in another - `file:"Sophos Web Proxy.csv"` answered 533 of 3,870, stamped
+    exact, and the source chip for that file returned rows from all three files. The assistant then got
+    two contradicting answers to one question, re-asked it until the loop guard stopped the run.
+    The ids are the one thing that names each position exactly, so they are what is hashed.
+    ~1 s at 11 M events, against a 165 s re-pack; it runs only when a saved index is written or read.
+    """
+    count = len(events) if n is None else min(int(n), len(events))
+    h = hashlib.blake2b(digest_size=16)
+    step = 65_536
+    for s in range(0, count, step):
+        h.update("\n".join([e.id for e in events[s:min(count, s + step)]]).encode("utf-8"))
+        h.update(b"\n")
+    return f"{count}:{h.hexdigest()}"
+
+
 def index_from_cache(sig: str, events: list[Event], ts: np.ndarray, version: int) -> Optional[SearchIndex]:
     """Rebuild the index from `cache/search-index.iris` instead of re-packing the pool.
 
@@ -464,6 +489,14 @@ def index_from_cache(sig: str, events: list[Event], ts: np.ndarray, version: int
     n = len(events)
     if int(header.get("n") or 0) != n or arr["offsets"].size != n + 1 or arr["sev"].size != n:
         _note_index_cache_mismatch(n, header)
+        _status_reset()
+        return None
+    # Same events is not enough: they must be in the SAME ORDER (see `order_digest`). A file written
+    # before the digest existed has none and is refused too - it may be exactly the misaligned index
+    # this check exists for, and one rebuild is the price of never serving one.
+    if header.get("order") != order_digest(events, n):
+        print("[iris] search index cache: the saved index describes the same events in a DIFFERENT "
+              "ORDER than the pool that loaded; rebuilding rather than answering from it")
         _status_reset()
         return None
     idx = SearchIndex(version=version, n=n, text=arr["text"], offsets=arr["offsets"], sev=arr["sev"],
@@ -870,6 +903,7 @@ class _SaveMeta(NamedTuple):
     n: int
     version: int
     sources: list[str]
+    order: str = ""         # `order_digest` of the events this index was built over
 
 
 def get_index(events: list[Event], ts: np.ndarray, version: int, sig: str = "") -> SearchIndex:
@@ -907,7 +941,8 @@ def get_index(events: list[Event], ts: np.ndarray, version: int, sig: str = "") 
             # fixed at build; `version` is NOT — `note_append` moves it in place once the index is
             # published, which is now possible during this write. It is passed by value so the header
             # records the version this file was actually built for.
-            index_store.save(_SaveMeta(idx.n, idx.version, idx.sources), sig, host)
+            index_store.save(_SaveMeta(idx.n, idx.version, idx.sources, order_digest(events, idx.n)),
+                             sig, host)
         return idx
 
 
