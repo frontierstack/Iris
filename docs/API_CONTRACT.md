@@ -201,7 +201,14 @@ interface Settings {
        autoDelegate:boolean /*default true. Once a run has made a couple of tool turns alone, Iris plans a split of the
                               remaining work itself (one small request, no tool schemas) and runs worker agents on it as an
                               ordinary delegate_investigation turn - it does not wait for the model to ask. A question
-                              answered in a turn or two never triggers it; an empty plan is respected.*/ ;
+                              answered in a turn or two never triggers it; an empty plan is respected. A LATER split
+                              needs two or more strong open leads in the run's ledger.*/ ;
+       workerModels:string[] /*default []. Which provider models worker agents may run on. Empty = automatic: on a gateway
+                              whose GET {baseUrl}/models reports per-model slots (Open-Source-Model-Manager), each agent
+                              is placed on the strongest model with a FREE slot and the fan-out is min(agents, free slots);
+                              a pool alias (e.g. `auto`) puts the LEAD on its strongest member. Names match a model's full
+                              id or its folder name; unknown names are ignored. No effect on a provider that does not
+                              describe its models (the timing probe decides there).*/ ;
        systemPromptId:string /*the saved instructions appended to the built-in prompt by default; '' = the built-in prompt alone*/ ;
        /* The investigator's RUN BUDGET, editable on Settings -> AI assistant. `enforceLimits:false`
           removes the step, wall-clock and write ceilings entirely, for a case that has to be worked
@@ -820,6 +827,19 @@ interface CaseSetResponse { entries:CaseSetEntry[]; events:Event[] /*resolved, s
   state every source is in after a restart until phase 2 runs): its `entities` are then only the
   addresses and hashes written in the raw line, and it has no `actor`. Events are ordered by `tMs`, then
   curation order — the order the screen plays them in.
+  Action kinds also include `injection` (an Elastic Endpoint API call into another process, e.g.
+  `NtQueueApcThread`), `api` (any other API call) and `alert` (`endpoint.alerts`); an API call that names
+  a URL (`WinHttpOpenRequest( https://x/…, POST )`) is `web` with the host as its object.
+  `links: ReplayLink[]` — every tie between two of the events, from `app/replay.relations`, each on a
+  value BOTH events carry: `{a; b; rel; kind: 'actor'|'shared'; rank; label; detail}`, `a` earlier than
+  `b` in play order, one per pair (the lowest `rank`, i.e. most specific reason, wins). `rel`:
+  `spawned` (parent PID — or, with no PID, parent image — of a process start), `executed` (a file an
+  earlier event wrote, run as this process's image), `same-process` (host + PID + image: the process's
+  own later activity), `injected` (acts on an earlier process by name), then shared `hash`, `file`,
+  `resolved` (a connection to an address an earlier DNS answer named), `domain` (proxy / DNS / URL /
+  API-call hosts), `session` (logon id), `address` (destination IP). For each value the link runs to the
+  most recent earlier carrier, so a recurring value is a chain. Absent from an older server: the screen
+  then falls back to guessing from `action.actor` and `entities`.
   Top level also carries `version` (the pool version it was built at), `missing` (entries whose event is
   not in the pool yet), `rawEvents`, `awaiting` (raw events whose source is queued/enriching right now),
   `poolLoading`, and `complete` (`!poolLoading && !missing && !rawEvents`) — while it is false the answer
@@ -1285,6 +1305,9 @@ type AiRunEvent =
   | { type:'status'; text:string; parallel?:number; checkIn?:number; budgetNotice?:boolean; documentCheck?:boolean;
       recordNudge?:number; summaryCheck?:boolean;
       agent?:string; phase?:'start'|'call'|'end'; task?:string; // a WORKER AGENT: started (with its question in `task`), its progress every ~3 s, finished
+      model?:string;                                          // on an agent's 'start': the provider model id it runs on (a pool spreads agents across models)
+      leadModel?:string;                                      // said once at the start: the configured model is a pool alias and the lead runs on its strongest member
+      wrapRetry?:true;                                        // the final turn was a tool call (or nothing) instead of a report - asked once more for the report
       autoDelegate?:boolean;                                  // true: Iris planned a delegation itself; false: it tried and skipped (the text says why)
       providerSerialised?:true;                               // said ONCE: the provider served the agents one at a time - see delegate_investigation's result
       parallelNudge?:number;                                  // N turns in a row asked for a single read - a reminder that independent reads go together

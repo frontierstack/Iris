@@ -731,7 +731,13 @@ class AISettings(BaseModel):
     # run took four independent drill-downs one ~30 s turn at a time, was reminded, and carried on
     # alone. Default ON, on their instruction that two agents should always be working.
     autoDelegate: bool = True
-    verifyTls: bool = True      # False = skip certificate verification (corporate TLS-inspection proxies)
+    # WHICH MODELS WORKER AGENTS MAY RUN ON (ai/capacity.py). Empty = automatic: on a gateway that
+    # lists its models and slots (Open-Source-Model-Manager), each agent is placed on the strongest
+    # model with a free slot. Names are matched against the provider's model ids (full id, or its
+    # folder name). Ignored on a provider that does not describe its models. The LEAD is never
+    # governed by this: it runs on the configured model, or the strongest member of a pool alias.
+    workerModels: list[str] = Field(default_factory=list)
+    verifyTls: bool = True     # False = skip certificate verification (corporate TLS-inspection proxies)
     caBundle: str = ""          # optional path to a PEM CA bundle; blank = auto ($IRIS_CA_BUNDLE, /data/ca.pem, certifi)
     # The saved system prompt the investigator uses by default (ai/system_prompts.py); '' = the
     # built-in prompt alone. A run may name another one per request.

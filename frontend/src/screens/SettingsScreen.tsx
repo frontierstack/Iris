@@ -263,6 +263,7 @@ function AiAssistant({ settings }: { settings: Settings }) {
   const [apiKey, setApiKey] = useState('');
   const [agents, setAgents] = useState(settings.ai.agents || 1);
   const [autoDelegate, setAutoDelegate] = useState(settings.ai.autoDelegate !== false);
+  const [workerModels, setWorkerModels] = useState((settings.ai.workerModels ?? []).join(', '));
   const [test, setTest] = useState<AiTestResult | null>(null);
   const [showKey, setShowKey] = useState(false);
   const [advanced, setAdvanced] = useState(!!settings.ai.baseUrl || settings.ai.verifyTls === false);
@@ -287,6 +288,7 @@ function AiAssistant({ settings }: { settings: Settings }) {
     setBaseUrl(settings.ai.baseUrl);
     setAgents(settings.ai.agents || 1);
     setAutoDelegate(settings.ai.autoDelegate !== false);
+    setWorkerModels((settings.ai.workerModels ?? []).join(', '));
     setApiKey('');
     setVerifyTls(settings.ai.verifyTls !== false);
     setCaBundle(settings.ai.caBundle ?? '');
@@ -301,6 +303,7 @@ function AiAssistant({ settings }: { settings: Settings }) {
   const dirty = provider !== settings.ai.provider || model !== (settings.ai.model || DEFAULT_MODEL) || baseUrl !== settings.ai.baseUrl || agents !== settings.ai.agents || apiKey !== ''
     || verifyTls !== (settings.ai.verifyTls !== false) || caBundle !== (settings.ai.caBundle ?? '')
     || autoDelegate !== (settings.ai.autoDelegate !== false)
+    || workerModels.trim() !== (settings.ai.workerModels ?? []).join(', ')
     || enforceLimits !== (settings.ai.enforceLimits !== false) || maxSteps !== (settings.ai.maxSteps ?? 40)
     || maxSeconds !== (settings.ai.maxSeconds ?? 600) || maxWrites !== (settings.ai.maxWrites ?? 200);
 
@@ -314,6 +317,7 @@ function AiAssistant({ settings }: { settings: Settings }) {
     const patch: Partial<Settings['ai']> = {
       provider, model: model || DEFAULT_MODEL, baseUrl: baseUrl.trim(), agents, verifyTls, caBundle: caBundle.trim(),
       enforceLimits, autoDelegate,
+      workerModels: workerModels.split(',').map((m) => m.trim()).filter(Boolean),
       maxSteps: Math.max(1, Math.round(maxSteps || 40)),
       maxSeconds: Math.max(5, Math.round(maxSeconds || 600)),
       maxWrites: Math.max(1, Math.round(maxWrites || 200)),
@@ -413,6 +417,18 @@ function AiAssistant({ settings }: { settings: Settings }) {
                   : 'Off — single agent. The assistant does all the work itself and is not offered delegation at all.'}
               </span>
             </div>
+            {autoDelegate && agents > 1 && (
+              <>
+                <input className="input" value={workerModels} onChange={(e) => setWorkerModels(e.target.value)}
+                  placeholder="Automatic — strongest model with a free slot" aria-label="Worker agent models" />
+                <span className="field__hint">
+                  Which models worker agents may run on, comma-separated (a model id or its folder name).
+                  Blank is automatic: on a gateway that reports its models and slots, each agent takes the
+                  strongest model with a free slot, and a pool such as <code>auto</code> runs the assistant
+                  itself on its strongest member. Other providers ignore this.
+                </span>
+              </>
+            )}
           </div>
           {/* Run limits. These were env-only, so a case that genuinely needed more just hit the wall
               and the analyst had no way to say "this one is worth it". Off is a real option, and the

@@ -79,7 +79,7 @@ from typing import Any, AsyncIterator, Callable, Optional
 import orjson
 
 from ..config import get_settings
-from . import autodelegate, compaction, continuation, eventids, readcache, runs, subagents
+from . import autodelegate, capacity, compaction, continuation, eventids, readcache, runs, subagents
 from .ledger import Ledger
 from .argrepair import repair_arguments
 from .client import (AIError, BadToolArguments, ContextTooLong, LLMClient, ProviderUnavailable, ReplyCut, guarded,
@@ -159,6 +159,31 @@ MAX_SUMMARY_CHECKS = 3
 # and the copy says so. Weak leads are never raised at all — a value seen once beside something
 # busy is noise, and a nudge listing noise teaches the model to skim the next one.
 MAX_LEAD_CHECKS = 2
+WRAP_UP_NO_CALLS = (
+    "Your tools are CLOSED and nothing you write as a call will run. Write the final report now, in "
+    "plain prose: what you established for each part of the objective, with the numbers and the event "
+    "ids you actually saw, and what is still open. No tool calls, no markup - the report only.")
+
+
+def _agent_reports(messages: list[dict[str, Any]]) -> str:
+    """The worker agents' own reports from this run's delegations, labelled - the last resort when the
+    lead writes no report at all. Their event ids were verified when the delegation returned."""
+    parts: list[str] = []
+    for m in messages:
+        if m.get("role") != "tool" or m.get("name") != "delegate_investigation":
+            continue
+        try:
+            body = orjson.loads(str(m.get("content") or ""))
+        except Exception:  # noqa: BLE001 — a clipped result is simply not usable here
+            continue
+        for r in (body.get("results") or []) if isinstance(body, dict) else []:
+            rep = str((r or {}).get("report") or "").strip()
+            if rep:
+                head = f"**Agent {r.get('agent') or 'agent'}** — {r.get('objective') or ''}"
+                parts.append(head + "\n\n" + rep)
+    return "\n\n".join(parts)
+
+
 LEAD_WEIGHT_FLOOR = 0.95   # below this a lead is not worth a turn of the analyst's budget
 LEAD_SHOW = 8              # leads named in one nudge; more than this is a list nobody reads
 # ---- THE LOOP GUARD (ai/loopguard.py) is what ends a run that has stopped moving, and it is NOT a
@@ -607,6 +632,10 @@ def _has_summary(actions: list[dict[str, Any]]) -> bool:
     return False
 
 
+#: Characters of per-source field names the orientation block may carry, all sources together.
+FIELDS_BLOCK_CHARS = 1_600
+
+
 def build_context(store: Any, fresh: bool = False) -> str:
     """A short orientation block. Deliberately small: the agent's job is to go and look, and a huge
     prompt preamble both costs budget and invites the model to answer from the preamble instead.
@@ -617,6 +646,7 @@ def build_context(store: Any, fresh: bool = False) -> str:
     unrelated one. The follow-up brief (continuation.py) already says which case earlier turns used.
     """
     lines: list[str] = []
+    shown_fields = False
     try:
         c = store.case()
         if c.pending:
@@ -636,7 +666,31 @@ def build_context(store: Any, fresh: bool = False) -> str:
         lines.append(f"Pool: {c.poolEventCount:,} events across {len(c.sources) + len(c.librarySources)} source(s)."
                      + (" A background load is still in progress — results may be incomplete." if c.poolLoading else ""))
         raw_n = 0
-        for s in (list(c.sources) + list(c.librarySources))[:20]:
+        # The FIELD NAMES of each source, with an example value, so the first query can be a correct
+        # field:value term instead of a discovery call or a guess that returns 0. A stride sample —
+        # never a pool walk — and budgeted so a workspace of many sources does not bloat every request.
+        try:
+            from .tools import field_catalog, source_fields_text
+            catalog = field_catalog()
+        except Exception:  # noqa: BLE001 — orientation must never sink the run
+            catalog = None
+        listed = (list(c.sources) + list(c.librarySources))[:20]
+        # A few sources can show every field (a 26-column proxy export is ~700 characters); many share
+        # the budget. source_profile / list_event_fields have the rest.
+        per_src = 30 if len(listed) <= 4 else (14 if len(listed) <= 8 else (9 if len(listed) <= 12 else 6))
+        # ONE budget for the whole block, not per source. This message is kept verbatim through every
+        # compaction, so every character here is fixed cost on every request - measured, the
+        # uncapped block (~3k chars on a 7-source pool, more once the search index is warm) turned
+        # a small-window run's folds into restarts. Shrink the per-source count until it fits.
+        fields_txt: dict[str, str] = {}
+        if catalog is not None:
+            todo = [s for s in listed if str(getattr(s, "enrich", "") or "") in ("", "enriched")]
+            while True:
+                fields_txt = {s.id: source_fields_text(s.id, per_src, catalog=catalog) for s in todo}
+                if per_src <= 3 or sum(len(t) for t in fields_txt.values()) <= FIELDS_BLOCK_CHARS:
+                    break
+                per_src = max(3, per_src * 2 // 3)
+        for s in listed:
             rng = f" {s.range[0][:19]}→{s.range[1][:19]}" if s.range else ""
             # WHETHER A SOURCE IS INTERPRETED IS PART OF ITS IDENTITY here. A raw source has no parsed
             # fields and no extracted entities, so `field:value` and `entity:"…"` cannot match it — the
@@ -646,6 +700,11 @@ def build_context(store: Any, fresh: bool = False) -> str:
             if state and state != "enriched":
                 raw_n += 1
             lines.append(f"- source {s.id} {s.file} ({s.parser}, {s.events:,} events{rng}{tag})")
+            if catalog is not None and (not state or state == "enriched"):
+                txt = fields_txt.get(s.id, "")
+                if txt:
+                    lines.append(f"    fields: {txt}")
+                    shown_fields = True
         if raw_n:
             lines.append(
                 f"SCOPE WARNING: {raw_n} of these sources are RAW. Their lines ARE searchable and ARE in "
@@ -655,17 +714,12 @@ def build_context(store: Any, fresh: bool = False) -> str:
                 "entity_profile's `coverage` block, which counts both) and say which sources are raw.")
     except Exception as exc:  # noqa: BLE001 — orientation must never sink the run
         lines.append(f"(workspace summary unavailable: {exc})")
-    # The most common parsed field names, so a trivial question does not have to spend a discovery step
-    # guessing at `src_ip` vs `client_ip`. Best effort: a facet scan must never sink the run.
-    try:
-        from ..routers.events import list_fields
-        from .tools import call_route
-        facets = call_route(list_fields, q="", scope="all", limit=18)
-        names = [f["name"] for f in facets.get("fields", [])]
-        if names:
-            lines.append("Most common parsed fields (use them as field:value terms): " + ", ".join(names))
-    except Exception:  # noqa: BLE001
-        pass
+    # The per-source `fields:` lines above replace the old "most common parsed fields" line: that was a
+    # facet over the NEWEST 20,000 events, which on a mixed pool is whichever log happens to end last —
+    # measured on a 300k-event workspace it offered `file, level, sev, source` and not one real field.
+    if shown_fields:
+        lines.append("Field names are per source (sampled, commonest first; `name=example`). Query them as "
+                     "field:value with the exact spelling shown; the value match is case-insensitive.")
     return "\n".join(lines)
 
 
@@ -1099,6 +1153,7 @@ async def investigate(store: Any, objective: str, run_id: str,
     lim = limits(max_steps, max_seconds)
     settings = get_settings()
     max_parallel = parallel_limit(settings.ai)
+    built_here = client is None      # capacity discovery is for the real provider, never a test double
     client = client or LLMClient.from_settings(settings.ai)
     # `stopper` is what makes a stop observable INSIDE a tool: a handler that waits on a derived build
     # calls ctx.check() and refuses within 250 ms, instead of the run sitting at `steps: 0` for minutes
@@ -1143,9 +1198,28 @@ async def investigate(store: Any, objective: str, run_id: str,
         return
 
     multi_agent = agents_enabled(settings.ai)
-    # A provider already measured to serve one request at a time runs this investigation as ONE
-    # agent: delegating there is slower than the lead working alone (see subagents.probe_parallel).
-    serial_known = multi_agent and subagents.known_parallel(client) is False
+    worker_override = list(getattr(settings.ai, "workerModels", None) or [])
+    # WHAT THE PROVIDER CAN RUN (ai/capacity.py). A gateway that lists its models and slots is read
+    # once here: the LEAD is placed on the strongest member of a pool alias - on the analyst's
+    # `auto` it had been landing on the 14B model every turn while the 27B sat idle - and whether
+    # agents can run at all is answered from the slots it reports rather than from a timing probe.
+    pool = await capacity.discover(client) if built_here else None
+    configured_model = str(client.model or "")
+    lead = capacity.lead_model(pool, configured_model)
+    if lead and lead != client.model:
+        client.pool_model = configured_model     # the alias the workers are scheduled across
+        client.model = lead
+        ctx.model = lead
+        note = (f"the lead runs on {capacity.short_name(lead)} — the strongest model in the "
+                f"'{configured_model}' pool; worker agents are placed on the models with free slots")
+        HISTORY.append(run_id, {"kind": "status", "text": note})
+        yield {"type": "status", "text": note, "leadModel": lead}
+    pool_slots = (len(capacity.worker_models(pool, configured_model, 99, worker_override, free_only=False) or [])
+                  if pool is not None else None)
+    # A provider already measured (or described) to serve one request at a time runs this
+    # investigation as ONE agent: delegating there is slower than the lead working alone.
+    serial_known = multi_agent and (pool_slots < 2 if pool_slots is not None
+                                    else subagents.known_parallel(client) is False)
     if serial_known:
         multi_agent = False
         HISTORY.append(run_id, {"kind": "status", "text": subagents.SERIAL_PROVIDER_NOTE})
@@ -1407,7 +1481,9 @@ async def investigate(store: Any, objective: str, run_id: str,
             auto_msg: Optional[dict[str, Any]] = None
             if (autodelegate.due(enabled=auto_delegate_on, turns_alone=turns_alone,
                                  attempts=auto_attempts, delegations=delegations,
-                                 enforced=bool(lim.get("enforced", 1)))
+                                 enforced=bool(lim.get("enforced", 1)),
+                                 open_leads=sum(1 for l in ledger.open_leads()
+                                                if l.weight >= LEAD_WEIGHT_FLOOR))
                     and not guard.tripped and not guard.needs_recovery()
                     and not runs.stop_requested(run_id) and est() < ceiling * 0.8):
                 auto_attempts += 1
@@ -1421,9 +1497,20 @@ async def investigate(store: Any, objective: str, run_id: str,
                 # Only a client that can plan is asked: one that cannot is skipped in silence by the
                 # planner below, and a probe must not spend requests on it either — a scripted test
                 # provider's turns are the run's, not the probe's.
-                parallel = (await subagents.probe_parallel(client)
-                            if callable(getattr(client, "complete", None)) else None)
-                if parallel is False:
+                free: Optional[list[str]] = None
+                if pool is not None:
+                    # FRESH: `free` moves with every request, and a split planned onto one free slot
+                    # is two agents taking turns. No planner call is spent when the slots are not there.
+                    now_pool = await capacity.discover(client, fresh=True)
+                    free = capacity.worker_models(now_pool, configured_model, width, worker_override)
+                    parallel = None if free is None else True
+                else:
+                    parallel = (await subagents.probe_parallel(client)
+                                if callable(getattr(client, "complete", None)) else None)
+                if free is not None and len(free) < subagents.MIN_TASKS:
+                    plan, why_not = None, (f"only {len(free)} inference slot(s) are free on your AI "
+                                           f"provider right now, so agents would take turns")
+                elif parallel is False:
                     auto_delegate_on = False
                     plan, why_not = None, ""
                     if not serial_warned:
@@ -1433,7 +1520,8 @@ async def investigate(store: Any, objective: str, run_id: str,
                                "providerSerialised": True}
                 else:
                     plan, why_not = await autodelegate.plan(
-                        client, objective, messages, build_context(store, fresh=False), width,
+                        autodelegate.planner_client(client, pool), objective, messages,
+                        build_context(store, fresh=False), len(free) if free else width,
                         lambda: runs.stop_requested(run_id))
                 if plan:
                     auto_msg = autodelegate.assistant_turn(run_id, auto_attempts, plan)
@@ -1968,6 +2056,7 @@ async def investigate(store: Any, objective: str, run_id: str,
                 agent_calls: dict[str, int] = {}
                 agent_tool: dict[str, str] = {}
                 agent_said: dict[str, str] = {}     # the agent's own latest narration line
+                agent_model: dict[str, str] = {}    # which provider model each agent runs on
                 agent_dirty: set[str] = set()
                 said_at = time.monotonic()
                 while waiting:
@@ -1989,13 +2078,19 @@ async def investigate(store: Any, objective: str, run_id: str,
                             continue
                         if phase == "start":
                             task = _s(ev.get("objective"), 400)
-                            line = f"agent {who} started: {_s(task, 160)}"
+                            model = str(ev.get("model") or "")
+                            # WHICH MODEL. On a pool the agents run on different models, and a shallow
+                            # report from the smaller one reads very differently once that is known.
+                            on = f" on {capacity.short_name(model)}" if model else ""
+                            agent_model[who] = on
+                            line = f"agent {who} started{on}: {_s(task, 160)}"
                             HISTORY.append(run_id, {"kind": "status", "text": line, "agent": who,
-                                                    "phase": phase, "task": task})
-                            yield {"type": "status", "text": line, "agent": who, "phase": phase, "task": task}
+                                                    "phase": phase, "task": task, "model": model})
+                            yield {"type": "status", "text": line, "agent": who, "phase": phase,
+                                   "task": task, "model": model}
                             continue
                         ended = _s(ev.get("stopped"), 120)
-                        line = (f"agent {who} finished — {int(ev.get('calls') or 0)} tool calls in "
+                        line = (f"agent {who} finished{agent_model.get(who, '')} — {int(ev.get('calls') or 0)} tool calls in "
                                 f"{int(ev.get('tookMs') or 0) / 1000:.1f}s"
                                 + (f" ({ended})" if ended else ""))
                         agent_dirty.discard(who)
@@ -2244,8 +2339,48 @@ async def investigate(store: Any, objective: str, run_id: str,
                 HISTORY.append(run_id, {"kind": "status", "text": note})
                 yield {"type": "status", "text": note, "outputContinue": _n + 1}
             wrapped = "".join(pieces)
-            # never let an empty wrap-up erase what the run had already established
-            if wrapped:
+            # A WRAP-UP THAT IS ONLY A TOOL CALL IS NO REPORT. Measured live twice in a row on the
+            # analyst's gateway: the model answered the closed tool channel by writing a call out as
+            # markup (create_case, then search_events), the markup was stripped, and the run ended
+            # `done` with an EMPTY report after five minutes of work. It is asked once more, in words
+            # that leave no room for another call; what it writes then is the report.
+            if (parse_text_tool_calls(wrapped)[0].strip() == "" and not runs.stop_requested(run_id)):
+                attempted = parse_text_tool_calls(wrapped)[1]
+                messages.append({"role": "user", "content": WRAP_UP_NO_CALLS})
+                note = ("the model answered the final turn with " + ("a tool call" if attempted else "nothing")
+                        + " instead of a report — asked it once more for the report in prose")
+                HISTORY.append(run_id, {"kind": "status", "text": note})
+                yield {"type": "status", "text": note, "wrapRetry": True}
+                buf = []
+                wrap_msg = {}
+                try:
+                    async for item in guarded(client.stream_chat(messages, tools=None, temperature=0.0,
+                                                                 tool_choice="none"),
+                                              stopping=lambda: runs.stop_requested(run_id)):
+                        if item["type"] == "text":
+                            buf.append(item["text"])
+                            HISTORY.append_text(run_id, item["text"])
+                            yield {"type": "delta", "text": item["text"], "step": step}
+                        elif item["type"] == "message":
+                            wrap_msg = item["message"]
+                except ReplyCut:
+                    pass
+                retry = "".join(buf) or str(wrap_msg.get("content") or "")
+                if parse_text_tool_calls(retry)[0].strip():
+                    wrapped = retry
+            if not parse_text_tool_calls(wrapped)[0].strip() and not answer.strip():
+                # STILL nothing: the analyst gets what the AGENTS established, labelled as exactly
+                # that, rather than a finished run with a blank answer.
+                fallback = _agent_reports(messages)
+                if fallback:
+                    wrapped = fallback
+                    note = ("the model wrote no report; the answer below is what the worker agents "
+                            "reported, unedited")
+                    HISTORY.append(run_id, {"kind": "warning", "text": note})
+                    yield {"type": "warning", "message": note, "ids": []}
+            # never let an empty wrap-up erase what the run had already established - and a wrap-up
+            # that is only call markup is empty once the markup is stripped
+            if wrapped and (parse_text_tool_calls(wrapped)[0].strip() or not answer.strip()):
                 answer = wrapped
 
         if has_tool_call_syntax(answer):

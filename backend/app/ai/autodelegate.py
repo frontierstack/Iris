@@ -48,7 +48,11 @@ AUTO_DELEGATE_FIRST = 2      # tool turns the lead takes alone before the first 
 AUTO_DELEGATE_AGAIN = 4      # ...and between later ones: the agents' answers need acting on first
 MAX_AUTO_DELEGATIONS = 3     # planning attempts per run (an empty plan counts — it is an answer)
 MAX_AUTO_DELEGATIONS_OFF = 8  # with the run limits switched off a long investigation may fan out more
-PLANNER_TIMEOUT = 120.0      # seconds; the planner is one small request, not a turn of the run
+# Seconds. The planner is one small request, not a turn of the run. It was 120, and measured live a
+# second planning attempt spent the whole 120 s streaming reasoning (3.9 MB of it) and produced no
+# plan - two minutes of an investigation for nothing. With thinking switched off where the backend
+# allows it (`planner_client`) a plan takes a few seconds; past 60 the split is not worth waiting for.
+PLANNER_TIMEOUT = 60.0
 DIGEST_CHARS = 9000          # how much of the lead's work the planner is shown
 RESULT_CHARS = 1400          # ...of which one tool result may take this much
 OBJECTIVE_CHARS = 4000
@@ -137,14 +141,34 @@ def parse_plan(text: str, agents: int) -> list[dict[str, str]]:
     return out
 
 
-def due(*, enabled: bool, turns_alone: int, attempts: int, delegations: int, enforced: bool) -> bool:
-    """Is it time to plan a split? Pure, so the policy can be read and tested in one place."""
+def due(*, enabled: bool, turns_alone: int, attempts: int, delegations: int, enforced: bool,
+        open_leads: Optional[int] = None) -> bool:
+    """Is it time to plan a split? Pure, so the policy can be read and tested in one place.
+
+    `open_leads` is how many STRONG leads the run's ledger holds that nothing has followed yet. It
+    gates every split after the first: once the agents have answered the objective's own parts, the
+    only thing worth fanning out again is two or more independent threads the evidence turned up.
+    Measured live without it: a second planning attempt four turns after a successful delegation
+    spent 120 s producing nothing, on a run whose remaining work was one dependent chain. The FIRST
+    split is not gated - the objective itself ("investigate A, B and C") is where its parts come
+    from, and the ledger has not harvested anything yet. None = not gated (callers that predate it).
+    """
     if not enabled:
         return False
     if attempts >= (MAX_AUTO_DELEGATIONS if enforced else MAX_AUTO_DELEGATIONS_OFF):
         return False
     first = attempts == 0 and delegations == 0
+    if not first and open_leads is not None and open_leads < 2:
+        return False
     return turns_alone >= (AUTO_DELEGATE_FIRST if first else AUTO_DELEGATE_AGAIN)
+
+
+def planner_client(client: Any, pool: Any = None) -> Any:
+    """The client the planner asks: the lead's own model (already the strongest in a pool), told not
+    to reason at length where the backend is known to be llama.cpp (`capacity.without_thinking`).
+    Inside a run the planner once streamed 120 s of reasoning for a JSON list and produced no plan."""
+    from .capacity import without_thinking
+    return without_thinking(client, pool)
 
 
 async def plan(client: Any, objective: str, messages: list[dict[str, Any]], context: str, agents: int,

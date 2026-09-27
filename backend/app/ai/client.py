@@ -448,6 +448,14 @@ class LLMClient:
                                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
         if json_mode:
             body["response_format"] = {"type": "json_object"}
+        return self._extra(body)
+
+    def _extra(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Merge `extra_body` - request keys one caller needs on one copy of the client (the planner
+        asks a llama.cpp backend not to think: `chat_template_kwargs`). None on an ordinary client."""
+        extra = getattr(self, "extra_body", None)
+        if isinstance(extra, dict):
+            body.update(extra)
         return body
 
     def _chat_body(self, messages: list[dict[str, Any]], temperature: float, stream: bool,
@@ -472,7 +480,7 @@ class LLMClient:
         if tools:
             body["tools"] = tools
             body["tool_choice"] = tool_choice
-        return body
+        return self._extra(body)
 
     # -------------------------------------------------------------- streaming
     async def stream(self, system: str, user: str, temperature: float = 0.2) -> AsyncIterator[str]:

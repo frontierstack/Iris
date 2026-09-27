@@ -98,6 +98,9 @@ export interface Layout {
   blocks: Block[];
   blockOf: Map<string, number>;
   routes: Map<string, Route>;
+  /** The edges the layout was BUILT from (each event's one primary parent). Every other link is a
+   *  SECONDARY one: still routed and drawn, but through the channels rather than as the tree. */
+  primary: Set<string>;
   width: number;
   height: number;
 }
@@ -131,9 +134,13 @@ export function layoutReplay(nodes: LayoutNode[], edges: LayoutEdge[], o: Layout
   }
   // `kind` here is where the child goes: 'actor' = the next column, 'shared' = the same column, below.
   const parent = new Map<string, { p: string; kind: 'actor' | 'shared' }>();
+  const primary = new Set<string>();
   for (const n of ordered) {
     const e = actorIn.get(n.key) ?? sharedIn.get(n.key);
-    if (e) parent.set(n.key, { p: e.a, kind: (e.step ?? e.kind === 'actor') ? 'actor' : 'shared' });
+    if (e) {
+      parent.set(n.key, { p: e.a, kind: (e.step ?? e.kind === 'actor') ? 'actor' : 'shared' });
+      primary.add(edgeKey(e.a, e.b));
+    }
   }
   const kids = new Map<string, { k: string; kind: 'actor' | 'shared' }[]>();
   for (const n of ordered) {
@@ -486,7 +493,7 @@ export function layoutReplay(nodes: LayoutNode[], edges: LayoutEdge[], o: Layout
 
   const width = blocks.length ? Math.max(...blocks.map((b) => b.x + b.w)) : 0;
   const height = blocks.length ? Math.max(...blocks.map((b) => b.y + b.h)) : 0;
-  return { pos, col, row, blocks, blockOf, routes, width, height };
+  return { pos, col, row, blocks, blockOf, routes, primary, width, height };
 }
 
 /** A stroked chevron whose tip is at (x, y), pointing right, left or down. */

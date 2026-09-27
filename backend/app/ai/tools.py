@@ -119,6 +119,12 @@ DSL_HELP = (
     "you meant 10.0.0.1 and every line that merely mentions the string. Example: "
     "`user:svc_deploy AND src_ip:10.0.0.100 AND NOT host:bastion-1`.")
 
+# The full grammar rides on ONE schema (search_events) and in the system prompt. It was appended to
+# five tool descriptions, ~180 tokens each, on every request the lead makes — ~720 tokens of fixed
+# prompt teaching nothing the model had not already read twice. The other query tools point at it.
+DSL_REF = ("Same query DSL as search_events (field:value, free text, AND/OR/NOT, \"phrases\", "
+           "entity:\"<value>\" exact). A result of 0 carries a zeroHint saying why.")
+
 
 class ToolError(Exception):
     """A tool refused the call. The message goes back to the model as the tool result."""
@@ -1007,6 +1013,289 @@ def _matching(args: dict[str, Any], *, cap: int = 0, positions: bool = False) ->
     return res
 
 
+# ------------------------------------------------------- what fields each source actually carries
+# A model on a local gateway pays ~30 s per turn, and the most common waste measured in real runs is
+# the turn spent DISCOVERING field names (`srcip` vs `src_ip` vs `SourceIP`) — or worse, the turn that
+# guesses, gets 0, and reads 0 as "not in the logs". The catalogue below answers "which parsed fields
+# does each source carry, and what does a value look like" from a bounded STRIDE SAMPLE of the pool:
+# O(sample), never O(pool), memoised per store version. It is a sample and every consumer says so —
+# it feeds orientation (build_context, workspace_overview) and the zero-result hint, never a count.
+CATALOG_SAMPLE = 20_000          # events visited per catalogue build, spread evenly over the pool
+_CATALOG_SMALL_SOURCE_ROWS = 40  # rows read (via the index) for a source the stride sample missed
+_catalog_memo: dict[str, Any] = {"key": None, "value": None}
+
+# Fields the DSL resolves itself (query._field_pred) — never "unknown", whatever the parsed fields say.
+_DSL_FIXED = frozenset({"sev", "source", "host", "user", "file", "id", "msg", "raw", "_ip", "_entity",
+                        "detection", "rule", "sigma", "ts", "severity", "level", "src", "parser", "hostname",
+                        "username", "message", "text", "ip", "entity"})
+
+
+def _fold_rows_into(per: dict[str, dict[str, list]], rows: Any) -> None:
+    for e in rows:
+        f = e.fields
+        if not f:
+            continue
+        d = per.setdefault(e.sourceId, {})
+        for k, v in f.items():
+            slot = d.get(k)
+            if slot is None:
+                d[k] = [1, v if isinstance(v, str) else str(v)]
+            else:
+                slot[0] += 1
+                if not slot[1] and v not in (None, ""):
+                    slot[1] = v if isinstance(v, str) else str(v)
+
+
+from ..query import FIELD_ALIASES  # noqa: E402 — the DSL's own names; never re-declared here
+
+
+def field_catalog() -> dict[str, list[tuple[str, int, str]]]:
+    """{sourceId: [(field, events in the sample carrying it, an example value)]}, commonest first.
+
+    Stride-sampled (`CATALOG_SAMPLE` events evenly over the pool), so a source smaller than the stride
+    can be missed; those are topped up with a few rows read through the search INDEX when it is ready
+    (an exact source mask, no pool walk) and otherwise simply absent — a caller must never present
+    this as a complete field list. Memoised per (store version, pool length).
+    """
+    store = _store()
+    evs = store.events
+    n = len(evs)
+    # The store INSTANCE is part of the key: a fresh store (clear-all re-init, tests) restarts its
+    # version counter, and (version, n) alone then served one pool's field list for another.
+    key = (id(store), getattr(store, "version", None), n)
+    if _catalog_memo["key"] == key and _catalog_memo["value"] is not None:
+        return _catalog_memo["value"]
+    per: dict[str, dict[str, list]] = {}
+    step = max(1, n // CATALOG_SAMPLE)
+    try:
+        _fold_rows_into(per, (evs[i] for i in range(0, n, step)))
+    except IndexError:              # the pool was swapped under us — a sample is best effort
+        pass
+    # Sources the stride stepped over: only through a READY index (never a scan of the pool).
+    try:
+        from .. import search as search_engine
+        missed = [s for s in store.sources.values()
+                  if s.id not in per and str(getattr(s, "enrich", "") or "enriched") == "enriched"
+                  and int(s.events or 0) > 0]
+        if missed and search_engine.index_ready(evs, store.ts, store.version) is not None:
+            for s in missed[:50]:
+                res = search_engine.search(evs, store.ts, store.version, "", 0, len(evs), {s.id}, set(), 0,
+                                           _CATALOG_SMALL_SOURCE_ROWS, desc=False, whole_pool=True)
+                _fold_rows_into(per, res.get("rows") or [])
+    except Exception:  # noqa: BLE001 — orientation data is best effort
+        pass
+    out = {sid: sorted(((k, c, _s(ex, 60)) for k, (c, ex) in d.items()), key=lambda r: (-r[1], r[0]))
+           for sid, d in per.items()}
+    _catalog_memo.update(key=key, value=out)
+    return out
+
+
+def source_fields_text(sid: str, max_fields: int = 14, ex_chars: int = 22,
+                       catalog: Optional[dict] = None) -> str:
+    """`src_ip=10.0.3.4, dst_port=443, …` for one source, commonest first — '' when none were sampled.
+
+    The example value is what makes the field usable on turn one: it shows the CASING
+    (`log_subtype=Denied`, not `denied`), the format (`443` vs `https`) and whether a timestamp field
+    is epoch or ISO, which a bare name cannot.
+    """
+    cat = catalog if catalog is not None else field_catalog()
+    rows = cat.get(sid) or []
+    parts = []
+    for k, _c, ex in rows[:max_fields]:
+        ex = (ex or "").replace("\n", " ").strip()
+        if len(ex) > ex_chars:
+            ex = ex[:ex_chars - 1] + "…"
+        # A field whose name is a DSL alias (`src` -> source:, `level` -> sev:, `ip` -> any address)
+        # cannot be queried as itself — `src:1.2.3.4` asks for a SOURCE of that name. Say so, or the
+        # one example that looks most usable is the one query that silently answers 0.
+        alias = FIELD_ALIASES.get(k.lower())
+        tag = f" [{k}: means {alias.lstrip('_')}:]" if alias and alias != k.lower() else ""
+        parts.append((f"{k}={ex}" if ex else k) + tag)
+    more = len(rows) - len(parts)
+    return ", ".join(parts) + (f" (+{more} more)" if more > 0 else "")
+
+
+def _norm_field(name: str) -> str:
+    return re.sub(r"[\s_.\-]", "", name.lower())
+
+
+def suggest_fields(name: str, catalog: Optional[dict] = None, n: int = 4) -> list[str]:
+    """Known parsed field names closest to `name`: same letters once case/_/./- are ignored first
+    (`srcip` -> `src_ip`), then one containing the other, then difflib's close matches."""
+    import difflib
+    cat = catalog if catalog is not None else field_catalog()
+    names: dict[str, int] = {}
+    for rows in cat.values():
+        for k, c, _ex in rows:
+            names[k] = names.get(k, 0) + c
+    want = _norm_field(name)
+    if not want:
+        return []
+    by_norm: dict[str, list[str]] = {}
+    for k in names:
+        by_norm.setdefault(_norm_field(k), []).append(k)
+    out: list[str] = list(by_norm.get(want, []))
+    if len(want) >= 2:
+        out += [k for k in sorted(names, key=lambda k: -names[k])
+                if k not in out and (want in _norm_field(k) or (len(_norm_field(k)) >= 3 and _norm_field(k) in want))]
+    for m in difflib.get_close_matches(want, list(by_norm), n=n, cutoff=0.6):
+        out += [k for k in by_norm[m] if k not in out]
+    return out[:n]
+
+
+def _known_field(name: str, catalog: dict) -> bool:
+    low = name.lower()
+    return any(k.lower() == low for rows in catalog.values() for k, _c, _e in rows)
+
+
+def _field_atoms(q: str) -> list[tuple[str, str]]:
+    """(field, value) for every non-builtin `field:value` term in the query, in order."""
+    from ..query import atom_parts, parse_query
+    out: list[tuple[str, str]] = []
+
+    def walk(node: Any) -> None:
+        if node.kind == "atom" and node.tok is not None:
+            f, v = atom_parts(node.tok)
+            if f is not None and f not in _DSL_FIXED:
+                out.append((f, v))
+        for ch in node.children:
+            walk(ch)
+    try:
+        walk(parse_query(q))
+    except Exception:  # noqa: BLE001
+        return []
+    return out
+
+
+def explain_zero(args: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """WHY a query matched nothing, and the query that would work — or None when there is nothing to add.
+
+    A 0 from a structured query has three different causes with three different fixes, and a model that
+    cannot tell them apart concludes "not in the logs": (1) no source has a parsed field of that name
+    (a guessed spelling — suggest the real one); (2) the field exists but the value is written
+    differently — say how often the value occurs as FREE TEXT, with the same filters; (3) the value
+    lives only in RAW sources, which carry no parsed fields at all. Only ever computed for a 0, and every
+    count it reports is an exact search, never the sample.
+    """
+    q = _s(args.get("query"), 2000)
+    atoms = _field_atoms(q)[:3]
+    if not atoms:
+        return None
+    cat = field_catalog()
+    items: list[dict[str, Any]] = []
+    for f, v in atoms:
+        item: dict[str, Any] = {"term": f"{f}:{v}"}
+        if not _known_field(f, cat):
+            item["problem"] = f"no source's parsed fields include `{f}` (checked on a sample of every source)"
+            sug = suggest_fields(f, cat)
+            if sug:
+                item["didYouMean"] = sug
+        vv = v.replace("*", "").strip()
+        if vv:
+            try:
+                ft = _matching({**args, "query": f'"{vv}"'}, cap=1)["total"]
+                item["freeTextMatches"] = ft
+                if ft:
+                    item["tryFreeText"] = f'"{vv}"'
+                kv = _matching({**args, "query": f'"{f}={vv}"'}, cap=1)["total"]
+                if kv:
+                    item["rawKeyValueMatches"] = kv
+                    item["tryRawKeyValue"] = f'"{f}={vv}"'
+            except ToolError:
+                pass
+        items.append(item)
+    out: dict[str, Any] = {"terms": items}
+    raw = _uninterpreted_sources()
+    if raw:
+        out["rawSources"] = [r["file"] for r in raw][:8]
+    out["note"] = ("0 from a field:value query is NOT evidence of absence until these are ruled out: a "
+                   "wrong field name (didYouMean), a value written differently (freeTextMatches > 0 means "
+                   "the text IS in the logs — run tryFreeText), or raw sources that no field query can "
+                   "reach (rawSources).")
+    return out
+
+
+# `key=value` / `key="quoted value"` inside a RAW line: how firewall (iptables/UFW), Cisco ASA, Fortinet,
+# CEF-ish and many app logs carry their structure before (or without) a parser splitting it out.
+def _raw_kv_regex(field: str) -> "re.Pattern[str]":
+    return re.compile(r'(?<![\w.\-])' + re.escape(field) + r'=(?:"([^"]*)"|([^\s,;"]+))', re.I)
+
+
+def _aggregate_raw_kv(rows: list[Any], field: str) -> Optional[tuple[list[dict[str, Any]], int, int]]:
+    """`_aggregate`'s answer read from `field=value` text in each row's RAW line, or None if no row has it.
+
+    Used ONLY when no matched row carries a parsed field of that name, so it never changes an answer the
+    parsed fields could give — it replaces "every event is withoutField" (which reads as a dead end) with
+    the breakdown the analyst could see by eye in the lines. Exact over every matched row, like
+    `_aggregate`; the first `field=` occurrence in a line is the one counted.
+    """
+    rx = _raw_kv_regex(field)
+    counts: dict[str, dict[str, Any]] = {}
+    missing = 0
+    for e in rows:
+        m = rx.search(e.raw or "")
+        if not m:
+            missing += 1
+            continue
+        v = m.group(1) if m.group(1) is not None else m.group(2)
+        if not v:
+            missing += 1
+            continue
+        g = counts.get(v)
+        if g is None:
+            counts[v] = {"value": _s(v, 200), "count": 1, "first": e.ts, "last": e.ts}
+        else:
+            g["count"] += 1
+            if e.ts < g["first"]:
+                g["first"] = e.ts
+            if e.ts > g["last"]:
+                g["last"] = e.ts
+    if not counts:
+        return None
+    ordered = sorted(counts.values(), key=lambda g: (-g["count"], g["value"]))
+    return ordered, len(ordered), missing
+
+
+def _grouped(rows: list[Any], field: str, *, need_span: bool) -> dict[str, Any]:
+    """Group-by with the two fallbacks a model needs: raw `key=value` text when the field is not parsed,
+    and a did-you-mean when it is neither. `need_span` keeps first/last per group (aggregate_events);
+    the others take the one-C-pass `_count_by` path, which `_aggregate` is pinned equal to."""
+    if need_span:
+        groups, distinct, missing = _aggregate(rows, field)
+    else:
+        pairs, distinct = _count_by(rows, field)
+        groups = [{"value": v, "count": c} for v, c in pairs]
+        missing = _missing_for(rows, field)
+    out: dict[str, Any] = {"groups": groups, "distinct": distinct, "missing": missing}
+    if rows and missing == len(rows) and field not in _GROUP_FIXED:
+        kv = _aggregate_raw_kv(rows, field)
+        if kv is not None:
+            g2, d2, m2 = kv
+            out.update(groups=g2 if need_span else [{"value": g["value"], "count": g["count"]} for g in g2],
+                       distinct=d2, missing=m2,
+                       groupedFrom=f"raw text: no matched event has a PARSED field `{field}`, so the groups "
+                                   f"are the `{field}=value` pairs written in the log lines themselves "
+                                   "(exact over every match; the first occurrence per line)")
+        else:
+            sug = suggest_fields(field)
+            out["fieldHint"] = (f"none of the {len(rows):,} matched events carries a field `{field}` (parsed, "
+                                f"or as `{field}=value` in the raw line)"
+                                + (f". Known fields with a similar name: {', '.join(sug)}" if sug else
+                                   ". Call list_event_fields with the same query to see the real names"))
+    return out
+
+
+def _missing_for(rows: list[Any], field: str) -> int:
+    """Events with no value for `field`, exactly as `_aggregate` counts them."""
+    if field in _COUNT_ATTRS:
+        return sum(1 for e in rows if not getattr(e, field))
+    if field == "detection":
+        return sum(1 for e in rows if not e.detections)
+    if field == "entity":
+        return sum(1 for e in rows if not any(e.entities))
+    return sum(1 for e in rows if e.fields.get(field) in (None, ""))
+
+
 _GROUP_FIXED = {"source": lambda e: [e.source], "sourceId": lambda e: [e.sourceId], "file": lambda e: [e.file],
                 "host": lambda e: [e.host], "user": lambda e: [e.user], "sev": lambda e: [e.sev],
                 "detection": lambda e: [d.id for d in e.detections],
@@ -1114,6 +1403,10 @@ def _search_events(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
     out = {"total": res["total"], "returned": len(rows), "engine": res.get("engine"),
            "tookMs": res.get("tookMs"),
            "rows": [_row(r, want, raw_cap, field_cap) for r in rows]}
+    if not res["total"]:
+        hint = explain_zero(args)
+        if hint:
+            out["zeroHint"] = hint
     if res["total"] > len(rows):
         out["note"] = (f"{res['total']:,} events match but only {len(rows)} are shown. Do not infer counts or "
                        "coverage from these rows — call aggregate_events to get exact per-source counts.")
@@ -1126,7 +1419,7 @@ def _search_events(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
 
 @tool("count_events",
       "EXACT number of events matching a query — no rows, no sampling, no arithmetic on your part. "
-      "Use it for 'does this appear at all' and 'how much of it is there'. " + DSL_HELP,
+      "Use it for 'does this appear at all' and 'how much of it is there'. " + DSL_REF,
       {"query": {"type": "string", "description": "DSL query; '' matches everything"},
        "sources": {"type": "string", "description": "comma-separated source ids to restrict to"},
        "sev": {"type": "string", "description": "comma-separated severities"},
@@ -1135,7 +1428,12 @@ def _search_events(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
       ["query"])
 def _count_events(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
     res = _matching(args, cap=1)
-    return {"query": _s(args.get("query"), 2000), "scope": _scope(args), "total": res["total"], **_cost(res)}
+    out = {"query": _s(args.get("query"), 2000), "scope": _scope(args), "total": res["total"], **_cost(res)}
+    if not res["total"]:
+        hint = explain_zero(args)
+        if hint:
+            out["zeroHint"] = hint
+    return out
 
 
 @tool("aggregate_events",
@@ -1143,7 +1441,7 @@ def _count_events(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
       "hosts / users does X appear in', 'where is it most frequent', 'what is the breakdown by severity'. "
       "One call replaces paging through rows, and the counts are computed over EVERY match, not a sample. "
       "groupBy accepts source, sourceId, file, host, user, sev, detection, entity, or any parsed field "
-      "name from list_event_fields. Groups with zero matches are simply not returned. " + DSL_HELP,
+      "name from list_event_fields. Groups with zero matches are simply not returned. " + DSL_REF,
       {"query": {"type": "string", "description": "DSL query; '' matches everything"},
        "groupBy": {"type": "string", "description": "field to group by, e.g. 'source'"},
        "top": {"type": "integer", "description": "groups to return, 1-200 (default 25); they come back count-descending"},
@@ -1156,16 +1454,25 @@ def _aggregate_events(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
     if not field:
         raise ToolError("groupBy is required — name the field to count by, e.g. 'source'.")
     res = _matching(args)
-    groups, distinct, missing = _aggregate(res["rows"], field)
+    g = _grouped(res["rows"], field, need_span=True)
+    distinct = g["distinct"]
     top = _int(args, "top", 25, 1, MAX_GROUPS)
-    return {"query": _s(args.get("query"), 2000), "scope": _scope(args), "groupBy": field,
-            "total": res["total"], "distinctGroups": distinct, "withoutField": missing,
-            "groups": groups[:top], "truncated": distinct > top, **_cost(res)}
+    out = {"query": _s(args.get("query"), 2000), "scope": _scope(args), "groupBy": field,
+           "total": res["total"], "distinctGroups": distinct, "withoutField": g["missing"],
+           "groups": g["groups"][:top], "truncated": distinct > top, **_cost(res)}
+    for k in ("groupedFrom", "fieldHint"):
+        if k in g:
+            out[k] = g[k]
+    if not res["total"]:
+        hint = explain_zero(args)
+        if hint:
+            out["zeroHint"] = hint
+    return out
 
 
 @tool("distinct_values",
       "The distinct values a field takes within a result set, with how many events carry each. Use it to "
-      "answer 'which users', 'which destination ports', 'what statuses' without reading rows. " + DSL_HELP,
+      "answer 'which users', 'which destination ports', 'what statuses' without reading rows. " + DSL_REF,
       {"query": {"type": "string"}, "field": {"type": "string", "description": "field name"},
        "limit": {"type": "integer", "description": "values to return, 1-200 (default 50)"},
        "sources": {"type": "string"}, "sev": {"type": "string"},
@@ -1177,11 +1484,19 @@ def _distinct_values(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
     if not field:
         raise ToolError("field is required")
     res = _matching(args)
-    groups, distinct, missing = _aggregate(res["rows"], field)
+    g = _grouped(res["rows"], field, need_span=False)
+    distinct = g["distinct"]
     limit = _int(args, "limit", 50, 1, MAX_GROUPS)
-    return {"field": field, "total": res["total"], "distinct": distinct, "withoutField": missing,
-            "values": [{"value": g["value"], "count": g["count"]} for g in groups[:limit]],
-            "truncated": distinct > limit, **_cost(res)}
+    out = {"field": field, "total": res["total"], "distinct": distinct, "withoutField": g["missing"],
+           "values": g["groups"][:limit], "truncated": distinct > limit, **_cost(res)}
+    for k in ("groupedFrom", "fieldHint"):
+        if k in g:
+            out[k] = g[k]
+    if not res["total"]:
+        hint = explain_zero(args)
+        if hint:
+            out["zeroHint"] = hint
+    return out
 
 
 _BUCKETS = {"minute": 60, "hour": 3600, "day": 86400}
@@ -1431,6 +1746,7 @@ def _list_sources(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
     c = store.case()
     def row(s: Any, origin: str) -> dict[str, Any]:
         return {"id": s.id, "file": s.file, "parser": s.parser, "events": s.events, "state": s.state,
+                "enrich": str(getattr(s, "enrich", "") or "enriched"),
                 "range": list(s.range) if s.range else None, "origin": origin}
     return {"caseSources": [row(s, "case") for s in c.sources],
             "librarySources": [row(s, "library") for s in c.librarySources],
@@ -2000,8 +2316,8 @@ def _phrase(value: str) -> str:
 
 @tool("workspace_overview",
       "ORIENT IN ONE CALL — what is in this workspace, what state it is in, and what has already "
-      "fired. Returns the sources with their event counts, parsers, time ranges and whether each is "
-      "still RAW (phase 1, so entity:/field: queries cannot reach it), the pool totals and window, the "
+      "fired. Returns the sources with their event counts, parsers, time ranges, parsed field names and "
+      "whether each is still RAW (phase 1, so entity:/field: queries cannot reach it), the pool totals and window, the "
       "active case, the detection roll-up and the entity-graph findings when those are already built, "
       "and the enrichment backlog. This replaces the get_case_state + list_sources + list_detections + "
       "list_graph_findings opening and costs one step instead of four. It NEVER builds anything: if "
@@ -2019,15 +2335,23 @@ def _workspace_overview(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]
 
     rows: list[dict[str, Any]] = []
     raw_events = 0
+    try:
+        catalog = field_catalog()
+    except Exception:  # noqa: BLE001 — orientation must never fail on a reporting detail
+        catalog = {}
     for src, origin in [(s, "case") for s in c.sources] + [(s, "library") for s in c.librarySources]:
         enrich = str(getattr(src, "enrich", "") or "enriched")
         interpreted = enrich == "enriched"
         if not interpreted:
             raw_events += int(src.events or 0)
+        # the parsed field NAMES this source carries (sampled, commonest first) — what a field:value
+        # term can actually name, so the next call does not have to be a discovery call
+        fnames = [k for k, _c, _e in (catalog.get(src.id) or [])[:24]]
         rows.append({"id": src.id, "file": src.file, "parser": src.parser, "events": int(src.events or 0),
                      "state": src.state, "origin": origin, "enrich": enrich,
                      "interpreted": interpreted,
                      "range": list(src.range) if src.range else None,
+                     **({"fields": fnames} if fnames else {}),
                      **({"error": _s(getattr(src, "error", ""), 200)} if getattr(src, "error", "") else {})})
     rows.sort(key=lambda r: -r["events"])
     # The pool's window is the union of the sources' own ranges — O(sources), never a walk of the pool.
@@ -2101,7 +2425,7 @@ def _workspace_overview(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]
       "list of candidates (twelve accounts, twelve ports, twelve sources, a rule's condition against "
       "each log) without spending twelve model turns on it. A query that is malformed comes back with "
       "its own `error` and the other entries still answer — one bad query never costs you the batch. "
-      "Counts are computed over every match, never sampled. " + DSL_HELP,
+      "Counts are computed over every match, never sampled. " + DSL_REF,
       {"queries": {"type": "array",
                    "description": f"1-{BATCH_MAX} questions. Each: {{label, query, groupBy?, top?}} — "
                                   "`label` is your own name for it and comes back on the result; "
@@ -2140,15 +2464,22 @@ def _batch_query(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
             call = {**shared, "query": q}
             if group:
                 res = _matching(call)
-                groups, distinct, missing = _aggregate(res["rows"], group)
+                g = _grouped(res["rows"], group, need_span=False)
                 top = max(1, min(MAX_GROUPS, int(item.get("top") or 10)))
-                results.append({"label": label, "query": q, "total": res["total"], "groupBy": group,
-                                "distinctGroups": distinct, "withoutField": missing,
-                                "groups": [{"value": g["value"], "count": g["count"]} for g in groups[:top]],
-                                "truncated": distinct > top, **_cost(res)})
+                entry = {"label": label, "query": q, "total": res["total"], "groupBy": group,
+                         "distinctGroups": g["distinct"], "withoutField": g["missing"],
+                         "groups": g["groups"][:top], "truncated": g["distinct"] > top, **_cost(res)}
+                for k in ("groupedFrom", "fieldHint"):
+                    if k in g:
+                        entry[k] = g[k]
             else:
                 res = _matching(call, cap=1)
-                results.append({"label": label, "query": q, "total": res["total"], **_cost(res)})
+                entry = {"label": label, "query": q, "total": res["total"], **_cost(res)}
+            if not res["total"]:
+                hint = explain_zero(call)
+                if hint:
+                    entry["zeroHint"] = hint
+            results.append(entry)
         except ToolError as exc:
             # A malformed query is the common case and it must not cost the other eleven answers.
             results.append({"label": label, "query": q, "error": str(exc)})
@@ -2997,9 +3328,31 @@ def _delegate_investigation(args: dict[str, Any], ctx: RunContext) -> dict[str, 
     if not getattr(client, "configured", False):
         raise ToolError("no AI provider is configured, so there is nothing to delegate to. Do the work "
                         "yourself with the read tools.")
-    # A ONE-SLOT PROVIDER RUNS AGENTS IN TURN, which is slower than not delegating (see
-    # subagents.probe_parallel). Remembered when known, asked when not; unknown carries on as before.
-    parallel = subagents.known_parallel(client)
+    width = subagents.max_agents(parallel_limit(settings.ai))
+    # WHAT THE PROVIDER SAYS IT CAN RUN (ai/capacity.py). A gateway that lists its models with their
+    # slots is scheduled from that list - fresh, because `free` moves with every request - and the
+    # timing probe is not needed at all. Each agent is placed on a real model, strongest free slot
+    # first; the width is what is actually free, never more than the analyst's setting.
+    from . import capacity
+    try:
+        pool = asyncio.run(capacity.discover(client, fresh=True))
+    except Exception:  # noqa: BLE001 — an unreadable provider falls back to the probe below
+        pool = None
+    models = capacity.worker_models(pool, getattr(client, "pool_model", None) or client.model, width,
+                                    list(getattr(settings.ai, "workerModels", None) or []))
+    if models is not None:
+        if len(models) < MIN_AGENTS:
+            raise ToolError(
+                f"your AI provider has {len(models)} free inference slot(s) for worker agents right now "
+                "(it reports its models and their slots), so agents would take turns rather than work "
+                "together. Do this work yourself — several independent read calls in ONE reply still "
+                "run at the same time, because tools do not need a model slot.")
+        width = len(models)
+        parallel: Optional[bool] = True
+    else:
+        # A ONE-SLOT PROVIDER RUNS AGENTS IN TURN, which is slower than not delegating (see
+        # subagents.probe_parallel). Remembered when known, asked when not; unknown carries on as before.
+        parallel = subagents.known_parallel(client)
     if parallel is None:
         try:
             parallel = asyncio.run(subagents.probe_parallel(client))
@@ -3009,7 +3362,6 @@ def _delegate_investigation(args: dict[str, Any], ctx: RunContext) -> dict[str, 
         raise ToolError(subagents.SERIAL_PROVIDER_NOTE + " Do this work yourself — several independent "
                         "read calls in ONE reply still run at the same time, because tools do not need "
                         "a model slot.")
-    width = subagents.max_agents(parallel_limit(settings.ai))
     store = _store()
     context_block = build_context(store)
     started = time.perf_counter()
@@ -3017,8 +3369,13 @@ def _delegate_investigation(args: dict[str, Any], ctx: RunContext) -> dict[str, 
     # WHILE it waits for this call, so clearing it on the way out would throw away exactly the thing
     # the analyst asked to be able to see. It is bounded (subagents.note caps the list) and the run
     # clears its own entry when it finishes, which also covers a caller that never drains at all (MCP).
-    results = subagents.run_blocking(tasks, client=client, ctx=ctx, context_block=context_block,
-                                     run_id=ctx.run_id, width=width)
+    # WORKERS DO NOT REASON AT LENGTH on a llama.cpp backend. A worker answers one narrow question
+    # with tools; measured live, the 14B model's reasoning ran away on worker turns (120 s cuts, MBs
+    # of `reasoning_content`, an agent returning nothing). `IRIS_AI_WORKER_THINKING=1` restores it.
+    worker_client = (client if os.environ.get("IRIS_AI_WORKER_THINKING", "") == "1"
+                     else capacity.without_thinking(client, pool))
+    results = subagents.run_blocking(tasks, client=worker_client, ctx=ctx, context_block=context_block,
+                                     run_id=ctx.run_id, width=width, models=models)
     took = int((time.perf_counter() - started) * 1000)
     early = [r["agent"] for r in results if r.get("endedEarly") or r.get("error")]
     out = {
@@ -3041,7 +3398,13 @@ def _delegate_investigation(args: dict[str, Any], ctx: RunContext) -> dict[str, 
     # says why the agents' durations cannot answer this). The spans are measurement, not findings:
     # they are taken OFF the results here so they never reach the lead's context.
     share, streamed = subagents.stream_overlap([r.pop("spans", None) or [] for r in results])
-    if share is not None:
+    if models is not None:
+        # The provider TOLD us its slots, and the agents were placed on them. Timing across different
+        # models is not evidence about any one of them, so it is reported and never remembered.
+        out["models"] = sorted({capacity.short_name(m) for m in models})
+        if share is not None:
+            out["agentOverlap"] = round(share, 2)
+    elif share is not None:
         out["agentOverlap"] = round(share, 2)
         # the real measurement is the better evidence: it overwrites what the probe said
         subagents.note_parallel(client, share >= subagents.SERIAL_SHARE)
@@ -3834,11 +4197,11 @@ def _preview_detection_rule(args: dict[str, Any], ctx: RunContext) -> dict[str, 
       "node, not of any one of its events.",
       {"scope": {"type": "string", "enum": ["all", "case"], "description": "whole pool (default) or the case set"},
        "sev": {"type": "string", "description": "comma-separated severities to keep"},
-       "limit": {"type": "integer", "description": "findings to return, 1-100 (default 30)"}})
+       "limit": {"type": "integer", "description": "findings to return, 1-100 (default 20)"}})
 def _list_graph_findings(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
     from .. import graph_findings
     scope = "case" if _s(args.get("scope"), 8).strip().lower() == "case" else "all"
-    limit = max(1, min(100, int(args.get("limit") or 30)))
+    limit = max(1, min(100, int(args.get("limit") or 20)))
     want = {x.strip().lower() for x in _s(args.get("sev"), 80).split(",") if x.strip()}
     # The graph is the expensive part and it may still be building. _await_derived is the same bounded
     # wait every other graph tool takes: it ends, and it refuses with what is still building rather than
@@ -3849,8 +4212,30 @@ def _list_graph_findings(args: dict[str, Any], ctx: RunContext) -> dict[str, Any
     rows = graph_findings.get(scope)
     if want:
         rows = [f for f in rows if f.sev in want]
+    # Compact rows. `as_dict` carries every neighbour id behind a fan-out and every cited event id —
+    # measured ~730 chars a finding, 21.8 kB for the default 30, most of it lists nobody reads in the
+    # overview. The first few of each come back with their TOTALS, and graph_node / the entity:"…"
+    # query is where the full set lives; nothing is dropped without saying how much.
+    def slim(f: Any) -> dict[str, Any]:
+        d = f.as_dict()
+        rel, cited = list(d.pop("related", None) or []), list(d.pop("citedEventIds", None) or [])
+        # `entity` + `nodeType` say what `nodeId` says (it is "<type>:<value>"), once
+        d["entity"] = d.pop("nodeValue", None)
+        d.pop("nodeId", None)
+        if not d.get("peerId"):
+            d.pop("peerId", None)
+        if rel:
+            d["related"] = rel[:5]
+        if len(rel) > 5:
+            d["relatedTotal"] = len(rel)
+        d["citedEventIds"] = cited[:4]
+        if len(cited) > 4:
+            d["citedTotal"] = len(cited)
+        return d
     return {"total": len(rows), "scope": scope,
-            "findings": [f.as_dict() for f in rows[:limit]]}
+            "findings": [slim(f) for f in rows[:limit]],
+            "note": "related / citedEventIds show the first few with their totals; graph_node on the "
+                    "entity (or search entity:\"<value>\") returns the rest."}
 
 
 @tool("update_detection_rule",

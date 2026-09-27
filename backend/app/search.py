@@ -726,12 +726,36 @@ class _Engine:
             return self.all_true()
         # field:value → value substring anywhere in the doc is an upper bound (exact check happens on CPU)
         self.exact = False
-        if negate or "*" in v or f == "id":
+        if negate or f == "id":
             return self.all_true()
+        # ...AND the event must carry a key of that name. `_doc` packs every field as
+        # `<FSEP>fold(key)=value`, and `query._field_pred` only ever matches a key whose lower-case
+        # form IS `f` (exact-case lookup, then a case-insensitive one), so `<FSEP>f=` is present in
+        # every event the predicate can accept — a superset, like the value mask, and usually a far
+        # tighter one: a value like `500` or an address occurs all over a pool, the key only in the
+        # sources that carry it, and a MISTYPED key (`srcip`) in none, so it confirms nothing instead
+        # of every line that mentions the value. Plain parsed fields only: the DSL's own names (host,
+        # user, _ip, detection, ...) read attributes and alternative keys, not one field. ASCII only,
+        # because only then is `fold(key) == key.lower()` guaranteed for every key that can match.
+        key = self.field_key_mask(f)
+        if "*" in v:
+            return key if key is not None else self.all_true()
         needle = v.encode("utf-8", "replace")
         if len(needle) < 2:
-            return self.all_true()
-        return self.contains(needle)
+            return key if key is not None else self.all_true()
+        mask = self.contains(needle)
+        return mask if key is None else (mask & key)
+
+    # Names `query._field_pred` resolves itself rather than as one `Event.fields` key.
+    _NOT_PLAIN_FIELDS = frozenset({"sev", "source", "host", "user", "file", "id", "msg", "raw", "_ip",
+                                   "_entity", "detection", "rule", "sigma", "ts"})
+
+    def field_key_mask(self, f: str) -> Any:
+        """Events whose packed document carries a field KEY `f` (`<FSEP>f=`), or None when that is not
+        a sound upper bound for `f`. Read-only like every `contains` mask - combine, never edit."""
+        if not f or f in self._NOT_PLAIN_FIELDS or not f.isascii() or _crosses_doc_join(f):
+            return None
+        return self.contains((_FSEP_S + f + "=").encode("utf-8"))
 
 
 _lock = threading.Lock()            # guards the _index POINTER only — never held across a build

@@ -11,6 +11,7 @@ from .base import BaseParser, ParsedEvent
 _TS_PATTERNS = [
     re.compile(r"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?)"),
     re.compile(r"(\d{2}/[A-Za-z]{3}/\d{4}:\d{2}:\d{2}:\d{2}(?:\s+[+-]\d{4})?)"),
+    re.compile(r"(\d{1,2}-[A-Za-z]{3}-\d{4}[ T]\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?)"),   # BIND named
     re.compile(r"((?:[A-Z][a-z]{2}\s+){1,2}\d{1,2}\s+\d{2}:\d{2}:\d{2})"),
     re.compile(r"(\d{2}/\d{2}/\d{4}[ ,]+\d{2}:\d{2}:\d{2})"),
     re.compile(r"\b(\d{10}(?:\d{3}|\d{6}|\d{9})?(?:\.\d{1,9})?)\b"),

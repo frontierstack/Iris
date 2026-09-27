@@ -21,6 +21,10 @@ _ISO_RE = re.compile(
 )
 _NGINX_RE = re.compile(r"^(\d{2})/([A-Za-z]{3})/(\d{4}):(\d{2}):(\d{2}):(\d{2})\s*([+-]\d{4})?$")
 _SYSLOG_RE = re.compile(r"^([A-Za-z]{3})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})$")
+# "26-Sep-2026 10:00:01.123" - BIND (named) query and general logs. No zone is written; like syslog
+# it is read as UTC. dateutil would take it too, but only via the fallback that dominates ingest, and
+# the raw phase never reaches the fallback - so without this a BIND log was entirely undated.
+_BIND_RE = re.compile(r"^(\d{1,2})-([A-Za-z]{3})-(\d{4})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?$")
 # "Aug 17, 2026 @ 09:32:52.000" — how Kibana / OpenSearch / Elastic Discover write a time when you
 # export a search to CSV, and therefore how a great many exported logs arrive. dateutil is the last
 # resort here and `fuzzy=False` refuses the " @ ", so without this the whole file lands with NO
@@ -86,6 +90,7 @@ _LEAD_TS = re.compile(
     r'|[A-Za-z]{3,9}\s+\d{1,2},\s*\d{4}\s*@\s*\d{1,2}:\d{2}:\d{2}(?:\.\d{1,6})?'        # Kibana export
     r'|\d{2}/[A-Za-z]{3}/\d{4}:\d{2}:\d{2}:\d{2}(?:\s[+-]\d{4})?'                          # nginx
     r'|[A-Za-z]{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}'                                          # syslog
+    r'|\d{1,2}-[A-Za-z]{3}-\d{4}[ T]\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?'                            # BIND named
     r'|\d{10}(?:\d{3}|\d{6}|\d{9})?(?:\.\d{1,9})?(?!\d)'                                     # epoch s / ms / us / ns
     r')')
 _LEAD_SCAN = 48          # a leading timestamp is always within this many characters
@@ -151,6 +156,14 @@ def _parse_ts_raw(text: str, default_year: Optional[int] = None) -> Optional[dat
         d, mon, y, h, mi, s, tzs = m.groups()
         try:
             return datetime(int(y), _MONTHS[mon.lower()], int(d), int(h), int(mi), int(s), tzinfo=_tz_from(tzs)).astimezone(UTC)
+        except (ValueError, KeyError):
+            return None
+    m = _BIND_RE.match(text)
+    if m:
+        d, mon, y, h, mi, sec, frac = m.groups()
+        try:
+            return datetime(int(y), _MONTHS[mon.lower()], int(d), int(h), int(mi), int(sec),
+                            int((frac or "0").ljust(6, "0")), tzinfo=UTC)
         except (ValueError, KeyError):
             return None
     m = _SYSLOG_RE.match(text)

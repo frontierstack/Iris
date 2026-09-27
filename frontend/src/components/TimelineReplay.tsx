@@ -38,10 +38,12 @@
  * slotted in somewhere, the same rule the list follows when it sorts those entries last.
  */
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { createPortal } from 'react-dom';
+import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
-import type { CaseSetEntry, Event, ReplayBeat, ReplayContext, Severity } from '../api/types';
+import type { CaseSetEntry, Event, ReplayBeat, ReplayContext, ReplayLink, Severity } from '../api/types';
 import { useTypewriter } from '../hooks/useArrivals';
 import { useCase } from '../hooks/queries';
 import { cx } from '../utils/format';
@@ -243,7 +245,16 @@ interface Item {
 interface MapNode { key: string; role: string; value: string; verb: string; t: number; first: number; lane: number; host: string }
 /** `actor`: b was done BY a's process (spawned, wrote, loaded, connected); `shared`: they touched the
  *  same thing. `label` is the reason in two or three words, drawn on the line; `detail` the sentence. */
-interface MapEdge { a: string; b: string; at: number; kind: 'actor' | 'shared'; label: string; detail: string }
+interface MapEdge {
+  a: string; b: string; at: number; kind: 'actor' | 'shared'; label: string; detail: string;
+  /** b is a NEW thing a produced (a spawned process, a file it ran): the layout puts it one column right */
+  step: boolean;
+  /** lower = more specific; the layout builds its tree from the most specific link into each event */
+  rank: number;
+}
+/** Who asked for the hold: the map (a node was clicked) or the stream (a card was). Each side scrolls
+ *  itself to the held event only when the OTHER side asked — the side that was clicked is already on it. */
+type HoldFrom = 'map' | 'stream';
 
 /** THE order, used by every list in the replay: the exact instant, then the timeline's own order. The
  *  stream, the phases, the ticks and the map all come from `items`, which is sorted by this once. */
@@ -385,7 +396,7 @@ function buildEdges(out: Item[], display: Map<string, string>): MapEdge[] {
     if (byActor !== undefined) {
       const label = actorLabel(it.action.kind, it.action.verb);
       edges.push({ a: out[byActor]!.en.eventId, b: it.en.eventId, at: it.idx, kind: 'actor', label,
-        detail: `${actorName} ${label} ${it.action.object || it.action.verb}` });
+        detail: `${actorName} ${label} ${it.action.object || it.action.verb}`, step: label !== 'then', rank: 0 });
     }
     let best: { prev: number; k: string; rank: number } | null = null;
     for (const k of it.ents) {
@@ -403,12 +414,35 @@ function buildEdges(out: Item[], display: Map<string, string>): MapEdge[] {
       const kind = best.k.slice(0, best.k.indexOf(':'));
       const value = display.get(best.k) ?? best.k.slice(kind.length + 1);
       edges.push({ a: out[best.prev]!.en.eventId, b: it.en.eventId, at: it.idx, kind: 'shared',
-        label: `same ${kind}`, detail: `both involve ${kind} ${value}` });
+        label: `same ${kind}`, detail: `both involve ${kind} ${value}`, step: false, rank: 4 + best.rank });
     }
     for (const k of it.ents) lastWith.set(k, it.idx);
     if (it.action.kind === 'process' && it.action.object) lastProc.set(it.action.object.toLowerCase(), it.idx);
   }
   return edges;
+}
+
+/** The server's links (app/replay.relations): EVERY tie between two events that a value both carry
+ *  supports — the parent by PID, the process's own later activity, what it injected into, the domain
+ *  a proxy row, a DNS row and a process's own HTTP call share. `buildEdges` above only guessed from two
+ *  names, and left a process's API calls, a proxy row and a DNS row alone on the map with the tie
+ *  sitting right there in their fields. Each pair appears once, with its most specific reason; a link
+ *  to an event that is not on the timeline (unstamped) is dropped, never pointed somewhere else. */
+function serverEdges(links: ReplayLink[], out: Item[]): MapEdge[] {
+  const idx = new Map(out.map((it) => [it.en.eventId, it.idx]));
+  const seen = new Set<string>();
+  const edges: MapEdge[] = [];
+  for (const l of links) {
+    const ia = idx.get(l.a); const ib = idx.get(l.b);
+    if (ia === undefined || ib === undefined || ia >= ib) continue;
+    const k = edgeKey(l.a, l.b);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    edges.push({ a: l.a, b: l.b, at: ib, kind: l.kind, label: l.label, detail: l.detail,
+      step: l.rel === 'spawned' || l.rel === 'executed', rank: l.rank });
+  }
+  // Most specific first: the layout takes the FIRST link into each event as the one it builds from.
+  return edges.sort((p, q) => p.rank - q.rank || p.at - q.at);
 }
 
 /* ───────── the map: what the intrusion has reached, BUILT as the replay reaches it ───────── */
@@ -440,6 +474,9 @@ const ACTION_META: Record<string, { tag: string; glyph: string; hue: string }> =
   persistence: { tag: 'persistence', glyph: 'PS', hue: 'var(--sev-high)' },
   'anti-forensics': { tag: 'log cleared', glyph: 'LC', hue: 'var(--bad)' },
   cloud: { tag: 'cloud', glyph: 'C', hue: '#6f9fd8' },
+  injection: { tag: 'injection', glyph: 'IN', hue: 'var(--sev-high)' },
+  api: { tag: 'api call', glyph: 'A', hue: '#c98a5f' },
+  alert: { tag: 'alert', glyph: '!', hue: 'var(--sev-high)' },
   event: { tag: 'event', glyph: '•', hue: 'var(--muted)' },
 };
 
@@ -452,10 +489,24 @@ const pathStyle = (d: string): CSSProperties => ({ d: `path("${d}")` } as unknow
  *  activity stacks under it. Each connected thread of events is one block, blocks sit in the order
  *  they began. Because the layout covers every event from the start, nothing moves when the replay
  *  reaches the next one: the map draws what has been reached, in place, and its frame grows to hold it. */
-const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, current, onPin }: {
+/** Map zoom bounds, and the step one button press / key / wheel notch takes. */
+const MZ_MIN = 0.25;
+const MZ_MAX = 4;
+const MZ_STEP = 1.25;
+/** A pointer that travels further than this before it is released was a PAN, not a click. */
+const MZ_DRAG_PX = 4;
+interface MapView { k: number; x: number; y: number }
+
+const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, current, held, holdFrom, onHold, onOpenEvent, zoomSlot }: {
   nodes: MapNode[]; edges: MapEdge[]; lanes: string[]; reached: number; current: string | null;
-  /** The node the analyst clicked (held), or null: the stream highlights that event's card. */
-  onPin?: (id: string | null) => void;
+  /** Where the zoom controls go: a slot in the map card's header, owned by the replay. */
+  zoomSlot?: HTMLElement | null;
+  /** The HELD event (clicked here or on its stream card), or null. The replay owns it: one state, so
+   *  the map and the stream can never disagree about which event is held. */
+  held: string | null; holdFrom: HoldFrom;
+  onHold: (id: string | null) => void;
+  /** Open the event's own page. */
+  onOpenEvent: (id: string) => void;
 }) {
   const shown = useMemo(() => nodes.filter((n) => n.first < reached), [nodes, reached]);
   const box = useRef<HTMLDivElement>(null);
@@ -468,18 +519,19 @@ const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, curren
     setAvail(Math.max(320, el.clientWidth));
     return () => ro.disconnect();
   }, []);
-  // Focus: the event under the pointer, else one the analyst clicked, else the one being played.
+  // Focus: the event under the pointer, else the held one, else the one being played. A held event
+  // the replay has not reached yet (a seek back) is not on the map, so it holds nothing.
   const [hover, setHover] = useState<string | null>(null);
-  const [pinned, setPinned] = useState<string | null>(null);
-  useEffect(() => { onPin?.(pinned); }, [pinned, onPin]);
+  const pinned = held != null && shown.some((n) => n.key === held) ? held : null;
   const focus = hover ?? pinned ?? current;
   const chosen = hover != null || pinned != null;
+  const toggle = (key: string) => onHold(pinned === key ? null : key);
   // Over EVERY event, not the reached ones: that is what keeps a node where it first appeared.
   const L = useMemo(() => layoutReplay(
     nodes.map((n) => ({ key: n.key, first: n.first, host: n.host })),
     // An actor link to the process's OWN activity ('then') keeps it under the process; one to a thing
     // it produced (spawned, wrote, loaded, connected to) moves that thing to the next column.
-    edges.map((ed) => ({ a: ed.a, b: ed.b, kind: ed.kind, step: ed.kind === 'actor' && ed.label !== 'then' })),
+    edges.map((ed) => ({ a: ed.a, b: ed.b, kind: ed.kind, step: ed.step })),
     { ...LAYOUT, avail: avail - 2 * MAP_PAD }), [nodes, edges, avail]);
   const pos = useMemo(() => {
     const m = new Map<string, { x: number; y: number }>();
@@ -491,6 +543,253 @@ const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, curren
   // The frame is CROPPED to what has been reached — the drawing is laid out for every event, the frame
   // only ever shows as far down as the replay has got, and eases to its new height.
   const contentH = shown.length ? Math.max(...shown.map((n) => pos.get(n.key)!.y + NODE_H)) + MAP_PAD + 2 : 0;
+  const svgH = Math.max(contentH, L.height + 2 * MAP_PAD);
+
+  /* ── zoom and pan ──
+     The view (scale k, offset x/y in screen px) lives in a REF and reaches the drawing as CSS custom
+     properties on one wrapper, so a wheel notch or a drag frame never re-renders the map (the seek bar's
+     zoom works the same way). React only hears about the switch between the two MODES:
+       natural (zoomH null) - exactly the map as it always was: natural size, the frame grows with what
+         has been reached, the page scrolls past it;
+       zoomed (zoomH = a fixed viewport height) - the analyst's own view, kept while new events appear,
+         until they press Fit. The height is frozen at entry (at most 70 % of the window) so the page
+         under the map does not jump while they zoom. */
+  const frameRef = useRef<HTMLDivElement>(null);
+  const zoomRef = useRef<HTMLDivElement>(null);
+  const readRef = useRef<HTMLSpanElement>(null);
+  const minusRef = useRef<HTMLButtonElement>(null);
+  const plusRef = useRef<HTMLButtonElement>(null);
+  const oneRef = useRef<HTMLButtonElement>(null);
+  const view = useRef<MapView>({ k: 1, x: 0, y: 0 });
+  const [zoomH, setZoomH] = useState<number | null>(null);
+  const zoomHRef = useRef<number | null>(null);
+  const dims = useRef({ w: 0, h: 0 });
+  dims.current = { w: vbW, h: contentH };
+  const glideTimer = useRef(0);
+  const viewport = () => ({ vw: box.current?.clientWidth ?? 0, vh: zoomHRef.current ?? dims.current.h });
+  // Content can never be lost: bigger than the viewport, it covers it; smaller, it stays wholly inside.
+  const clampView = (v: MapView): MapView => {
+    const { vw, vh } = viewport();
+    const cl = (p: number, room: number) => Math.min(Math.max(0, room), Math.max(Math.min(0, room), p));
+    return { k: v.k, x: cl(v.x, vw - dims.current.w * v.k), y: cl(v.y, vh - dims.current.h * v.k) };
+  };
+  const apply = (v: MapView, glide = false) => {
+    view.current = v;
+    const z = zoomRef.current;
+    if (z) {
+      z.style.setProperty('--rp-mx', `${v.x.toFixed(2)}px`);
+      z.style.setProperty('--rp-my', `${v.y.toFixed(2)}px`);
+      z.style.setProperty('--rp-mk', v.k.toFixed(4));
+      if (glide && !reducedMotion()) {
+        z.classList.add('rp-mapzoom--glide');
+        window.clearTimeout(glideTimer.current);
+        glideTimer.current = window.setTimeout(() => z.classList.remove('rp-mapzoom--glide'), 280);
+      }
+    }
+    const zoomed = zoomHRef.current != null;
+    if (readRef.current) readRef.current.textContent = `${Math.round((zoomed ? v.k : 1) * 100)}%`;
+    if (minusRef.current) minusRef.current.disabled = zoomed && v.k <= MZ_MIN + 1e-3;
+    if (plusRef.current) plusRef.current.disabled = zoomed && v.k >= MZ_MAX - 1e-3;
+    if (oneRef.current) oneRef.current.disabled = !zoomed || Math.abs(v.k - 1) < 1e-3;
+  };
+  // Leave the natural view for a zoomed one, starting from exactly what is on screen now.
+  const ensureZoomed = () => {
+    if (zoomHRef.current != null) return;
+    const b = box.current; const f = frameRef.current;
+    const cur = f ? f.getBoundingClientRect().height : dims.current.h;
+    const h = Math.round(Math.min(Math.max(cur, 310), Math.max(240, window.innerHeight * 0.7)));
+    const sx = b?.scrollLeft ?? 0;
+    zoomHRef.current = h;
+    view.current = { k: 1, x: -sx, y: 0 };
+    if (b) b.scrollLeft = 0;
+    if (f) { f.classList.add('rp-mapframe--zoomed'); f.style.height = `${h}px`; f.style.width = '100%'; }
+    setZoomH(h);
+  };
+  /** Zoom by `factor` about a point given in the FRAME's own pixels: that point stays put. */
+  const zoomAt = (factor: number, px: number, py: number, glide = false) => {
+    ensureZoomed();
+    const v = view.current;
+    const k = Math.min(MZ_MAX, Math.max(MZ_MIN, v.k * factor));
+    const r = k / v.k;
+    apply(clampView({ k, x: px - (px - v.x) * r, y: py - (py - v.y) * r }), glide);
+  };
+  const zoomCentre = (factor: number) => {
+    ensureZoomed();
+    const { vw, vh } = viewport();
+    zoomAt(factor, vw / 2, vh / 2, true);
+  };
+  const panBy = (dx: number, dy: number) => {
+    if (zoomHRef.current == null) {                 // natural view: only a map wider than its card moves
+      if (box.current) box.current.scrollLeft -= dx;
+      return;
+    }
+    const v = view.current;
+    apply(clampView({ k: v.k, x: v.x + dx, y: v.y + dy }));
+  };
+  const fit = () => {
+    zoomHRef.current = null;
+    const f = frameRef.current;
+    if (f) f.classList.remove('rp-mapframe--zoomed');
+    apply({ k: 1, x: 0, y: 0 }, true);
+    setZoomH(null);
+  };
+  const actualSize = () => {
+    if (zoomHRef.current == null) return;
+    const { vw, vh } = viewport();
+    zoomAt(1 / view.current.k, vw / 2, vh / 2, true);
+  };
+  // Every render re-asserts the view (a remounted frame, a new node) and the controls' states.
+  useLayoutEffect(() => { apply(view.current); });
+
+  // WHEEL. Ctrl/Cmd+wheel (and a trackpad pinch, which the browser reports as one) zooms about the
+  // pointer. Shift+wheel or a sideways two-finger scroll pans a zoomed map. A plain vertical wheel is
+  // NEVER taken: it scrolls the page, zoomed or not. Non-passive, so it has to be a real listener.
+  const wheelRef = useRef<(e: WheelEvent) => void>(() => undefined);
+  wheelRef.current = (e: WheelEvent) => {
+    if (e.ctrlKey || e.metaKey) {
+      const r = frameRef.current?.getBoundingClientRect();
+      if (!r) return;
+      e.preventDefault();
+      const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+      // a mouse notch is ~100, a pinch sends small deltas many times a second
+      zoomAt(Math.exp(-dy * (Math.abs(dy) < 40 ? 0.012 : 0.0025)), e.clientX - r.left, e.clientY - r.top);
+      return;
+    }
+    if (zoomHRef.current == null) return;           // natural view: the browser's own scrolling
+    const unit = e.deltaMode === 1 ? 16 : 1;
+    const side = e.shiftKey ? (e.deltaY || e.deltaX) : (Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : 0);
+    if (!side) return;
+    e.preventDefault();
+    panBy(-side * unit, 0);
+  };
+  const hasFrame = shown.length > 0;
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const on = (e: WheelEvent) => wheelRef.current(e);
+    el.addEventListener('wheel', on, { passive: false });
+    return () => el.removeEventListener('wheel', on);
+  }, [hasFrame, nodes.length > 0]);
+
+  // DRAG to pan (mouse, pen, or one finger on a zoomed map), PINCH to zoom (two fingers). Nothing is
+  // captured until the pointer has travelled MZ_DRAG_PX: capturing on press would retarget the click,
+  // and a node must still be clickable. A drag that did travel swallows the click it ends in.
+  const drag = useRef<{ id: number; sx: number; sy: number; lx: number; ly: number; moved: boolean } | null>(null);
+  const touches = useRef(new Map<number, { x: number; y: number }>());
+  const pinch = useRef<{ d: number; k: number; mx: number; my: number } | null>(null);
+  const swallowClick = useRef(false);
+  const pannable = () => zoomHRef.current != null || (box.current ? box.current.scrollWidth > box.current.clientWidth + 1 : false);
+  const twoFinger = () => {
+    const [a, b] = [...touches.current.values()];
+    return { d: Math.hypot(a!.x - b!.x, a!.y - b!.y) || 1, mx: (a!.x + b!.x) / 2, my: (a!.y + b!.y) / 2 };
+  };
+  const onFrameDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if ((e.target as Element).closest('.rp-openev, .rp-mapfitpill')) return;
+    if (e.pointerType === 'touch') {
+      touches.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touches.current.size === 2) {
+        const t = twoFinger();
+        pinch.current = { d: t.d, k: zoomHRef.current == null ? 1 : view.current.k, mx: t.mx, my: t.my };
+        drag.current = null;
+        return;
+      }
+      // natural view: a finger scrolls the PAGE (touch-action lets it); only a zoomed map is dragged
+      if (zoomHRef.current == null) return;
+    } else {
+      if (e.button === 1 && pannable()) e.preventDefault();    // no autoscroll on a middle-drag
+      else if (e.button !== 0) return;
+      if (!pannable()) return;
+    }
+    drag.current = { id: e.pointerId, sx: e.clientX, sy: e.clientY, lx: e.clientX, ly: e.clientY, moved: false };
+  };
+  const onFrameMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.pointerType === 'touch' && touches.current.has(e.pointerId)) {
+      touches.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      const p = pinch.current;
+      if (p && touches.current.size >= 2) {
+        const r = frameRef.current?.getBoundingClientRect();
+        if (!r) return;
+        const t = twoFinger();
+        const target = Math.min(MZ_MAX, Math.max(MZ_MIN, p.k * (t.d / p.d)));
+        const cur = zoomHRef.current == null ? 1 : view.current.k;
+        zoomAt(target / cur, t.mx - r.left, t.my - r.top);
+        panBy(t.mx - p.mx, t.my - p.my);
+        p.mx = t.mx; p.my = t.my;
+        swallowClick.current = true;
+        return;
+      }
+    }
+    const d = drag.current;
+    if (!d || d.id !== e.pointerId) return;
+    if (!d.moved) {
+      if (Math.hypot(e.clientX - d.sx, e.clientY - d.sy) <= MZ_DRAG_PX) return;
+      d.moved = true;
+      try { frameRef.current?.setPointerCapture(e.pointerId); } catch { /* pointer already gone */ }
+      frameRef.current?.classList.add('rp-mapframe--panning');
+    }
+    panBy(e.clientX - d.lx, e.clientY - d.ly);
+    d.lx = e.clientX; d.ly = e.clientY;
+  };
+  const onFrameUp = (e: ReactPointerEvent<HTMLDivElement>) => {
+    touches.current.delete(e.pointerId);
+    if (touches.current.size < 2) pinch.current = null;
+    const d = drag.current;
+    if (!d || d.id !== e.pointerId) return;
+    drag.current = null;
+    if (d.moved) {
+      swallowClick.current = true;
+      window.setTimeout(() => { swallowClick.current = false; }, 0);
+      frameRef.current?.classList.remove('rp-mapframe--panning');
+      try { frameRef.current?.releasePointerCapture(e.pointerId); } catch { /* released already */ }
+    }
+  };
+  const onFrameClickCapture = (e: ReactMouseEvent) => {
+    if (!swallowClick.current) return;
+    swallowClick.current = false;
+    e.stopPropagation(); e.preventDefault();
+  };
+  // + / - / 0 while the map (or anything in it) has focus. The seek bar's own + / - / 0 are handled on
+  // the seek bar, so the two never both fire. Arrows pan a zoomed map when the map itself is focused.
+  const onMapKey = (ev: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+    const k = ev.key;
+    if (k === '+' || k === '=') zoomCentre(MZ_STEP);
+    else if (k === '-' || k === '_') zoomCentre(1 / MZ_STEP);
+    else if (k === '0') fit();
+    else if (zoomHRef.current != null && ev.target === ev.currentTarget && k.startsWith('Arrow')) {
+      const s = 60;
+      panBy(k === 'ArrowLeft' ? s : k === 'ArrowRight' ? -s : 0, k === 'ArrowUp' ? s : k === 'ArrowDown' ? -s : 0);
+    }
+    else return;
+    ev.preventDefault();
+  };
+
+  // A card clicked in the STREAM holds its node here: bring the node into view, but only when it is
+  // off screen, and never when the hold came from the map (that node is under the pointer already).
+  // Zoomed, that is the MAP's view moving to it - the page stays where the analyst put it.
+  const nodeEls = useRef(new Map<string, SVGGElement>());
+  useEffect(() => {
+    if (!pinned || holdFrom !== 'stream') return;
+    if (zoomHRef.current != null) {
+      const p = pos.get(pinned);
+      if (!p) return;
+      const { vw, vh } = viewport();
+      const v = view.current;
+      const sx = v.x + p.x * v.k; const sy = v.y + p.y * v.k;
+      const m = 12;
+      if (sx < m || sy < m || sx + NODE_W * v.k > vw - m || sy + NODE_H * v.k > vh - m) {
+        apply(clampView({ k: v.k, x: vw / 2 - (p.x + NODE_W / 2) * v.k, y: vh / 2 - (p.y + NODE_H / 2) * v.k }), true);
+      }
+      return;
+    }
+    const el = nodeEls.current.get(pinned);
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const frame = box.current?.getBoundingClientRect();
+    const offX = frame ? r.left < frame.left || r.right > frame.right : false;
+    const offY = r.top < 0 || r.bottom > window.innerHeight;
+    if (offX || offY) el.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: reducedMotion() ? 'auto' : 'smooth' });
+  }, [pinned, holdFrom]);
 
   // A thread's box is the bounds of what it has REACHED, so it grows with it instead of standing empty.
   const threads = useMemo(() => {
@@ -537,19 +836,39 @@ const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, curren
   // The stepped-back lines are faint enough that a focused one reads through them.
   const ordered = visibleEdges;
   const hue = (lane: number) => PHASE_HUES[lane % PHASE_HUES.length];
+  const zoomed = zoomH != null;
+  const controls = zoomSlot && createPortal(
+    <span className="rp-zoom rp-mapzoomctl" role="group" aria-label="Map zoom">
+      <button type="button" className="rp-zoom__b" ref={minusRef} onClick={() => zoomCentre(1 / MZ_STEP)}
+        aria-label="Zoom the map out" title="Zoom out (-, or Ctrl + wheel)">−</button>
+      <span className="rp-zoom__x rp-mapzoomctl__x mono" ref={readRef} aria-label="Map zoom level" />
+      <button type="button" className="rp-zoom__b" ref={plusRef} onClick={() => zoomCentre(MZ_STEP)}
+        aria-label="Zoom the map in" title="Zoom in (+, or Ctrl + wheel)">+</button>
+      <button type="button" className="rp-zoom__fit" ref={oneRef} onClick={actualSize}
+        aria-label="Actual size, keeping the centre of the view" title="Actual size, keeping the centre of the view">100%</button>
+      <button type="button" className="rp-zoom__fit" onClick={fit} disabled={!zoomed}
+        aria-label="Fit: back to the whole map at natural size" title="Back to the whole map at natural size, growing as it plays (0)">Fit</button>
+    </span>, zoomSlot);
   return (
-    <div className={cx('rp-mapview', overflow && 'rp-mapview--scroll', chosen && 'rp-mapview--chosen')} ref={box}
+    <div className={cx('rp-mapview', overflow && !zoomed && 'rp-mapview--scroll', zoomed && 'rp-mapview--zoomed', chosen && 'rp-mapview--chosen')} ref={box}
+      tabIndex={0} role="group" onKeyDown={onMapKey}
+      aria-label="Event map. Ctrl + wheel or pinch zooms, + and - zoom, 0 fits; drag pans a zoomed map, arrow keys too."
       onPointerLeave={() => setHover(null)}>
+      {controls}
       {shown.length === 0 ? (
         <div className="rp-map__wait" style={{ height: MAP_EMPTY_H }}>
           The map builds as the replay reaches each host, address, account and file.
         </div>
       ) : (
         // The FRAME eases to its new height (CSS), so the map grows instead of jumping; the drawing
-        // inside is always at its natural size and never re-scaled mid-play.
-        <div className="rp-mapframe" style={{ height: contentH, width: vbW }}>
-          <svg className="rp-map" width={vbW} height={Math.max(contentH, L.height + 2 * MAP_PAD)}
-            viewBox={`0 0 ${vbW} ${Math.max(contentH, L.height + 2 * MAP_PAD)}`}
+        // inside is at its natural size unless the analyst has zoomed (see "zoom and pan" above).
+        <div className={cx('rp-mapframe', zoomed && 'rp-mapframe--zoomed')} ref={frameRef}
+          style={zoomed ? { height: zoomH, width: '100%' } : { height: contentH, width: vbW }}
+          onPointerDown={onFrameDown} onPointerMove={onFrameMove} onPointerUp={onFrameUp} onPointerCancel={onFrameUp}
+          onClickCapture={onFrameClickCapture}>
+          <div className="rp-mapzoom" ref={zoomRef} style={{ width: vbW, height: svgH }}>
+          <svg className="rp-map" width={vbW} height={svgH}
+            viewBox={`0 0 ${vbW} ${svgH}`}
             role="img" aria-label={`Map of the ${shown.length} events the replay has reached so far, laid out by what caused what`}>
             {threads.map((z) => (
               <g key={z.id} className="rp-thread">
@@ -566,11 +885,15 @@ const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, curren
               const on = hot(ed);
               return (
                 <g key={`${ed.a}|${ed.b}`}
-                  className={cx('rp-link', `rp-link--${ed.kind}`, on && 'rp-link--hot', !on && focus && 'rp-link--back')}
+                  // A SECONDARY link (not the one the layout was built from) is drawn too - dashed and
+                  // lighter, stronger on focus - so a node is alone on the map only when nothing ties it.
+                  className={cx('rp-link', `rp-link--${ed.kind}`, !L.primary.has(edgeKey(ed.a, ed.b)) && 'rp-link--extra',
+                    on && 'rp-link--hot', !on && chosen && 'rp-link--back')}
                   style={{ transform: `translate(${MAP_PAD}px, ${MAP_PAD}px)`, ['--c' as string]: hue(laneOfNode.get(ed.b) ?? 0) }}>
                   <title>{ed.detail}</title>
                   {/* an actor link draws itself (a normalised dash); a shared one is DASHED, so it fades in */}
-                  <path className="rp-edge" d={d} style={pathStyle(d)} pathLength={ed.kind === 'actor' ? 1 : undefined} />
+                  <path className="rp-edge" d={d} style={pathStyle(d)}
+                    pathLength={ed.kind === 'actor' && L.primary.has(edgeKey(ed.a, ed.b)) ? 1 : undefined} />
                   <path className="rp-arrowhead" d={head} style={pathStyle(head)} />
                 </g>
               );
@@ -583,10 +906,20 @@ const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, curren
               const phase = lanes[n.lane] ?? UNLABELLED;
               return (
                 <g key={n.key} className={cx('rp-nodepos', dim && 'rp-nodepos--dim')} style={{ transform: `translate(${p.x}px, ${p.y}px)`, ['--c' as string]: meta.hue, ['--ph' as string]: hue(n.lane) }}
+                  ref={(el) => { if (el) nodeEls.current.set(n.key, el); else nodeEls.current.delete(n.key); }}
+                  tabIndex={0} role="button" aria-pressed={pinned === n.key}
+                  aria-label={`${n.verb}: ${n.value}, ${c.clock} UTC. Space holds its links, Enter opens the event.`}
                   onPointerEnter={() => setHover(n.key)}
-                  onClick={() => setPinned((cur) => (cur === n.key ? null : n.key))}>
-                  <g className={cx('rp-node', n.key === current && 'rp-node--now', n.key === focus && chosen && 'rp-node--focus')}>
-                    <title>{`${c.clock}${c.ms} UTC — ${n.verb}: ${n.value}\nphase: ${phase}${n.host ? `\nhost: ${n.host}` : ''}${pinned === n.key ? '\n(click again to release)' : '\n(click to hold its links and highlight it in the stream)'}`}</title>
+                  // The second click of a double-click (detail 2) is ignored: the first one held the
+                  // node and the double-click opens it, so it never ends up released under the pointer.
+                  onClick={(ev) => { if (ev.detail < 2) toggle(n.key); }}
+                  onDoubleClick={() => { onHold(n.key); onOpenEvent(n.key); }}
+                  onKeyDown={(ev) => {
+                    if (ev.key === 'Enter') { ev.preventDefault(); onOpenEvent(n.key); }
+                    else if (ev.key === ' ') { ev.preventDefault(); toggle(n.key); }
+                  }}>
+                  <g className={cx('rp-node', n.key === current && 'rp-node--now', n.key === focus && chosen && 'rp-node--focus', pinned === n.key && 'rp-node--held')}>
+                    <title>{`${c.clock}${c.ms} UTC — ${n.verb}: ${n.value}\nphase: ${phase}${n.host ? `\nhost: ${n.host}` : ''}${pinned === n.key ? '\n(click again to release; double-click to open the event)' : '\n(click to hold its links; double-click to open the event)'}`}</title>
                     <rect className="rp-node__box" width={NODE_W} height={NODE_H} rx={5} />
                     {/* the phase it belongs to: a rule down the left edge, in the phase's colour */}
                     <rect className="rp-node__phase" x={0.6} y={6} width={2.6} height={NODE_H - 12} />
@@ -600,12 +933,27 @@ const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, curren
             })}
             {/* The reasons, on the focus's links only, above everything so a node never hides one. */}
             {ordered.filter(hot).map((ed) => {
-              const { mid, side } = route(ed);
+              const { mid, side, pts } = route(ed);
               const w = Math.round(ed.label.length * 6.1 + 14);
-              const x0 = side === 'r' ? 0 : -w / 2;
+              // A plate never sits on an event: with every link now drawn, a secondary one's midpoint can
+              // fall on a node's title. Try the layout's spot, then the middle of each stretch of the
+              // route (and beside it), and take the first that covers no node.
+              const covers = (cx0: number, cy0: number) => shown.some((n) => {
+                const p = pos.get(n.key)!;
+                return cx0 < p.x + NODE_W && cx0 + w > p.x && cy0 - 9 < p.y + NODE_H && cy0 + 9 > p.y;
+              });
+              let at = { x: mid.x + MAP_PAD + (side === 'r' ? 0 : -w / 2), y: mid.y + MAP_PAD };
+              if (covers(at.x, at.y)) {
+                for (let i = 1; i < pts.length; i++) {
+                  const mx = (pts[i - 1]!.x + pts[i]!.x) / 2 + MAP_PAD; const my = (pts[i - 1]!.y + pts[i]!.y) / 2 + MAP_PAD;
+                  const c0 = [mx - w / 2, mx + 6, mx - w - 6].map((x) => ({ x, y: my })).find((c) => !covers(c.x, c.y));
+                  if (c0) { at = c0; break; }
+                }
+              }
+              const x0 = 0;
               return (
                 <g key={`l|${ed.a}|${ed.b}`} className={cx('rp-elabel', `rp-elabel--${ed.kind}`)}
-                  style={{ transform: `translate(${mid.x + MAP_PAD}px, ${mid.y + MAP_PAD}px)`, ['--c' as string]: hue(laneOfNode.get(ed.b) ?? 0) }}>
+                  style={{ transform: `translate(${at.x}px, ${at.y}px)`, ['--c' as string]: hue(laneOfNode.get(ed.b) ?? 0) }}>
                   <title>{ed.detail}</title>
                   <rect x={x0} y={-9} width={w} height={18} rx={3} />
                   <text x={x0 + w / 2} y={3.5} textAnchor="middle">{ed.label}</text>
@@ -613,6 +961,20 @@ const AttackMap = memo(function AttackMap({ nodes, edges, lanes, reached, curren
               );
             })}
           </svg>
+          {/* The held event can be OPENED: a real button beside its node (keyboard reachable, never
+              hover-only), placed in the same coordinates as the drawing. */}
+          {pinned && pos.has(pinned) && (
+            <button type="button" className="rp-openev" onClick={() => onOpenEvent(pinned)}
+              // right-aligned under the node, in the row gap: the frame clips its sides, never the gap
+              style={{ left: pos.get(pinned)!.x + NODE_W, top: pos.get(pinned)!.y + NODE_H + 1 }}
+              title="Open this event's detail page">Open event</button>
+          )}
+          </div>
+          {/* Zoomed, the way back sits on the map itself too, not only in a header scrolled away. */}
+          {zoomed && (
+            <button type="button" className="rp-mapfitpill" onClick={fit}
+              aria-label="Fit: back to the whole map at natural size" title="Back to the whole map at natural size (0)">Fit map</button>
+          )}
         </div>
       )}
     </div>
@@ -675,17 +1037,22 @@ const PhaseActivity = memo(function PhaseActivity({ phases, active, pct, newestF
 });
 
 /* ───────── the live stream: typed in as it happens, in the timeline's order ───────── */
-function StreamLine({ it, fresh, age, skipped, onOpen, anim, hl }: {
+function StreamLine({ it, fresh, age, skipped, onOpen, anim, hl, follow, onHold }: {
   it: Item; fresh: boolean; age: number; skipped: boolean; onOpen: (id: string) => void; anim: number;
-  /** Held on the map: drawn highlighted and scrolled into view. */
+  /** Held (on the map or here): drawn highlighted. */
   hl: boolean;
+  /** Scroll the stream to it: only when the MAP asked. A card clicked here is already on screen, and
+   *  moving the stream under the pointer that just clicked it is the jump this must never make. */
+  follow: boolean;
+  /** Click the card: hold its node on the map (again: release). */
+  onHold: (id: string) => void;
 }) {
   const row = useRef<HTMLDivElement>(null);
   useEffect(() => {
     // Scroll the STREAM to it, never the page: scrollIntoView would also move the window.
     const el = row.current;
     const wrap = el?.closest('.rp-logwrap') as HTMLElement | null;
-    if (!hl || !el || !wrap) return;
+    if (!hl || !follow || !el || !wrap) return;
     const top = el.offsetTop - wrap.clientHeight / 2 + el.offsetHeight / 2;
     wrap.scrollTo({ top: Math.max(0, top), behavior: reducedMotion() ? 'auto' : 'smooth' });
   }, [hl]);
@@ -695,8 +1062,21 @@ function StreamLine({ it, fresh, age, skipped, onOpen, anim, hl }: {
   const p = utcParts(it.t);
   const flare = milestone(it);
   return (
+    // The card is a toggle for its node on the map. It is a div with button semantics rather than a
+    // <button>, because it holds the "open" button and a button may not contain another; that button,
+    // and any link in the text, stop their click from reaching the card.
     <div ref={row} className={cx('rp-ln', age === 0 && 'rp-ln--new', flare && beatTone(flare) === 'bad' && 'rp-ln--flare', hl && 'rp-ln--hl')}
-      aria-current={hl || undefined}
+      role="button" tabIndex={0} aria-pressed={hl}
+      title={hl ? 'Held on the map - click to release' : 'Click to find this event on the map and hold its links'}
+      onClick={(ev) => {
+        if ((ev.target as HTMLElement).closest('button, a')) return;
+        if (window.getSelection()?.toString()) return;     // selecting text to copy is not a click
+        onHold(it.en.eventId);
+      }}
+      onKeyDown={(ev) => {
+        if (ev.target !== ev.currentTarget) return;
+        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); onHold(it.en.eventId); }
+      }}
       style={{ ['--c' as string]: PHASE_HUES[it.lane % PHASE_HUES.length], opacity: hl ? 1 : Math.max(0.45, 1 - age * 0.09) }}>
       <span className="rp-ln__ts mono">{p.clock}{it.precise ? <i>{p.ms}</i> : null}
         {skipped && <em>after a skipped lull</em>}</span>
@@ -707,7 +1087,7 @@ function StreamLine({ it, fresh, age, skipped, onOpen, anim, hl }: {
           <span className="rp-ln__tag" title={`Phase: ${it.en.labels[0] || UNLABELLED}`}>
             <span className="rp-ln__tagdot" aria-hidden />{it.en.labels[0] || UNLABELLED}
           </span>
-          <button type="button" className="rp-ln__open" onClick={() => onOpen(it.en.eventId)}
+          <button type="button" className="rp-ln__open" onClick={(ev) => { ev.stopPropagation(); onOpen(it.en.eventId); }}
             title="Open this entry in Full events">open</button>
         </span>
         <span className={cx('rp-ln__cmd', !it.said && 'mono')}>
@@ -722,10 +1102,11 @@ function StreamLine({ it, fresh, age, skipped, onOpen, anim, hl }: {
     </div>
   );
 }
-const Stream = memo(function Stream({ items, reached, skipped, onOpen, newestFirst, picked, onClear, anim, held }: {
+const Stream = memo(function Stream({ items, reached, skipped, onOpen, newestFirst, picked, onClear, anim, held, holdFrom, onHold }: {
   items: Item[]; reached: number; skipped: Set<number>; onOpen: (id: string) => void; newestFirst: boolean;
-  /** The event held on the map: its card is highlighted, and shown even when a phase filter hides its phase. */
-  held: string | null;
+  /** The held event: its card is highlighted, and shown even when a phase filter hides its phase. */
+  held: string | null; holdFrom: HoldFrom;
+  onHold: (id: string) => void;
   /** Phases chosen in Phase activity: only their rows are shown. Empty = every row. */
   picked: ReadonlySet<number>; onClear: () => void; anim: number;
 }) {
@@ -770,7 +1151,7 @@ const Stream = memo(function Stream({ items, reached, skipped, onOpen, newestFir
             const age = newestFirst ? i : shown.length - 1 - i;
             return (
               <StreamLine key={it.en.eventId} it={it} age={age} skipped={skipped.has(it.idx)} onOpen={onOpen} anim={anim}
-                hl={it.en.eventId === held}
+                hl={it.en.eventId === held} follow={holdFrom === 'map'} onHold={onHold}
                 fresh={age === 0 && !seen.current.has(it.en.eventId)} />
             );
           })}
@@ -820,6 +1201,7 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
   }, [ctx.data?.version, qc]);
 
   /* ── the sequence, its phases and the entities it reaches ── */
+  const links = ctx.data?.links;
   const { items, lanes, nodes, edges } = useMemo(() => {
     const raw: Omit<Item, 'lane' | 'idx' | 'ents' | 'allEnts' | 'action'>[] = [];
     entries.forEach((en, order) => {
@@ -857,9 +1239,9 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
       items: out, lanes: names,
       nodes: out.map((it) => ({ key: it.en.eventId, role: it.action.kind, value: it.action.object || it.action.verb,
         verb: it.action.verb, t: it.t, first: it.idx, lane: it.lane, host: real(it.e.host) ? it.e.host : '' })),
-      edges: buildEdges(out, display),
+      edges: links ? serverEdges(links, out) : buildEdges(out, display),
     };
-  }, [entries, byId, ctxById]);
+  }, [entries, byId, ctxById, links]);
   const unplaced = entries.length - items.length;
   const anyPrecise = items.some((it) => it.precise);
   const wholeSeconds = items.filter((it) => !it.precise).length;
@@ -954,6 +1336,8 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
     // Once the replay is on screen, for its life: re-running per render would re-read the layout
     // mid-growth. (The section is not rendered until there is something to replay.)
   }, [items.length > 0]);
+  /** The map card's header slot its zoom controls are portalled into (the map owns the view). */
+  const [mapZoomSlot, setMapZoomSlot] = useState<HTMLSpanElement | null>(null);
   const clockRef = useRef<HTMLSpanElement>(null);
   const msRef = useRef<HTMLSpanElement>(null);
   const offRef = useRef<HTMLSpanElement>(null);
@@ -1326,8 +1710,14 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
 
   /* ── the stream's phase filter: per view, never persisted, and it touches ONLY the stream ── */
   const [picked, setPicked] = useState<ReadonlySet<number>>(() => new Set());
-  // The map node the analyst clicked: its card in the live stream is highlighted.
-  const [held, setHeld] = useState<string | null>(null);
+  // The HELD event: a node clicked on the map, or a card clicked in the stream. ONE state for both, so
+  // the node and the card can never disagree; `from` says which side asked, so only the other scrolls.
+  const [hold, setHold] = useState<{ id: string | null; from: HoldFrom }>({ id: null, from: 'map' });
+  const held = hold.id;
+  const holdFromMap = useCallback((id: string | null) => setHold({ id, from: 'map' }), []);
+  const holdFromStream = useCallback((id: string) => setHold((c) => ({ id: c.id === id ? null : id, from: 'stream' })), []);
+  const nav = useNavigate();
+  const openEvent = useCallback((id: string) => nav(`/events/${encodeURIComponent(id)}`), [nav]);
   const togglePicked = useCallback((li: number) => setPicked((cur) => {
     const next = new Set(cur);
     if (next.has(li)) next.delete(li); else next.add(li);
@@ -1400,9 +1790,11 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
     applyView(u - m.off, u - m.off + (v1 - v0));
   };
   const onMiniUp = () => { miniDrag.current = null; };
-  const edgeCounts = useMemo(() => ({
-    actor: edges.filter((e) => e.kind === 'actor').length, shared: edges.filter((e) => e.kind === 'shared').length,
-  }), [edges]);
+  // What the legend counts is what the map has DRAWN so far: the links into the events reached.
+  const edgeCounts = useMemo(() => {
+    const drawn = edges.filter((e) => e.at < reached);
+    return { actor: drawn.filter((e) => e.kind === 'actor').length, shared: drawn.filter((e) => e.kind === 'shared').length };
+  }, [edges, reached]);
 
   if (!items.length) {
     return (
@@ -1571,7 +1963,8 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
       {/* ── the map: the full width, because it holds every event ── */}
       <div className="rp-card rp-card--map">
           <div className="rp-card__hd"><span className="rp-mk" /><h3>What it reached</h3>
-            <span className="rp-tagline">every event, drawn as it happens · linked by what did it and what they share</span></div>
+            <span className="rp-tagline">every event, drawn as it happens · linked by what did it and what they share</span>
+            <span className="rp-mapzoomslot" ref={setMapZoomSlot} /></div>
           {/* The milestone line has a place of its own: floated over the map it covered the very
               nodes it was talking about. Fixed height, so a callout arriving never moves the map. */}
           <div className={cx('rp-callout', flare && `rp-callout--${flare.tone}`)} role="status">
@@ -1599,11 +1992,13 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
             </div>
           )}
           <div className="rp-mapwrap">
-            <AttackMap nodes={nodes} edges={edges} lanes={lanes} reached={reached} current={cur?.en.eventId ?? null} onPin={setHeld} />
+            <AttackMap nodes={nodes} edges={edges} lanes={lanes} reached={reached} current={cur?.en.eventId ?? null}
+              held={held} holdFrom={hold.from} onHold={holdFromMap} onOpenEvent={openEvent} zoomSlot={mapZoomSlot} />
           </div>
           <div className="rp-legend" aria-hidden>
-            <span className="rp-legend__k"><svg width="26" height="8"><path d="M1,4 L25,4" className="rp-legend__actor" /></svg>done by — the process that did it{edgeCounts.actor ? ` (${edgeCounts.actor})` : ''}</span>
-            <span className="rp-legend__k"><svg width="26" height="8"><path d="M1,4 L25,4" className="rp-legend__shared" /></svg>same file, hash, domain or address as an earlier event{edgeCounts.shared ? ` (${edgeCounts.shared})` : ''}</span>
+            <span className="rp-legend__k"><svg width="26" height="8"><path d="M1,4 L25,4" className="rp-legend__actor" /></svg>done by — spawned it, ran it, or the same process again{edgeCounts.actor ? ` (${edgeCounts.actor})` : ''}</span>
+            <span className="rp-legend__k"><svg width="26" height="8"><path d="M1,4 L25,4" className="rp-legend__shared" /></svg>same file, hash, domain, address or session as an earlier event{edgeCounts.shared ? ` (${edgeCounts.shared})` : ''}</span>
+            <span className="rp-legend__k"><svg width="26" height="8"><path d="M1,4 L25,4" className="rp-legend__extra" /></svg>lighter: a further tie beyond the one it is placed by</span>
             {lanes.length > 1 && (
               <span className="rp-legend__phases" title="The rule down an event's left edge is the phase it belongs to">
                 {lanes.map((name, li) => (
@@ -1611,7 +2006,7 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
                 ))}
               </span>
             )}
-            <span className="rp-legend__hint">Left to right is cause to effect. Point at an event to read its links; click to hold them.</span>
+            <span className="rp-legend__hint">Left to right is cause to effect. Point at an event to read its links; click to hold them; double-click to open the event. Ctrl + wheel or pinch zooms the map; drag pans it once zoomed.</span>
           </div>
       </div>
 
@@ -1621,7 +2016,7 @@ export function TimelineReplay({ entries, byId, onOpen, newestFirst = false }: {
           <div className="rp-card__hd"><span className="rp-mk" style={{ background: '#d8974f' }} /><h3>Live event stream</h3>
             <span className="rp-tagline">every event, {newestFirst ? 'newest' : 'oldest'} first — the timeline's order</span></div>
           <Stream items={items} reached={reached} skipped={skipped} onOpen={onOpen} newestFirst={newestFirst}
-            picked={picked} onClear={clearPicked} anim={anim} held={held} />
+            picked={picked} onClear={clearPicked} anim={anim} held={held} holdFrom={hold.from} onHold={holdFromStream} />
         </div>
         <div className="rp-side">
         <div className="rp-card">

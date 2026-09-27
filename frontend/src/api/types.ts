@@ -296,6 +296,9 @@ export interface AiSettings {
   /** Iris plans a split of the remaining work itself once a run has gone a couple of tool turns
    *  alone, and runs worker agents on it — it does not wait for the model to ask. Default on. */
   autoDelegate?: boolean;
+  /** Provider models worker agents may run on; empty = automatic (strongest model with a free slot,
+   *  on a gateway that reports its models' slots). */
+  workerModels?: string[];
   verifyTls: boolean; caBundle: string; systemPromptId: string;
   /**
    * The investigator's run budget. `enforceLimits: false` removes the step, wall-clock and write
@@ -568,7 +571,7 @@ export type AiRunEvent =
      from a step announcement. */
   /** `agent` / `phase` / `task` ride on a worker-agent line (start | call | end) — the panel folds
    *  those into ONE roster row per agent, so dropping them here means no roster while the run is live. */
-  | { type: 'status'; text: string; compactions?: number; droppedMessages?: number; checkIn?: number; budgetNotice?: boolean; documentCheck?: boolean; recordNudge?: number; summaryCheck?: boolean; parallel?: number; agent?: string; phase?: string; task?: string; said?: string; autoDelegate?: boolean; narrateNudge?: number }
+  | { type: 'status'; text: string; compactions?: number; droppedMessages?: number; checkIn?: number; budgetNotice?: boolean; documentCheck?: boolean; recordNudge?: number; summaryCheck?: boolean; parallel?: number; agent?: string; phase?: string; task?: string; said?: string; autoDelegate?: boolean; narrateNudge?: number; model?: string; leadModel?: string; wrapRetry?: boolean }
   | { type: 'step'; step: number; elapsedSec: number }
   | { type: 'delta'; text: string; step: number }
   | { type: 'tool_call'; id: string; name: string; arguments: Record<string, unknown>; step: number; lane?: number; laneId?: number }
@@ -775,8 +778,18 @@ export interface ReplayEvent {
    *  addresses/hashes written in the raw line. */
   interpreted?: boolean;
 }
+/** A tie between two timeline events, from values BOTH carry (app/replay.relations). `a` is the earlier
+ *  one. `rel` is the rule; `kind` 'actor' = causation (spawned / ran the file / the same process
+ *  again), 'shared' = the two touched the same thing. One per pair, the most specific reason. */
+export interface ReplayLink {
+  a: string; b: string;
+  rel: 'spawned' | 'executed' | 'same-process' | 'injected' | 'hash' | 'file' | 'resolved' | 'domain' | 'session' | 'address';
+  kind: 'actor' | 'shared'; rank: number; label: string; detail: string;
+}
 export interface ReplayContext {
   events: ReplayEvent[]; valuesChecked: number; valuesCapped: boolean; note: string;
+  /** Every link between the events; absent from an older server (the screen then guesses from names). */
+  links?: ReplayLink[];
   /** The pool version this was built at; `complete` false = it will change (loading / raw / missing). */
   version?: number; missing?: number; rawEvents?: number; awaiting?: number; poolLoading?: boolean; complete?: boolean;
 }

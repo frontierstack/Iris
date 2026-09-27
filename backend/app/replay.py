@@ -270,6 +270,24 @@ _TICK_RE = re.compile(r"`([^`]{1,200})`")
 _URL_HOST = re.compile(r"^[a-z][a-z0-9+.-]*://([^/:?#]+)", re.I)
 
 
+_API_CALL = re.compile(r"^\s*([A-Za-z_][\w.]*)\s*\((.*)\)\s*$", re.S)
+_WEB_APIS = ("winhttp", "internetopenurl", "internetconnect", "httpopenrequest", "httpsendrequest",
+             "urldownloadto", "urlopenstream")
+_HTTP_METHODS = {"GET", "POST", "PUT", "HEAD", "DELETE", "PATCH", "OPTIONS", "CONNECT"}
+_INJECT_APIS = {"ntqueueapcthread", "queueuserapc", "writeprocessmemory", "ntwritevirtualmemory",
+                "createremotethread", "ntcreatethreadex", "setthreadcontext", "ntsetcontextthread",
+                "virtualallocex", "ntmapviewofsection", "ntallocatevirtualmemory"}
+
+
+def _api_call(summary: str) -> Optional[tuple[str, list[str]]]:
+    """`WinHttpOpenRequest( https://x/sync, POST )` -> ('WinHttpOpenRequest', ['https://x/sync', 'POST'])."""
+    m = _API_CALL.match(summary or "")
+    if not m:
+        return None
+    args = [_real(a) for a in m.group(2).split(",")]
+    return m.group(1), [a for a in args if a and a.upper() != "NULL"]
+
+
 def _verb(act: str, default: str) -> str:
     a = (act or "").replace("_", " ").strip().lower()
     return a or default
@@ -335,6 +353,25 @@ def action_of(e: Any, note: str = "") -> dict[str, str]:
         if win and win[2]:
             return out(*win)
 
+    # Elastic Endpoint API telemetry: `process.Ext.api.summary` is `Function( arg, arg, … )`, and the
+    # function says what the process DID — a WinHttp call to a URL is a web request, an APC queued into
+    # another process is an injection. Without this every such row was an unclassified "event" whose
+    # object was the process itself, which is why the map showed a column of identical boxes.
+    if ds.endswith(".api"):
+        api = _api_call(f.get("process.Ext.api.summary", "process.Ext.api.name", "api.summary"))
+        if api:
+            fn, args = api
+            first = args[0] if args else ""
+            if fn.lower().startswith(_WEB_APIS) and _URL_HOST.match(first):
+                method = next((a.upper() for a in args[1:] if a.upper() in _HTTP_METHODS), "")
+                return out("web", f"{fn}{' ' + method if method else ''}", _URL_HOST.match(first).group(1))
+            if fn.lower() in _INJECT_APIS and first:
+                return out("injection", f"{fn} into", _base(first))
+            return out("api", fn, _base(first) if first and len(first) < 120 else fn)
+    if ds.endswith(".alerts") or ds.endswith(".alert"):
+        cat = f.get("rule.name", "kibana.alert.rule.name", "event.category", "message")
+        return out("alert", "alert" + (f": {cat.split(',')[0].strip()}" if cat else ""), proc or _real(e.host))
+
     # Elastic Endpoint / ECS datasets
     if ds.endswith(".process") or ds == "process":
         name = f.get("process.name") or _base(f.get("process.executable"))
@@ -384,6 +421,10 @@ def action_of(e: Any, note: str = "") -> dict[str, str]:
     q = f.get("dns.question.name", "query", "QueryName", "qname", "dns_query")
     if q:
         return out("dns", "DNS lookup", q)
+    # A DNS log that names its question `domain` says it is one by its verb or its record type.
+    if domain and not url and (f.get("query_type", "qtype", "dns.question.type", "record_type")
+                               or (act or "").lower() in ("queried", "query", "resolved", "lookup")):
+        return out("dns", "DNS lookup", domain)
     if domain or url:
         host = domain or (_URL_HOST.match(url).group(1) if url and _URL_HOST.match(url) else url)
         return out("web", "web request blocked" if blocked else "web request", host)
@@ -414,6 +455,227 @@ def action_of(e: Any, note: str = "") -> dict[str, str]:
     if e.entities:
         return out("event", "event", str(e.entities[0]))
     return out("event", "event", _real(e.host) or _real(e.user) or (e.msg or e.raw or "")[:60])
+
+
+# ───────────────────────── relations: what ties two events together ─────────────────────────
+# "Often I see nodes just show by themselves when there is clearly connectors that should connect."
+# The screen used to guess links from two strings — the action's `actor` NAME against the object of
+# an earlier process start, and a shared entity value — so a process's own API calls (whose object
+# was the process itself) linked to nothing, a child whose parent had no "process" row linked to
+# nothing, and a proxy row naming the domain a process had just called linked to nothing. The pool
+# knows far more than that: PIDs, parent PIDs, image paths, URLs, DNS answers, logon ids. Each rule
+# below links two events only on a value BOTH of them carry, and says which value.
+#
+# A link always runs from an EARLIER event to a later one, and for each value to the MOST RECENT
+# earlier carrier, so a value that recurs reads as a chain rather than a fan. Two events tied by
+# several values keep the one most specific reason (a spawn over a shared domain).
+
+_PID_KEYS = ("process.pid", "ProcessId", "pid", "process_id", "ProcessID")
+_PPID_KEYS = ("process.parent.pid", "ParentProcessId", "ppid", "parent_pid", "ParentProcessID")
+_EXE_KEYS = ("process.executable", "Image", "NewProcessName", "process.path", "exe")
+_PEXE_KEYS = ("process.parent.executable", "ParentImage", "ParentProcessName", "process.parent.path")
+_PNAME_KEYS = ("process.parent.name", "ParentName")
+_SESSION_KEYS = ("TargetLogonId", "SubjectLogonId", "LogonId", "logon_id", "session.id", "session_id",
+                 "process.Ext.authentication_id", "user.session_id")
+_RESOLVED_KEYS = ("dns.resolved_ip", "dns.answers.data", "answer", "answers", "QueryResults",
+                  "resolved_ip", "dns.answer")
+_FILE_KEYS = ("file.path", "TargetFilename", "file.name", "download_file_name", "dll.path")
+_HASH_KEYS = ("process.hash.sha256", "file.hash.sha256", "hash.sha256", "sha256", "dll.hash.sha256",
+              "process.hash.md5", "file.hash.md5", "md5", "Hashes")
+_DOMAIN_KEYS = ("domain", "url.domain", "destination.domain", "dns.question.name", "QueryName", "query",
+                "qname", "dns_query", "cs-host", "http.host", "host_header", "DestinationHostname")
+_URL_KEYS = ("url", "url.full", "cs-uri", "request_url", "url.original")
+_DST_IP_KEYS = ("dst_ip", "destination.ip", "dest_ip", "DestinationIp", "dstip")
+_IP_ANY = re.compile(r"(?<![\w.\-])((?:\d{1,3}\.){3}\d{1,3})(?![\w\-]|\.\w)")
+
+# (rule, kind, rank) — rank orders "most specific"; kind decides how the map draws it:
+# 'actor' = causation (a process did it), 'shared' = the two touched the same thing.
+REL_RANK = {"spawned": 0, "executed": 1, "same-process": 2, "injected": 3, "hash": 4, "file": 5,
+            "resolved": 6, "domain": 7, "session": 8, "address": 9}
+REL_KIND = {"spawned": "actor", "executed": "actor", "same-process": "actor"}
+
+
+def _pid(v: str) -> str:
+    """'13,192' -> '13192'. A log's thousands separator is not part of a PID; anything that is not a
+    number after that is not one."""
+    s = re.sub(r"[,\s_]", "", v or "")
+    return s if s.isdigit() and s != "0" else ""
+
+
+def _typed_ip(v: str) -> bool:
+    return bool(_IPV4.match(v)) and all(int(x) < 256 for x in v.split(".")) and v not in (
+        "0.0.0.0", "127.0.0.1", "255.255.255.255")
+
+
+def _norm_path(v: str) -> str:
+    return (v or "").strip().strip('"').replace("/", "\\").lower()
+
+
+class _Facts:
+    """What ONE event says about the things it could be tied to. Read once, compared many times."""
+
+    __slots__ = ("host", "pid", "exe", "name", "shown", "ppid", "pexe", "pname", "is_start", "domains", "ips",
+                 "resolved", "files", "hashes", "session", "user", "target")
+
+    def __init__(self, e: Any, action: dict[str, str]):
+        f = _F(e.fields)
+        self.host = _real(e.host).lower() or f.get("host.name", "hostname", "Computer", "host").lower()
+        self.pid = _pid(f.get(*_PID_KEYS))
+        self.exe = _norm_path(f.get(*_EXE_KEYS))
+        self.shown = f.get("process.name") or _base(f.get(*_EXE_KEYS))
+        self.name = self.shown.lower()
+        self.ppid = _pid(f.get(*_PPID_KEYS))
+        self.pexe = _norm_path(f.get(*_PEXE_KEYS))
+        self.pname = (f.get(*_PNAME_KEYS) or _base(self.pexe)).lower()
+        self.is_start = action.get("kind") == "process"
+        self.target = (action.get("object") or "").lower() if action.get("kind") == "injection" else ""
+        doms: set[str] = set()
+        for k in _DOMAIN_KEYS:
+            v = f.get(k)
+            if v:
+                d = clean_domain(v)
+                if d and not _IPV4.match(d):
+                    doms.add(d.lower())
+        for k in _URL_KEYS:
+            v = f.get(k)
+            if v:
+                m = _URL_HOST.match(v)
+                d = clean_domain(m.group(1) if m else v.split("/")[0])
+                if d and not _IPV4.match(d):
+                    doms.add(d.lower())
+        api = _api_call(f.get("process.Ext.api.summary"))
+        if api and api[1] and _URL_HOST.match(api[1][0]):
+            d = clean_domain(_URL_HOST.match(api[1][0]).group(1))
+            if d and not _IPV4.match(d):
+                doms.add(d.lower())
+        if action.get("kind") in ("web", "dns", "download"):
+            d = clean_domain(action.get("object") or "")
+            if d and not _IPV4.match(d):
+                doms.add(d.lower())
+        self.domains = doms
+        # A FIELD named dst_ip says what its value is: `plausible_ip` is the version-string guard for
+        # untyped text and would drop a real 203.0.113.9 for its zero octet.
+        self.ips = {v for k in _DST_IP_KEYS if (v := f.get(k)) and _typed_ip(v)}
+        self.resolved = {ip for k in _RESOLVED_KEYS if (v := f.get(k)) for ip in _IP_ANY.findall(v) if _typed_ip(ip)}
+        self.files = {_norm_path(v) for k in _FILE_KEYS if (v := f.get(k))}
+        self.hashes = {v.lower() for k in _HASH_KEYS if (v := f.get(k)) and re.fullmatch(r"[0-9a-fA-F]{32,128}", v)}
+        sess = f.get(*_SESSION_KEYS)
+        self.session = sess.lower() if sess and sess not in ("0x0", "0x3e7", "0x3e4", "0x3e5") else ""
+        self.user = _real(e.user).lower()
+        if not e.fields:
+            # A RAW line (its source not interpreted yet) still honestly carries its addresses and
+            # hashes; it cannot say which process did anything, so no process rule applies to it.
+            for v, role in _raw_candidates(e):
+                (self.ips if role == "ip" else self.hashes).add(v.lower())
+
+    def proc_key(self) -> str:
+        """The process this event belongs to: host + PID, with the image as a guard against PID reuse."""
+        if self.pid:
+            return f"{self.host}|pid:{self.pid}|{self.name}"
+        return f"{self.host}|exe:{self.exe}" if self.exe else ""
+
+
+def relations(rows: list[tuple[str, Any, dict[str, str]]]) -> list[dict[str, Any]]:
+    """Links between the timeline's events. `rows` is (eventId, event, action) in PLAY order.
+
+    Returns `{a, b, rel, kind, rank, label, detail}` with `a` earlier than `b`, one per pair (the most
+    specific reason wins). Nothing is inferred: every rule compares a value present on both events.
+    """
+    facts = [_Facts(e, act) for _, e, act in rows]
+    last_proc: dict[str, int] = {}          # proc_key -> latest event of that process
+    by_pid: dict[str, list[int]] = {}       # host|pid -> events of processes with that pid
+    by_exe: dict[str, list[int]] = {}       # host|exe path -> events
+    by_name: dict[str, list[int]] = {}      # host|image name -> events
+    last_val: dict[str, int] = {}           # "domain:x" / "file:x" / ... -> latest carrier
+    written: dict[str, int] = {}            # file path -> the event that produced it
+    best: dict[tuple[int, int], dict[str, Any]] = {}
+
+    def link(a: int, b: int, rel: str, label: str, detail: str) -> None:
+        if a >= b:
+            return
+        cur = best.get((a, b))
+        if cur is None or REL_RANK[rel] < cur["rank"]:
+            best[(a, b)] = {"a": rows[a][0], "b": rows[b][0], "rel": rel, "kind": REL_KIND.get(rel, "shared"),
+                            "rank": REL_RANK[rel], "label": label, "detail": detail}
+
+    def latest(lst: Optional[list[int]], ok=lambda j: True) -> Optional[int]:
+        for j in reversed(lst or []):
+            if ok(j):
+                return j
+        return None
+
+    for i, fx in enumerate(facts):
+        act = rows[i][2]
+        what = act.get("object") or act.get("verb") or "it"
+        # 1. The PARENT process: a process start whose parent PID (or, with no PID, parent image) is
+        #    the process of an earlier event on the same host.
+        if fx.is_start and (fx.ppid or fx.pexe or fx.pname):
+            j = None
+            how = ""
+            if fx.ppid:
+                j = latest(by_pid.get(f"{fx.host}|{fx.ppid}"),
+                           lambda k: not (fx.pname and facts[k].name and facts[k].name != fx.pname))
+                how = f"parent PID {fx.ppid}"
+            if j is None and fx.pexe and not fx.ppid:
+                j = latest(by_exe.get(f"{fx.host}|{fx.pexe}"))
+                how = "parent image path"
+            if j is None and not fx.ppid and not fx.pexe and fx.pname:
+                j = latest(by_name.get(f"{fx.host}|{fx.pname}"))
+                how = "parent image name"
+            if j is not None:
+                parent = facts[j].shown or "the parent"
+                link(j, i, "spawned", "spawned", f"{parent} spawned {fx.shown or what} (matched on {how})")
+        # 2. A file an earlier event wrote or downloaded, now run as this process's image.
+        if fx.is_start and fx.exe and fx.exe in written:
+            link(written[fx.exe], i, "executed", "ran file", f"the file {_base(fx.exe)} written earlier was executed")
+        # 3. The same process again: its own later activity (and a repeated start record of it).
+        pk = fx.proc_key()
+        if pk and pk in last_proc:
+            j = last_proc[pk]
+            link(j, i, "same-process", "same process",
+                 f"both by {fx.shown or 'the same process'}" + (f" (PID {fx.pid})" if fx.pid else ""))
+        # 4. This event acts ON an earlier process (an APC queued into it, memory written to it).
+        if fx.target:
+            j = latest(by_name.get(f"{fx.host}|{fx.target}"))
+            if j is not None:
+                link(j, i, "injected", "injected into",
+                     f"{fx.shown or 'a process'} acted on {facts[j].shown or fx.target}: {act.get('verb', '')}")
+        # 5. Values both carry: hash, file, what a lookup resolved to, domain, logon session, address.
+        vals: list[tuple[str, str, str]] = []
+        vals += [("hash", f"hash:{h}", h) for h in fx.hashes]
+        vals += [("file", f"file:{p}", p) for p in fx.files]
+        vals += [("domain", f"domain:{d}", d) for d in fx.domains]
+        if fx.session:
+            vals.append(("session", f"session:{fx.host}|{fx.session}", fx.session))
+        vals += [("address", f"ip:{ip}", ip) for ip in fx.ips]
+        for rel, key, shown in vals:
+            j = last_val.get(key)
+            if j is not None:
+                noun = {"hash": "hash", "file": "file", "domain": "domain", "session": "logon session",
+                        "address": "address"}[rel]
+                link(j, i, rel, f"same {noun}", f"both involve {noun} {_base(shown) if rel == 'file' else shown}")
+        # ...and a connection to an address an earlier lookup resolved.
+        for ip in fx.ips:
+            j = last_val.get(f"resolved:{ip}")
+            if j is not None:
+                link(j, i, "resolved", "resolved to", f"{ip} was the answer to an earlier DNS lookup")
+        # record this event as the latest carrier of everything it holds
+        for _, key, _ in vals:
+            last_val[key] = i
+        for ip in fx.resolved:
+            last_val[f"resolved:{ip}"] = i
+        if act.get("kind") in ("file", "download") and fx.files:
+            for p in fx.files:
+                written[p] = i
+        if pk:
+            last_proc[pk] = i
+        if fx.pid:
+            by_pid.setdefault(f"{fx.host}|{fx.pid}", []).append(i)
+        if fx.exe:
+            by_exe.setdefault(f"{fx.host}|{fx.exe}", []).append(i)
+        if fx.name:
+            by_name.setdefault(f"{fx.host}|{fx.name}", []).append(i)
+    return sorted(best.values(), key=lambda r: (r["rank"], r["a"], r["b"]))
 
 
 # ───────────────────────── first sightings ─────────────────────────
@@ -473,6 +735,10 @@ def _candidates(e: Any) -> list[tuple[str, str]]:
         put(e.user, "account")
     if _real(e.host):
         put(e.host, "host")
+    api = _api_call(f.get("process.Ext.api.summary"))
+    if api and api[1] and _URL_HOST.match(api[1][0]):
+        # the server a process's own HTTP call named: the value its proxy and DNS rows carry too
+        put(_URL_HOST.match(api[1][0]).group(1), "domain")
     text = " ".join([e.raw or "", *f.m.values()])
     for ent in e.entities:
         if _IPV4.match(ent):
@@ -576,6 +842,8 @@ def build(entries: list[Any]) -> dict[str, Any]:
     out_events: list[dict[str, Any]] = []
     raw_events = 0
     awaiting = 0            # raw events whose source is being interpreted right now
+    actions = {en.eventId: action_of(e, en.note or "") for en, e in stamped}
+    links = relations([(en.eventId, e, actions[en.eventId]) for en, e in stamped])
     for en, e in stamped:
         t_ms, precision = precise_ms(e)
         beats = action_beats(e)
@@ -619,7 +887,7 @@ def build(entries: list[Any]) -> dict[str, Any]:
                                        f"{fs['ts'][:19].replace('T', ' ')} UTC in {fs['file']}"})
         beats = (beats + firsts)[:BEATS_PER_EVENT]
         out_events.append({"eventId": en.eventId, "tMs": t_ms, "precision": precision, "beats": beats,
-                           "action": action_of(e, en.note or ""), "interpreted": interpreted,
+                           "action": actions[en.eventId], "interpreted": interpreted,
                            # EVERY value the event carries, not only the ones a beat reported: the map
                            # links events that share a file, process, hash, domain or address, and a
                            # value is reported as a beat only on the first event that carries it.
@@ -629,7 +897,7 @@ def build(entries: list[Any]) -> dict[str, Any]:
     # `complete` is the screen's cue to ASK AGAIN: while the pool is still loading, an entry's event is
     # not in it yet, or a source is still raw, the answer will change - and the old screen fetched once
     # and kept the links-less answer for good.
-    result = {"events": out_events, "valuesChecked": checked, "version": STORE.version,
+    result = {"events": out_events, "links": links, "valuesChecked": checked, "version": STORE.version,
               "missing": missing, "rawEvents": raw_events, "awaiting": awaiting, "poolLoading": pool_loading,
               "complete": not (pool_loading or missing or raw_events),
               "valuesCapped": checked >= MAX_VALUES,

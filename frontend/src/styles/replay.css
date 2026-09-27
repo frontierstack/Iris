@@ -234,7 +234,33 @@
 .rp-mapview--scroll { overflow-x: auto; }
 .rp-map { display: block; overflow: visible; }
 /* The frame EASES to the height of what has been reached; the drawing inside is at its natural size. */
-.rp-mapframe { overflow: hidden; transition: height calc(450ms * var(--rp-anim, 1)) cubic-bezier(.3,.7,.3,1); }
+.rp-mapframe { position: relative; overflow: hidden; transition: height calc(450ms * var(--rp-anim, 1)) cubic-bezier(.3,.7,.3,1); touch-action: pan-x pan-y; }
+/* ZOOM AND PAN. The view is three custom properties on the wrapper, written by the map without a
+   render; in the natural view no transform is applied at all, so that view is exactly what it was.
+   Zoomed, the frame is a fixed viewport (a hairline says where its edge is), a finger pans the map
+   rather than the page, and a pointer offers to grab. */
+.rp-mapzoom { position: relative; transform-origin: 0 0; }
+.rp-mapframe--zoomed .rp-mapzoom { transform: translate(var(--rp-mx, 0px), var(--rp-my, 0px)) scale(var(--rp-mk, 1)); }
+.rp-mapzoom--glide { transition: transform 240ms cubic-bezier(.3,.7,.3,1); }
+.rp-mapframe--zoomed { touch-action: none; cursor: grab; user-select: none; outline: 1px solid var(--border); outline-offset: -1px; border-radius: 5px; }
+.rp-mapview--scroll .rp-mapframe { cursor: grab; }
+.rp-mapframe--panning, .rp-mapframe--panning .rp-nodepos { cursor: grabbing; }
+.rp-mapview:focus { outline: none; }
+.rp-mapview:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 5px; }
+.rp-mapfitpill {
+  position: absolute; right: 8px; bottom: 8px;
+  height: 22px; padding: 0 9px;
+  border: 1px solid var(--border-strong); border-radius: 3px;
+  background: var(--panel); color: var(--text-2);
+  font: 500 var(--fs-xs)/20px var(--font-ui); cursor: pointer;
+}
+.rp-mapfitpill:hover { border-color: var(--accent); color: var(--text-bright); }
+.rp-mapfitpill:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.rp-card--map .rp-card__hd { flex-wrap: wrap; row-gap: 6px; }
+.rp-mapzoomslot { display: contents; }
+.rp-mapzoomctl { margin-left: 10px; }
+.rp-mapzoomctl__x { min-width: 42px; }
+@media (prefers-reduced-motion: reduce) { .rp-mapzoom--glide { transition: none; } }
 .rp-map__empty { padding: 34px 12px; color: var(--muted-2); font-size: var(--fs-base); text-align: center; }
 .rp-map__wait { min-height: 300px; display: flex; align-items: center; justify-content: center; color: var(--muted-3); font-size: var(--fs-base); text-align: center; padding: 0 16px; }
 .rp-map__more { margin-top: 6px; color: var(--muted-2); font-size: var(--fs-xs); text-align: right; }
@@ -253,10 +279,13 @@
    Tinted by the phase it leads INTO. The links of the event in FOCUS (the one being played, or the one
    under the pointer) are bright and labelled with their reason; the rest step well back, so a busy map
    still reads as one story at a time. When a node moves, its lines GLIDE to the new route (CSS `d`). */
-.rp-link { opacity: 0.42; transition: opacity 300ms linear; }
+/* "It's not showing connectivity hardly at all": every line not touching the event being played sat
+   at 0.2, i.e. invisible at 1.5 px. Links are now READABLE at rest - the tree at 0.75, a secondary tie
+   at 0.5 - and step back only when the analyst points at or holds an event. */
+.rp-link { opacity: 0.75; transition: opacity 300ms linear; }
+.rp-link--extra { opacity: 0.5; }
 .rp-link--hot { opacity: 1; }
-.rp-link--back { opacity: 0.2; }
-.rp-mapview--chosen .rp-link--back { opacity: 0.08; }
+.rp-link--back { opacity: 0.14; }
 .rp-edge {
   fill: none;
   stroke: color-mix(in srgb, var(--c) 70%, var(--border-strong));
@@ -272,6 +301,10 @@
    first. A dashed line cannot draw itself with the same dash trick, so it fades in instead. */
 .rp-link--shared .rp-edge { stroke-width: 1.2; stroke-dasharray: 5 4; animation: rp-fade calc(.6s * var(--rp-anim, 1)) linear both; }
 .rp-link--shared.rp-link--hot .rp-edge { stroke-width: 1.7; }
+/* A SECONDARY tie (not the one the event is placed by): always dashed, so it reads as "also related"
+   and never as a branch of the tree; it fades in rather than drawing itself. */
+.rp-link--extra .rp-edge { stroke-width: 1.3; stroke-dasharray: 2 4; animation: rp-fade calc(.6s * var(--rp-anim, 1)) linear both; }
+.rp-link--extra.rp-link--hot .rp-edge { stroke-width: 1.9; stroke-dasharray: 3 3; }
 .rp-arrowhead {
   fill: none;
   stroke: color-mix(in srgb, var(--c) 80%, var(--border-strong));
@@ -299,6 +332,20 @@
 .rp-node--now .rp-node__box { stroke: var(--accent); stroke-width: 2.2; fill: color-mix(in srgb, var(--accent) 9%, var(--panel-2)); }
 .rp-node--now .rp-node__badge { fill: color-mix(in srgb, var(--c) 28%, var(--panel-2)); }
 .rp-node--focus .rp-node__box { stroke: var(--c); stroke-width: 2; }
+.rp-node--held .rp-node__box { stroke: var(--text-bright); stroke-width: 2.2; fill: color-mix(in srgb, var(--c) 12%, var(--panel-2)); }
+.rp-nodepos:focus { outline: none; }
+.rp-nodepos:focus-visible .rp-node__box { stroke: var(--accent); stroke-width: 2.4; stroke-dasharray: 4 2; }
+/* "Open event" beside the HELD node: a real button, there for as long as the node is held. */
+.rp-openev {
+  position: absolute; transform: translateX(-100%);
+  height: 17px; padding: 0 8px;
+  border: 1px solid var(--border-strong); border-radius: 3px;
+  background: var(--panel); color: var(--text-bright);
+  font: 600 10px/15px var(--font-ui); cursor: pointer;
+  animation: rp-fade calc(.2s * var(--rp-anim, 1)) linear both;
+}
+.rp-openev:hover { border-color: var(--accent); color: var(--accent); }
+.rp-openev:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 /* why the map may hold fewer links than it will: said above it, never left to look like "no links" */
 .rp-mapnote {
   display: flex; flex-direction: column; gap: 3px;
@@ -313,6 +360,7 @@
 .rp-legend__k { display: inline-flex; align-items: center; gap: 7px; }
 .rp-legend__k path { fill: none; stroke: var(--text-3); stroke-width: 2; stroke-linecap: round; }
 .rp-legend__shared { stroke-dasharray: 5 4; stroke-width: 1.4 !important; }
+.rp-legend__extra { stroke-dasharray: 2 4; stroke-width: 1.4 !important; opacity: .6; }
 .rp-legend__hint { margin-left: auto; color: var(--muted-3); }
 .rp-legend__phases { display: inline-flex; flex-wrap: wrap; gap: 4px 12px; }
 .rp-legend__ph { display: inline-flex; align-items: center; gap: 6px; }
@@ -402,6 +450,11 @@
   animation: rp-fade calc(.45s * var(--rp-anim, 1)) linear both;
   transition: opacity calc(400ms * var(--rp-anim, 1)) linear;
 }
+/* A card is a toggle for its node on the map. */
+.rp-ln[role="button"] { cursor: pointer; }
+.rp-ln[role="button"]:hover { background: color-mix(in srgb, var(--text) 3%, transparent); }
+.rp-ln:focus { outline: none; }
+.rp-ln:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
 .rp-ln--new { border-color: color-mix(in srgb, var(--c) 40%, var(--border)); background: color-mix(in srgb, var(--c) 7%, var(--panel-2)); }
 .rp-ln--hl {
   border-color: var(--accent); background: var(--accent-bg);

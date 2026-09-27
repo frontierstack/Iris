@@ -98,6 +98,18 @@ def worker_seconds() -> int:
     return _env_int("IRIS_AI_WORKER_SECONDS", 300, 900)
 
 
+def worker_reply_seconds() -> int:
+    """The longest ONE worker reply may stream before it is cut as a runaway.
+
+    The run-wide ceiling (`client.reply_max_seconds`, 600 s) is sized for the LEAD's report. A
+    worker answers one scoped question and its replies are short: measured on the analyst's gateway,
+    a normal worker reply streams 2-17 s and the longest healthy one 40 s. Two replies in one live
+    delegation streamed 244 s and 248 s of reasoning (3.1 MB and 5.4 MB of `reasoning_content`) and
+    were cut only by the delegation's own clock - each took its agent's whole budget with it and
+    held a gateway slot the other agents needed. `IRIS_AI_WORKER_REPLY_SECONDS`."""
+    return _env_int("IRIS_AI_WORKER_REPLY_SECONDS", 120, 900)
+
+
 def worker_parallel_reads() -> int:
     """How many of a worker's own tool calls run together. Its reads are independent by construction."""
     return _env_int("IRIS_AI_WORKER_READS", 3, 4)
@@ -283,7 +295,8 @@ async def run_worker(task: dict[str, Any], *, client: Any, ctx: Any, context_blo
     reg = worker_tools()
     schemas = _schemas(reg)
     started = time.perf_counter()
-    note(run_id, {"agent": name, "phase": "start", "objective": objective[:400]})
+    note(run_id, {"agent": name, "phase": "start", "objective": objective[:400],
+                  "model": str(getattr(client, "model", "") or "")})
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": WORKER_SYSTEM},
@@ -317,7 +330,8 @@ async def run_worker(task: dict[str, Any], *, client: Any, ctx: Any, context_blo
             # time budget land MID-REPLY (a runaway reasoning loop streamed ~90k tokens for 20 min
             # here), and closes the request when it cuts, so the gateway cancels the generation.
             async for item in guarded(client.stream_chat(messages, tools=schemas, temperature=0.1),
-                                      stopping=ctx.stopping, deadline=deadline):
+                                      stopping=ctx.stopping, deadline=deadline,
+                                      max_seconds=float(worker_reply_seconds())):
                 # A STOP HAS TO LAND INSIDE THE STREAM, not only between steps. A gateway reply
                 # takes as long as it takes, and reading one to the end after the analyst pressed
                 # Stop is most of what "the stop button does not stop things at all" actually was:
@@ -379,7 +393,8 @@ async def run_worker(task: dict[str, Any], *, client: Any, ctx: Any, context_blo
             async for item in guarded(client.stream_chat(messages, tools=None, temperature=0.1,
                                                          tool_choice="none"),
                                       stopping=ctx.stopping,
-                                      deadline=time.monotonic() + max(5.0, ctx.remaining() - 5.0)):
+                                      deadline=time.monotonic() + max(5.0, ctx.remaining() - 5.0),
+                                      max_seconds=float(worker_reply_seconds())):
                 if item["type"] == "text":
                     buf.append(item["text"])
                 elif item["type"] == "message":
@@ -401,7 +416,8 @@ async def run_worker(task: dict[str, Any], *, client: Any, ctx: Any, context_blo
     note(run_id, {"agent": name, "phase": "done", "calls": calls_made, "tookMs": took,
                   "stopped": stopped})
     out: dict[str, Any] = {
-        "agent": name, "objective": objective, "report": _clip(report.strip(), REPORT_CHARS),
+        "agent": name, "model": str(getattr(client, "model", "") or ""),
+        "objective": objective, "report": _clip(report.strip(), REPORT_CHARS),
         "eventIds": real, "toolCalls": calls_made, "steps": steps, "tookMs": took,
         "spans": spans,        # popped by the delegation before anything reaches the lead
     }
@@ -583,8 +599,14 @@ def max_agents(parallel: int) -> int:
 
 
 async def run_tasks(tasks: list[dict[str, Any]], *, client: Any, ctx: Any, context_block: str,
-                    run_id: str, width: int) -> list[dict[str, Any]]:
-    """Every task, at most `width` agents in flight, results in the order the lead asked for them."""
+                    run_id: str, width: int, models: Optional[list[str]] = None) -> list[dict[str, Any]]:
+    """Every task, at most `width` agents in flight, results in the order the lead asked for them.
+
+    `models` is one model id per SLOT (`capacity.worker_models`: strongest model with a free slot
+    first). Task i runs on `models[i % len(models)]`, so the first `width` tasks - the ones that start
+    together - each take a different slot. None = every agent on the run's own model, as before.
+    """
+    from .capacity import with_model
     sem = asyncio.Semaphore(max(MIN_TASKS, width))
     # THE AGENTS' CLOCK IS THE DELEGATE CALL'S CLOCK. `delegate_investigation` is a tool call like any
     # other and `investigator._watch` abandons it at its own deadline — so a worker budget taken from
@@ -595,10 +617,11 @@ async def run_tasks(tasks: list[dict[str, Any]], *, client: Any, ctx: Any, conte
     deadline = time.monotonic() + budget
     steps = worker_steps()
 
-    async def one(task: dict[str, Any]) -> dict[str, Any]:
+    async def one(i: int, task: dict[str, Any]) -> dict[str, Any]:
+        mine = with_model(client, models[i % len(models)]) if models else client
         async with sem:
             try:
-                return await run_worker(task, client=client, ctx=ctx, context_block=context_block,
+                return await run_worker(task, client=mine, ctx=ctx, context_block=context_block,
                                         run_id=run_id, max_steps=steps, deadline=deadline)
             except Exception as exc:  # noqa: BLE001 — the lead is owed an answer for every task
                 return {"agent": str(task.get("name") or "agent")[:60],
@@ -606,11 +629,11 @@ async def run_tasks(tasks: list[dict[str, Any]], *, client: Any, ctx: Any, conte
                         "report": "", "eventIds": [], "toolCalls": 0, "steps": 0, "tookMs": 0,
                         "error": f"{type(exc).__name__}: {exc}"}
 
-    return list(await asyncio.gather(*(one(t) for t in tasks)))
+    return list(await asyncio.gather(*(one(i, t) for i, t in enumerate(tasks))))
 
 
 def run_blocking(tasks: list[dict[str, Any]], *, client: Any, ctx: Any, context_block: str,
-                 run_id: str, width: int) -> list[dict[str, Any]]:
+                 run_id: str, width: int, models: Optional[list[str]] = None) -> list[dict[str, Any]]:
     """`run_tasks` from a synchronous tool handler.
 
     Tool handlers run on a worker thread (`asyncio.to_thread`), which has no event loop of its own, so
@@ -618,4 +641,4 @@ def run_blocking(tasks: list[dict[str, Any]], *, client: Any, ctx: Any, context_
     and closes what it started, so a worker left mid-stream by a Stop does not outlive the call.
     """
     return asyncio.run(run_tasks(tasks, client=client, ctx=ctx, context_block=context_block,
-                                 run_id=run_id, width=width))
+                                 run_id=run_id, width=width, models=models))
