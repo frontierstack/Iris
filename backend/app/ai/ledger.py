@@ -69,6 +69,16 @@ RENDER_LEADS = 14          # open leads shown; the rest are counted
 ARG_CHARS = 110            # one call's arguments, in the rendered line
 GIST_CHARS = 150           # one call's result, in the rendered line
 WHY_CHARS = 130
+# CHECKPOINTS (see `Checkpoint`) and the persisted STATE (`to_state`). The state is written into the
+# run's history record after every step, so it is bounded hard: history.json is retention-capped at
+# 8 MB for fifty conversations, and an unbounded ledger per run would crowd out the transcripts.
+MAX_CHECKPOINTS = 24       # kept; the oldest are folded into one "earlier checkpoints" line
+RENDER_CHECKPOINTS = 5     # shown in full in a rendered block
+CHECKPOINT_ITEM_CHARS = 220
+STATE_CALLS = 100          # calls persisted, strongest first
+STATE_KEY_CHARS = 600      # a longer call identity is kept as a label only (it can never short-circuit)
+STATE_LEADS = 60
+STATE_FINDINGS = 40
 
 # Arguments that identify WHAT was asked rather than how much of it was wanted. A call that differs
 # only by `limit` asked the same question, and printing `limit=50` in a one-line record spends a
@@ -107,12 +117,19 @@ class Call:
     step: int = 0
     ok: bool = True
     productive: bool = True
+    # The world this answer was true of (`readcache.state_token()`), so a LATER turn can be told
+    # "you already have this" only while it is still true. '' = unknown, and unknown never
+    # short-circuits anything.
+    state: str = ""
+    # '' = asked in THIS run; otherwise where it was asked ("an earlier turn"), from a checkpoint.
+    prior: str = ""
 
     def line(self) -> str:
         head = f"{self.name}({self.args})"
         tail = self.gist or ("refused" if not self.ok else "nothing")
         rep = f"  [asked {self.n}x]" if self.n > 1 else ""
-        return f"{head} -> {tail}{rep}"
+        where = f"  [{self.prior}]" if self.prior else ""
+        return f"{head} -> {tail}{rep}{where}"
 
     def weight(self) -> float:
         """How much this line is worth keeping when the block has to be shortened.
@@ -285,6 +302,50 @@ class Finding:
         return f"{self.kind} {self.value} — {n} via {self.tool}{cite}"
 
 
+@dataclass
+class Checkpoint:
+    """A milestone the MODEL declared: what is finished, what comes next, what it has concluded.
+
+    The ledger already knows every CALL; what it cannot know is which LINES OF ENQUIRY the model
+    regards as closed — "the brute force from 103.156.38.160 is fully characterised" is a judgement
+    about twenty calls, and it is exactly the judgement a small-window model loses at a fold and then
+    re-derives by making the twenty calls again. A checkpoint is that judgement written down where
+    no fold can reach it. It is curation of the RUN, never of the case: it writes nothing on the case.
+    """
+    n: int
+    step: int
+    done: list[str] = field(default_factory=list)
+    next: list[str] = field(default_factory=list)
+    established: str = ""
+    prior: str = ""          # '' = this run; else where it came from ("an earlier turn")
+
+    def lines(self) -> list[str]:
+        where = f" ({self.prior})" if self.prior else f" (step {self.step})"
+        out = [f"#{self.n}{where}:"]
+        out += [f"  DONE  {d}" for d in self.done]
+        if self.established:
+            out.append(f"  KNOWN {self.established}")
+        out += [f"  NEXT  {x}" for x in self.next]
+        return out
+
+
+def _items(v: Any, cap: int = 12, chars: int = CHECKPOINT_ITEM_CHARS) -> list[str]:
+    """A list argument as clipped strings. A model often sends one string with line breaks or
+    bullets where the schema says array; that is the same answer and is accepted as one."""
+    if isinstance(v, str):
+        v = [ln.strip(" \t-*•") for ln in re.split(r"\n|;\s+(?=[A-Z])", v)]
+    if not isinstance(v, (list, tuple)):
+        return []
+    out = []
+    for x in v:
+        s = _clip(x, chars)
+        if s and s not in out:
+            out.append(s)
+        if len(out) >= cap:
+            break
+    return out
+
+
 def _ids_of(rows: Any, cap: int = 12) -> list[str]:
     """Event ids from a list of row dicts (or of bare id strings)."""
     out: list[str] = []
@@ -315,6 +376,9 @@ class Ledger:
         self.leads: dict[str, Lead] = {}
         self.findings: dict[str, Finding] = {}
         self.writes: list[str] = []
+        self.checkpoints: list[Checkpoint] = []
+        self.checkpoint_seq = 0
+        self.shed_checkpoints = 0
         self.shed_calls = 0
         self.shed_leads = 0
         self.shed_findings = 0
@@ -325,16 +389,20 @@ class Ledger:
 
     # ------------------------------------------------------------ observing
     def observe(self, name: str, args: dict[str, Any], ok: bool, result: Any, *,
-                step: int = 0, productive: bool = True) -> None:
+                step: int = 0, productive: bool = True, state: str = "") -> None:
         """Record one finished tool call: the question, the answer, and the leads it turned up."""
         args = args if isinstance(args, dict) else {}
         key = call_key(name, args)
         existing = self.calls.get(key)
         if existing is not None:
             existing.n += 1
+            if existing.prior and not (isinstance(result, dict) and result.get("alreadyDone")):
+                # really re-run in THIS run: the answer it got is the current one
+                existing.prior, existing.gist, existing.state = "", result_gist(result), state
+                existing.ok = bool(ok)
         else:
             self.calls[key] = Call(name=name, args=_ident_args(args), gist=result_gist(result),
-                                   step=step, ok=bool(ok), productive=bool(productive))
+                                   step=step, ok=bool(ok), productive=bool(productive), state=state)
             self._shed_calls()
         # Anything this call NAMED is a thing somebody has now looked at — a lead about it is closed
         # whether it was the call's subject or one of its filters.
@@ -422,7 +490,193 @@ class Ledger:
         for l in self.leads.values():
             states[l.state] = states.get(l.state, 0) + 1
         return {"calls": len(self.calls), "writes": len(self.writes),
+                "checkpoints": len(self.checkpoints) + self.shed_checkpoints,
                 "unrecorded": sum(1 for f in self.findings.values() if f.state == "open"), **states}
+
+    # ------------------------------------------------------------ checkpoints
+    def checkpoint(self, done: Any = None, next_: Any = None, established: Any = "",
+                   step: int = 0) -> dict[str, Any]:
+        """Record a milestone the model declared. Returns what it changed, for the tool's answer.
+
+        A `done` item that NAMES an open lead closes it — "rule out 10.0.0.9" is a line of enquiry the
+        model has decided is finished, and leaving the lead open would hand it straight back after
+        the next fold as unfinished work. Named = the lead's value appears in the item's text.
+        """
+        d, x = _items(done), _items(next_)
+        est = _clip(established, 600)
+        if not d and not x and not est:
+            return {"saved": False}
+        self.checkpoint_seq += 1
+        self.checkpoints.append(Checkpoint(n=self.checkpoint_seq, step=step, done=d, next=x,
+                                           established=est))
+        if len(self.checkpoints) > MAX_CHECKPOINTS:
+            drop = len(self.checkpoints) - MAX_CHECKPOINTS
+            self.checkpoints = self.checkpoints[drop:]
+            self.shed_checkpoints += drop
+        text = " ".join(d).lower()
+        closed = 0
+        if text:
+            for lead in self.leads.values():
+                if lead.state == "open" and lead.value.lower() in text:
+                    lead.state, lead.closed_by = "followed", f"checkpoint #{self.checkpoint_seq}"
+                    closed += 1
+        return {"saved": True, "checkpoint": self.checkpoint_seq, "closedLeads": closed}
+
+    def done_items(self) -> list[str]:
+        """Every DONE item across every checkpoint kept, oldest first, deduped."""
+        out: list[str] = []
+        for c in self.checkpoints:
+            for d in c.done:
+                if d not in out:
+                    out.append(d)
+        return out
+
+    def render_checkpoints(self, limit: int = RENDER_CHECKPOINTS) -> str:
+        """The checkpoints section, or '' when the model has declared none.
+
+        The DONE items of EVERY checkpoint are listed (they are short and they are the point — a
+        finished line of enquiry must never fall out of the record), while only the LATEST
+        checkpoint's NEXT list is shown: an older plan has been acted on or superseded.
+        """
+        if not self.checkpoints:
+            return ""
+        done = self.done_items()
+        latest = self.checkpoints[-1]
+        lines = [f"- {d}" for d in done[-40:]]
+        if len(done) > 40:
+            lines.insert(0, f"- ({len(done) - 40} earlier finished item(s) not listed — also done)")
+        if self.shed_checkpoints:
+            lines.insert(0, f"- ({self.shed_checkpoints} older checkpoint(s) summarised away; their work is done)")
+        out = H_CHECKPOINTS + ("\n".join(lines) if lines else "- (no item marked done yet)")
+        known = [c.established for c in self.checkpoints[-limit:] if c.established]
+        if known:
+            out += "\nCONCLUDED:\n" + "\n".join(f"- {k}" for k in known)
+        if latest.next:
+            out += (f"\nYOUR PLAN AT CHECKPOINT #{latest.n} — resume HERE:\n"
+                    + "\n".join(f"{i + 1}. {x}" for i, x in enumerate(latest.next)))
+        return out
+
+    # ------------------------------------------------------------ prior answers
+    def prior_call(self, name: str, args: dict[str, Any], state: str) -> Optional[Call]:
+        """This exact call, when an EARLIER TURN made it against the same world, else None.
+
+        `state` must match exactly and be non-empty: an answer recorded against a pool that has since
+        had a source ingested or deleted, a rule edited or the process restarted may no longer be
+        true, and telling the model "you already have this" would then be a claim about evidence
+        that is false. In that case the call simply runs.
+        """
+        c = self.calls.get(call_key(name, args if isinstance(args, dict) else {}))
+        if c is None or not c.prior or not state or c.state != state or not c.ok:
+            return None
+        return c
+
+    # ------------------------------------------------------------ persistence
+    def to_state(self) -> dict[str, Any]:
+        """A bounded, JSON-able snapshot — the CHECKPOINT that survives the run.
+
+        Written into the run's history record after every step (investigator `persist_checkpoint`),
+        so a follow-up turn, a Continue after an error, or a run interrupted by a restart inherits
+        the leads and the findings too — the transcript record alone carries only call SUMMARIES.
+        Calls are kept strongest-first by the same `weight` the renderer sheds by.
+        """
+        calls = sorted(self.calls.items(), key=lambda kv: (-kv[1].weight(), kv[1].step))[:STATE_CALLS]
+        leads = sorted(self.leads.values(), key=lambda l: (l.state != "open", -l.weight))[:STATE_LEADS]
+        finds = sorted(self.findings.values(), key=lambda f: (f.state != "open", -f.weight))[:STATE_FINDINGS]
+        return {
+            "v": 1,
+            "calls": [{"k": k if len(k) <= STATE_KEY_CHARS else "~" + k[:120], "name": c.name, "args": c.args, "gist": c.gist, "n": c.n, "step": c.step,
+                       "ok": c.ok, "productive": c.productive, "state": c.state, "prior": c.prior}
+                      for k, c in calls],
+            "leads": [{"kind": l.kind, "value": l.value, "why": l.why, "weight": round(l.weight, 3),
+                       "step": l.step, "state": l.state, "closedBy": l.closed_by} for l in leads],
+            "findings": [{"kind": f.kind, "value": f.value, "hits": f.hits, "ids": f.ids[:FINDING_IDS],
+                          "tool": f.tool, "step": f.step, "weight": round(f.weight, 3), "state": f.state}
+                         for f in finds],
+            "checkpoints": [{"n": c.n, "step": c.step, "done": c.done, "next": c.next,
+                             "established": c.established, "prior": c.prior} for c in self.checkpoints],
+            "shed": {"calls": self.shed_calls + max(0, len(self.calls) - STATE_CALLS),
+                     "checkpoints": self.shed_checkpoints},
+        }
+
+    def merge_state(self, state: Any, prior: str = "an earlier turn") -> None:
+        """Fold a persisted snapshot in, every item marked as coming from `prior`.
+
+        Never overwrites what this ledger already holds: a live observation is newer than any
+        snapshot. Malformed input is skipped item by item — the ledger is bookkeeping and may never
+        be the thing that fails a run (see `_rows`).
+        """
+        if not isinstance(state, dict):
+            return
+        for c in state.get("calls") or []:
+            try:
+                k = str(c["k"])
+                if k in self.calls:
+                    continue
+                self.calls[k] = Call(name=str(c.get("name") or "tool"), args=str(c.get("args") or ""),
+                                     gist=str(c.get("gist") or ""), n=int(c.get("n") or 1),
+                                     step=int(c.get("step") or 0), ok=c.get("ok") is not False,
+                                     productive=c.get("productive") is not False,
+                                     state=str(c.get("state") or ""), prior=str(c.get("prior") or prior))
+            except (KeyError, TypeError, ValueError):
+                continue
+        self._shed_calls()
+        for l in state.get("leads") or []:
+            try:
+                kind, value = str(l["kind"]), _norm(l["value"])
+                key = _lead_key(kind, value)
+                if not value or key in self.leads:
+                    continue
+                self.leads[key] = Lead(key=key, kind=kind, value=value, why=str(l.get("why") or ""),
+                                       weight=float(l.get("weight") or 1.0), step=int(l.get("step") or 0),
+                                       state=str(l.get("state") or "open"),
+                                       closed_by=str(l.get("closedBy") or ""))
+            except (KeyError, TypeError, ValueError):
+                continue
+        self._shed_leads()
+        for f in state.get("findings") or []:
+            try:
+                kind, value = str(f["kind"]), _norm(f["value"])
+                key = _lead_key(kind, value)
+                if not value or key in self.findings:
+                    continue
+                self.findings[key] = Finding(key=key, kind=kind, value=value, hits=int(f.get("hits") or 0),
+                                             ids=[str(i) for i in (f.get("ids") or [])][:12],
+                                             tool=str(f.get("tool") or ""), step=int(f.get("step") or 0),
+                                             weight=float(f.get("weight") or 0.5),
+                                             state=str(f.get("state") or "open"), nudged=True)
+            except (KeyError, TypeError, ValueError):
+                continue
+        self._shed_findings()
+        for c in state.get("checkpoints") or []:
+            try:
+                self.checkpoint_seq += 1
+                self.checkpoints.append(Checkpoint(
+                    n=self.checkpoint_seq, step=int(c.get("step") or 0), done=_items(c.get("done")),
+                    next=_items(c.get("next")), established=_clip(c.get("established"), 600),
+                    prior=str(c.get("prior") or prior)))
+            except (TypeError, ValueError, AttributeError):
+                continue
+        shed = state.get("shed") if isinstance(state.get("shed"), dict) else {}
+        try:
+            self.shed_checkpoints += max(0, int(shed.get("checkpoints") or 0))
+        except (TypeError, ValueError):
+            pass
+        if len(self.checkpoints) > MAX_CHECKPOINTS:
+            drop = len(self.checkpoints) - MAX_CHECKPOINTS
+            self.checkpoints = self.checkpoints[drop:]
+            self.shed_checkpoints += drop
+
+    def render_carry(self, max_chars: int = 3000) -> str:
+        """What a FOLLOW-UP turn needs from the ledger that the transcript record cannot give it:
+        the checkpoints, the findings not yet on the case, and the open leads. NOT the calls —
+        `continuation._calls_of` already lists every one, and printing them twice is the cost the
+        ledger exists to avoid."""
+        parts = [p for p in (self.render_checkpoints(), self.render_unrecorded(),
+                             self.render_leads()) if p]
+        if not parts:
+            return ""
+        block = H_CARRY + "\n".join(parts)
+        return block if len(block) <= max_chars else block[: max_chars - 1] + "…"
 
     # ------------------------------------------------------------ rendering
     def render(self, *, max_chars: int = 4000, leads: int = RENDER_LEADS,
@@ -431,12 +685,17 @@ class Ledger:
         work = self.render_work(calls)
         opened = self.render_leads(leads)
         found = self.render_unrecorded()
+        marks = self.render_checkpoints()
         # `self.writes` counts too. Without it a ledger holding only writes rendered the empty
         # string, so a fold early in a run that had already put something on the case dropped the
         # one section that stops the model writing it a second time.
-        if not work and not opened and not self.writes and not found:
+        if not work and not opened and not self.writes and not found and not marks:
             return ""
         parts = [H_LEDGER]
+        # The CHECKPOINTS go first: they are the model's own statement of which lines of enquiry are
+        # finished and where to resume, which is the single most useful thing to read after a fold.
+        if marks:
+            parts.append(marks)
         if work:
             parts.append(H_DONE + work)
         if self.writes:
@@ -450,10 +709,10 @@ class Ledger:
         # The OPEN LEADS and the UNRECORDED FINDINGS are what the run does next, so they survive a
         # squeeze and the call list is what gives way — shortened from the least informative end,
         # never silently.
-        room = max(400, max_chars - len(H_LEDGER) - len(opened) - len(found) - 200)
+        room = max(400, max_chars - len(H_LEDGER) - len(opened) - len(found) - len(marks) - 200)
         work = self.render_work(calls, max_chars=room)
-        parts = ([H_LEDGER] + ([H_DONE + work] if work else []) + ([found] if found else [])
-                 + [opened or H_NO_LEADS])
+        parts = ([H_LEDGER] + ([marks] if marks else []) + ([H_DONE + work] if work else [])
+                 + ([found] if found else []) + [opened or H_NO_LEADS])
         return "\n".join(parts)[:max_chars]
 
     def render_unrecorded(self, limit: int = RENDER_FINDINGS, floor: float = FINDING_WEIGHT_FLOOR) -> str:
@@ -662,14 +921,23 @@ class Ledger:
         """The ledger of a conversation, rebuilt from the persisted run records.
 
         A follow-up turn inherits it, so "now build me the timeline" does not re-ask the twenty
-        questions the previous turn already answered. Only the CALLS and the WRITES can be recovered
-        this way — `ai/history.py` stores a tool entry's name, arguments and result SUMMARY, not the
-        result body, so the leads a result carried are not in the record. A follow-up therefore
-        starts with an accurate "already done" list and an empty lead list, which is the honest
-        shape: an unfollowed lead nobody wrote down is not evidence that it is still open.
+        questions the previous turn already answered.
+
+        A record that carries a CHECKPOINT (`to_state`, persisted after every step of a run) gives
+        back the whole ledger — calls with the world they were true of, the leads, the findings not
+        yet on the case, and the model's own checkpoints. A record from before checkpoints existed
+        gives back only the CALLS and the WRITES: `ai/history.py` stores a tool entry's result
+        SUMMARY, not its body, and an unfollowed lead nobody wrote down is not evidence that it is
+        still open. Everything rebuilt here is marked `prior`, so the run can tell its own calls from
+        the conversation's.
         """
         led = cls(writers)
-        for rec in records:
+        recs = list(records)
+        for i, rec in enumerate(recs):
+            label = ("the previous turn" if i == len(recs) - 1 else f"turn {i + 1}")
+            snap = rec.get("checkpoint")
+            if isinstance(snap, dict):
+                led.merge_state(snap, prior=label)
             for e in rec.get("transcript") or []:
                 if e.get("kind") != "tool":
                     continue
@@ -677,11 +945,13 @@ class Ledger:
                 name = str(e.get("name") or "tool")
                 key = call_key(name, args)
                 if key in led.calls:
-                    led.calls[key].n += 1
+                    if not isinstance(snap, dict):
+                        led.calls[key].n += 1
                     continue
                 led.calls[key] = Call(name=name, args=_ident_args(args),
                                       gist=_clip(e.get("summary"), GIST_CHARS),
-                                      step=int(e.get("step") or 0), ok=e.get("ok") is not False)
+                                      step=int(e.get("step") or 0), ok=e.get("ok") is not False,
+                                      prior=label)
                 led._shed_calls()
             for a in rec.get("actions") or []:
                 if not a.get("undone"):
@@ -713,7 +983,11 @@ H_NO_LEADS = ("\nOPEN LEADS: none. Every lead the evidence produced has been fol
 H_UNRECORDED = ("\nFOUND BUT NOT YET ON THE CASE — came back with hits, nothing written names them. "
                 "Record each (add_ioc / add_note kind='finding' / annotate_case_events, with the ids) "
                 "or dismiss it in one line:\n")
-_HEADERS = (H_DONE, H_WROTE, H_UNRECORDED, H_OPEN)
+# Short: it rides in every fold, every restart and every follow-up's brief.
+H_CHECKPOINTS = ("\nCHECKPOINTS — lines of enquiry YOU declared finished. They are DONE: do not re-check, "
+                 "re-count or re-search any of them; build on them:\n")
+H_CARRY = ("CARRIED FORWARD FROM THE EARLIER TURNS' CHECKPOINT (kept by Iris outside the conversation):")
+_HEADERS = (H_DONE, H_WROTE, H_UNRECORDED, H_OPEN, H_CHECKPOINTS)
 
 
 def _ids_in(args: Any, out: Optional[set[str]] = None) -> set[str]:

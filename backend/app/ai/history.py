@@ -269,11 +269,17 @@ class HistoryStore:
 
         # the byte cap is what stops ONE enormous run from blowing the file up: measure, drop, re-measure
         blob = self._dump_locked()
-        for _ in range(MAX_RUNS + 2):
+        for _ in range(2 * MAX_RUNS + 2):
             if blob is None or len(blob) <= MAX_FILE_BYTES:
                 return blob
             rows = droppable()
-            if not rows:
+            # A finished run's CHECKPOINT goes before any whole conversation does: it is working
+            # memory for a follow-up, and losing it degrades that follow-up to the transcript-only
+            # rebuild, while losing the run loses the analyst's record of what was asked.
+            spare = next((r for r in rows if r.get("checkpoint")), None)
+            if spare is not None:
+                spare.pop("checkpoint", None)
+            elif not rows:
                 # a single running conversation is over budget on its own — clamp its transcript rather
                 # than lose the run, so the file still cannot grow without bound
                 biggest = max(self._runs.values(), key=lambda r: len(r.get("transcript") or []), default=None)
@@ -456,6 +462,24 @@ class HistoryStore:
             rec["caseId"], rec["caseName"] = case_id or "", case_name or ""
             self._touch_locked(rec)
             self._save_locked()
+
+    def set_checkpoint(self, run_id: str, state: dict[str, Any], *, flush: bool = False) -> None:
+        """The run's investigation ledger, as `Ledger.to_state()` (bounded there), kept on the record.
+
+        This is what lets a follow-up, a Continue after an error, or a run interrupted by a restart
+        pick up the LEADS, the unrecorded FINDINGS and the model's own CHECKPOINTS — the transcript
+        alone carries only one summary line per call. Written once per step, so the throttled save
+        is enough (`flush=False`); the final one is flushed by `finish()`'s own save right after.
+        Not served by the API listing: it is the run's working memory, not something to display.
+        """
+        if not isinstance(state, dict):
+            return
+        with self.lock:
+            rec = self._runs.get(run_id)
+            if rec is None:
+                return
+            rec["checkpoint"] = state
+            self._save_locked(force=flush)
 
     def set_actions(self, run_id: str, actions: list[dict[str, Any]]) -> None:
         """Used by undo: the actions carry `undone`, and that has to survive a refresh too."""

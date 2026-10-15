@@ -183,6 +183,8 @@ def worker_tools() -> dict[str, Any]:
 WORKER_EXCLUDED = frozenset({
     "preview_detection_rule", "list_detection_rules", "list_exclusions", "list_charts",
     "list_cases", "list_notes", "get_case_state", "get_case_set", "list_graph_links", "list_iocs",
+    # the LEAD's run ledger; a worker's progress is its report
+    "checkpoint",
 })
 
 

@@ -917,6 +917,21 @@ async def _run_tool(name: str, args: dict[str, Any], ctx: RunContext,
                           "note": "identical call already made in this run — the previous result is repeated "
                                   "verbatim, nothing was re-run. A third identical call will be REFUSED."}
         return True, cached
+    # A call an EARLIER TURN of this conversation already made, against this same world (same pool,
+    # rules, exclusions, process — `readcache.state_token`), is the work the analyst reported being
+    # redone after a "continue". Its recorded answer is handed back instead of being re-derived, and
+    # the model is told so in words. Only for pure functions of the pool, and only on an exact
+    # state match: an answer that may no longer be true is never served as if it were.
+    led = getattr(ctx, "ledger", None)
+    if key and led is not None:
+        earlier = led.prior_call(name, args, readcache.state_token(name, args))
+        if earlier is not None:
+            ctx.cache_hits += 1
+            return True, {"alreadyDone": True, "askedIn": earlier.prior, "answer": earlier.gist,
+                          "note": (f"you already made this exact call in {earlier.prior} of this "
+                                   f"conversation and nothing in the workspace has changed since; its "
+                                   f"answer is above and it was NOT re-run. Build on it. If you need the "
+                                   f"rows themselves, re-send with a different limit or offset.")}
     # Per-tool budget. Almost every tool is one query and the factor is 1.0; `delegate_investigation`
     # is legitimately long (several agents, each with a tool loop of its own) and would otherwise be
     # abandoned mid-fan-out, losing every agent's report at once — see Tool.budget_factor.
@@ -928,7 +943,16 @@ async def _run_tool(name: str, args: dict[str, Any], ctx: RunContext,
         remembered = readcache.get(name, args)
         if remembered is not None:
             ctx.cache[key] = remembered
-            return True, refit_rows(remembered) if name in ROW_TOOLS else remembered
+            out = refit_rows(remembered) if name in ROW_TOOLS else remembered
+            mine = led.calls.get(key) if led is not None else None
+            if mine is not None and not mine.prior and isinstance(out, dict):
+                # THIS run asked it before (the in-run cache was cleared by a write in between, and
+                # the transcript may since have been folded): the same answer, said to be a repeat.
+                ctx.cache_hits += 1
+                return True, {**out, "cached": True,
+                              "note": f"you already made this exact call at step {mine.step} of this run; "
+                                      f"the same answer is repeated, nothing was re-run."}
+            return True, out
     budget = float(tool_budget_seconds()) * float(getattr(t, "budget_factor", 1.0) or 1.0)
     ctx.begin_call(name, budget)
     try:
@@ -1075,6 +1099,9 @@ _SUMMARY: dict[str, Callable[[dict[str, Any]], str]] = {
                              + (f" — {_len(d, 'missing')} id(s) do not exist" if d.get("missing") else "")),
     "get_event": lambda d: (f"event {d.get('id', '?')} — {d.get('source', '?')} {d.get('ts') or 'no timestamp'}"
                             + (f", {_len(d, 'detections')} detection(s)" if d.get("detections") else "")),
+    "checkpoint": lambda d: (f"checkpoint #{d.get('checkpoint')} kept — {_n(d.get('doneTotal', 0))} line(s) "
+                             f"of enquiry marked done" + (f", closed {d['closedLeads']} lead(s)"
+                                                          if d.get("closedLeads") else "")),
     "count_events": lambda d: f"{_n(d.get('total', 0))} event(s) match",
     "aggregate_events": lambda d: (f"{d.get('distinctGroups', 0)} {d.get('groupBy', '')} group(s) "
                                    f"over {_n(d.get('total', 0))} event(s)"
@@ -1154,6 +1181,8 @@ def _summarize(name: str, ok: bool, data: Any) -> str:
     action = data.get("action")
     if isinstance(action, dict):
         return str(action.get("summary", "changed the case"))
+    if data.get("alreadyDone"):
+        return f"already answered in {data.get('askedIn') or 'an earlier turn'}, not re-run: {str(data.get('answer') or '')[:160]}"
     fn = _SUMMARY.get(name)
     line = ""
     if fn is not None:
@@ -1260,6 +1289,9 @@ async def investigate(store: Any, objective: str, run_id: str,
             ledger = Ledger.from_records(await asyncio.to_thread(runs.thread, continue_from), writers)
         except Exception:  # noqa: BLE001 — a follow-up must run even with an unreadable parent record
             ledger = Ledger(writers)
+    # The `checkpoint` tool writes here, and `_run_tool` reads it to recognise a call an EARLIER turn
+    # already answered against the same world.
+    ctx.ledger = ledger
     runs.start(run_id, objective, client.model, focus=focus, case_id=case_id, case_name=case_name,
                parent_id=parent_id, thread_id=thread_id)
     yield {"type": "run", "runId": run_id, "model": client.model,
@@ -1416,6 +1448,20 @@ async def investigate(store: Any, objective: str, run_id: str,
         for a in ctx.actions:
             if not a.get("undone"):
                 ledger.note_write(a)
+
+    def persist_checkpoint(flush: bool = False) -> None:
+        """Write the ledger onto the run's record — the CHECKPOINT that outlives the transcript.
+
+        Once per step and once at the end. A fold, an in-run restart, a provider error that ends the
+        run, a restart of the server mid-run: each of those loses the transcript or part of it, and
+        none of them can reach this. A follow-up or a Continue rebuilds the ledger from it
+        (`Ledger.from_records`), leads, findings and the model's own checkpoints included.
+        """
+        try:
+            note_ledger_writes()
+            HISTORY.set_checkpoint(run_id, ledger.to_state(), flush=flush)
+        except Exception as exc:  # noqa: BLE001 — bookkeeping may never end a run
+            print(f"[ai] could not persist the run checkpoint: {type(exc).__name__}: {exc}", flush=True)
 
     def re_arm() -> None:
         # A fold or a reset can swallow the very message carrying DOCUMENT_CHECK / SUMMARY_CHECK —
@@ -1634,6 +1680,8 @@ async def investigate(store: Any, objective: str, run_id: str,
                     HISTORY.append(run_id, {"kind": "status", "text": note})
                     yield {"type": "status", "text": note, "autoDelegate": False}
             step += 1
+            ctx.step = step
+            persist_checkpoint()
             HISTORY.append(run_id, {"kind": "step", "step": step})
             yield {"type": "step", "step": step, "elapsedSec": round(elapsed(), 1)}
             buf: list[str] = []
@@ -2264,9 +2312,16 @@ async def investigate(store: Any, objective: str, run_id: str,
                     # run's own state is updated, and a call whose result was streamed but whose
                     # effect on the run has not been applied yet is not a call the model can be told
                     # it has already made.
-                    ledger.observe(entry["name"], entry["args"], entry["ok"], entry["result"],
-                                   step=step, productive=productive)
-                    barren = 0 if productive else barren + 1
+                    if entry["name"] == "checkpoint":
+                        # Bookkeeping, not a question: it neither moves the investigation (so it
+                        # cannot reset the barren streak a looping run is caught by) nor belongs in
+                        # ALREADY ASKED, and its own record is `ledger.checkpoints`.
+                        pass
+                    else:
+                        ledger.observe(entry["name"], entry["args"], entry["ok"], entry["result"],
+                                       step=step, productive=productive,
+                                       state=readcache.state_token(entry["name"], entry["args"]))
+                        barren = 0 if productive else barren + 1
                     if entry["writes"] and entry["ok"]:
                         productive_since_write = 0
                     elif productive and not entry["writes"]:
@@ -2600,6 +2655,7 @@ async def investigate(store: Any, objective: str, run_id: str,
                 note = f"could not post the final report as the case summary note: {str(result)[:200]}"
                 HISTORY.append(run_id, {"kind": "warning", "text": note})
                 yield {"type": "warning", "message": note, "ids": []}
+        persist_checkpoint()
         runs.finish(run_id, state, reason, step, tool_calls, answer, ctx.actions, unverified)
         yield {"type": "done", "runId": run_id, "threadId": thread_id or run_id,
                "parentId": parent_id, "reason": reason, "state": state, "steps": step,
@@ -2616,13 +2672,16 @@ async def investigate(store: Any, objective: str, run_id: str,
                "outputContinues": output_continues, "loopGuard": guard.stats()}
     except AIError as exc:
         error = _kept_note(str(exc), tool_calls, ctx.writes)
+        persist_checkpoint()
         runs.finish(run_id, "error", "error", step, tool_calls, answer, ctx.actions, [], error)
         yield {"type": "error", "message": error, "actions": ctx.actions}
     except asyncio.CancelledError:
+        persist_checkpoint()
         runs.finish(run_id, "stopped", "disconnected", step, tool_calls, answer, ctx.actions, [])
         raise
     except Exception as exc:  # noqa: BLE001 — never raise out of the stream
         error = _kept_note(f"investigation failed: {type(exc).__name__}: {exc}", tool_calls, ctx.writes)
+        persist_checkpoint()
         runs.finish(run_id, "error", "error", step, tool_calls, answer, ctx.actions, [], error)
         yield {"type": "error", "message": error, "actions": ctx.actions}
     finally:

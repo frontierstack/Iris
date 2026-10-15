@@ -31,6 +31,7 @@ next.
 """
 from __future__ import annotations
 
+import os
 import threading
 from collections import OrderedDict
 from typing import Any, Optional
@@ -60,6 +61,30 @@ def _state() -> Optional[tuple]:
         return (int(STORE.version), int(STORE.case_set_rev), int(RULES_STORE.rev), int(EXCLUSIONS.rev))
     except Exception:  # noqa: BLE001 — no key means no cache, never a failed tool call
         return None
+
+
+#: This process. The counters above restart at 0 on every boot, so a counter tuple written by an
+#: earlier process can collide with a different world in this one; a state token carries the boot.
+_BOOT = os.urandom(6).hex()
+
+
+def state_token(name: str, args: dict[str, Any]) -> str:
+    """The world a CACHEABLE tool's answer is true of, as a string a run CHECKPOINT can persist.
+
+    '' when the tool is not a pure function of the pool, or the state cannot be read — and '' never
+    matches anything (`Ledger.prior_call`). The case-set counter is included only for a call scoped
+    to the case set: a follow-up whose previous turn curated the case has not changed what an
+    unscoped count over the pool returns, and including it would make every earlier answer look
+    stale after the first `add_events_to_case`.
+    """
+    if name not in CACHEABLE:
+        return ""
+    state = _state()
+    if state is None:
+        return ""
+    version, case_rev, rules_rev, excl_rev = state
+    scoped = isinstance(args, dict) and str(args.get("scope") or "") == "case"
+    return f"{_BOOT}:{version}:{case_rev if scoped else '-'}:{rules_rev}:{excl_rev}"
 
 
 def _key(name: str, args: dict[str, Any]) -> Optional[tuple]:

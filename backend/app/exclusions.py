@@ -301,15 +301,14 @@ def suggestions() -> list[ExclusionSuggestion]:
             conditions=[C(field="user", op="starts_with", value="system:")]),
         ExclusionSuggestion(
             name="Malware sample and test corpora",
-            why="A file named report.wncry or HOW_TO_DECRYPT.txt under a samples, testdata or "
-                "quarantine directory is a copy somebody kept on purpose, not an encryption in "
-                "progress. SIGMA-APP-0080 cannot tell the two apart from the line alone and should "
-                "not try — where your samples live is something only you know. Scoped to the "
-                "any-source rules, so the same names elsewhere still fire.",
+            why="A credential or an encoded command line inside a samples, testdata or quarantine "
+                "directory is a copy somebody kept on purpose. The any-source rules cannot tell the "
+                "two apart from the line alone and should not try — where your samples live is "
+                "something only you know. Scoped to those rules, so the same lines elsewhere still fire.",
             conditions=[C(field="raw", op="regex",
                           value=r"(?i)[/\\](malware[-_]?samples?|samples?|testdata|test[-_]?data|"
                                 r"quarantine|virus[-_]?share|corpus)[/\\]")],
-            ruleIds=["SIGMA-APP-0070", "SIGMA-APP-0075", "SIGMA-APP-0080", "SIGMA-APP-0085"]),
+            ruleIds=["SIGMA-APP-0070", "SIGMA-APP-0075"]),
         ExclusionSuggestion(
             name="Vulnerability scanners you run yourself",
             why="An authenticated scanner walks every path, tries every injection and collects "

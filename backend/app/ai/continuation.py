@@ -203,6 +203,16 @@ def build(records: list[dict[str, Any]], *, max_chars: int = MAX_BRIEF_CHARS,
     # them, per turn, with what it returned. Paying twice for one list on a small window is the
     # opposite of what the ledger is for.
     block = ledger.render(max_chars=max(1500, int(max_chars * 0.4))) if ledger is not None else ""
+    if not block:
+        # A genuine follow-up: no live ledger, but each turn's record may carry its CHECKPOINT
+        # (`Ledger.to_state`, persisted every step). From it come the three things the calls listed
+        # above cannot say: which lines of enquiry the model DECLARED finished, what came back with
+        # hits and is not on the case yet, and the leads still open. Never the calls again.
+        try:
+            from .ledger import Ledger
+            block = Ledger.from_records(turns).render_carry(max_chars=max(1200, int(max_chars * 0.3)))
+        except Exception:  # noqa: BLE001 — a follow-up must run even on an unreadable checkpoint
+            block = ""
     if block:
         parts.append("\n" + block)
 

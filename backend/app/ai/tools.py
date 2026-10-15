@@ -202,6 +202,10 @@ class RunContext:
     # on whatever settings.json says at the moment the tool happens to fire. A caller with no client
     # (MCP, a direct call in a test) falls back to the settings, which is the old behaviour.
     client: Any = None
+    # The run's investigation ledger (ai/ledger.py) — the record that lives OUTSIDE the transcript.
+    # Only the `checkpoint` tool writes to it from here; a direct call (MCP, a test) has none.
+    ledger: Any = None
+    step: int = 0                                  # the lead's current model turn, for checkpoints
 
     # ---------------------------------------------------------------- interruption
     def begin_call(self, name: str, budget: Optional[float] = None) -> None:
@@ -1435,6 +1439,30 @@ def _search_events(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
                        "log lines or the parsed fields, re-run this search with include='raw,fields' rather "
                        "than fetching the hits one at a time.")
     return _fit_rows(out)
+
+
+@tool("checkpoint",
+      "Save a progress CHECKPOINT. Iris keeps it outside the conversation and gives it back after every "
+      "context fold, restart and follow-up, so finished work is never redone. Call it whenever you finish "
+      "a line of enquiry, in the same reply as your next calls. It writes nothing to the case.",
+      {"done": {"type": "array", "items": {"type": "string"},
+                "description": "lines of enquiry now FINISHED, each with its result and numbers "
+                               "('10.0.0.9: 412 failed logons, 3 accounts, ruled out as scanner')"},
+       "next": {"type": "array", "items": {"type": "string"},
+                "description": "what you will do next, in order"},
+       "established": {"type": "string", "description": "the conclusion so far, in one or two sentences"}})
+def _checkpoint(args: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
+    led = getattr(ctx, "ledger", None)
+    if led is None:
+        # MCP or a direct call: there is no run to hold it. Said, never pretended.
+        return {"saved": False, "note": "no investigation run is holding a ledger here; nothing kept"}
+    out = led.checkpoint(args.get("done"), args.get("next"), args.get("established") or "",
+                         step=int(getattr(ctx, "step", 0) or 0))
+    if not out.get("saved"):
+        raise ToolError("checkpoint needs at least one of done / next / established")
+    out["doneTotal"] = len(led.done_items())
+    out["note"] = "kept — it will be handed back after any fold or restart. Carry on with your next call."
+    return out
 
 
 @tool("count_events",

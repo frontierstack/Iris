@@ -498,31 +498,6 @@ R = {
         trigger="The raw line of ANY source matches the encoded-command regex (powershell -enc with a base64 blob, "
                 "certutil -decode, FromBase64String, base64 -d piped into a shell).",
         mechanism="regex"),
-    "APP-0080": Rule(
-        "SIGMA-APP-0080", "Ransomware indicator", "critical",
-        description="A ransom note name, a ransomware family's file extension, or a security product's own "
-                    "ransomware verdict. By the time a NOTE or a family extension reaches a log the encryption "
-                    "has already started somewhere - unless the line also says the attempt was blocked, in which "
-                    "case this is the containment, reported at high rather than critical.",
-        trigger="The raw line of ANY source matches the ransomware regex, AND the match survives a second "
-                "opinion. A specific ransom-note name, a product ransomware signature (Ransom:Win32/...), or a "
-                "FAMILY extension (.lockbit, .ryuk, ...) fires on its own. A bare README.txt, or an AMBIGUOUS "
-                "extension (.enc, .crypt, .encrypted, .djvu, .onion, .aes - what every backup and "
-                "secrets tool writes), only fires when the line corroborates it or when the extension is "
-                "appended to a user document (payroll.xlsx.encrypted). Dropped to high when the line carries a "
-                "blocked / quarantined / cleaned marker.",
-        mechanism="regex"),
-    "APP-0085": Rule(
-        "SIGMA-APP-0085", "Ransom note text", "critical",
-        description="The note itself, judged by its own words rather than by a file name. A rename can hide the "
-                    "extension and the note's filename, but not the sentence that tells the victim their files "
-                    "are encrypted and what to pay. This is the one ransomware signal that survives an attacker "
-                    "who picked their own names.",
-        trigger="The raw line of ANY source matches the encryption-claim regex ('your files have been "
-                "encrypted' and its variants) AND carries at least the required number of DISTINCT corroborating "
-                "markers from the marker regex - a decryptor offer, a wallet, an onion address, a personal id, a "
-                "do-not-rename threat.",
-        mechanism="regex"),
     # ---------------------------------------------------------------- identity (continued)
     "AUTH-0240": Rule(
         "SIGMA-AUTH-0240", "Account used from many addresses", "high",
@@ -991,163 +966,6 @@ def _secret_real(raw: str, rx: "re.Pattern[str]", url_public: set[str], placehol
 _ENCODED_CMD = re.compile(r"powershell(\.exe)?[^\n]*\s-(?:e|en|enc|enco|encod|encode|encoded|encodedcommand)\s+[A-Za-z0-9+/=]{24,}"
                           r"|FromBase64String\s*\(|certutil(\.exe)?[^\n]*-decode|base64\s+(?:-d|--decode)[^\n]*\|\s*(?:ba|z)?sh"
                           r"|\[Convert\]::FromBase64String|echo\s+[A-Za-z0-9+/=]{40,}\s*\|\s*base64\s+(?:-d|--decode)", re.I)
-# The ransomware indicator, and the three GROUPS `_ransom_real` reads to decide whether a match means
-# anything. Measured before this shape existed: 24 of 27 lines of an ORDINARY corpus fired it at
-# `critical` — every README.txt a package ships, every `.enc` ansible-vault/sops/openssl writes, a
-# scanned `.djvu` document, a `.onion` address in a proxy log. The regex cannot tell those from
-# evidence; the surrounding line can, exactly as `_secret_real` does for SIGMA-APP-0070.
-#   note    — a ransom-note file name. Strong unless the stem is the GENERIC "README", which is in
-#             every software distribution on earth.
-#   verdict — a security product's own ransomware signature name (the Microsoft `Ransom:Win32/…`
-#             shape). Deliberately narrow: "ransomware" as a word appears in every advisory.
-#   doc/ext — an encrypted-file extension. `ext` splits into FAMILY names, which fire alone, and
-#             AMBIGUOUS ones (enc, crypt, encrypted, locked, djvu, onion, aes) which do not: those
-#             need the line to corroborate, or the extension to be appended to a USER DOCUMENT
-#             (`payroll.xlsx.encrypted`) — backup tools append to archives and databases, ransomware
-#             appends to the things people opened.
-_RANSOM = re.compile(r"(?P<note>(?<![A-Za-z0-9])(?:READ[_ -]?ME|HOW[_ -]?TO[_ -]?DECRYPT|DECRYPT[_-]?(?:FILES|INSTRUCTION|INFO)"
-                     r"|RECOVER[_-]?(?:FILES|YOUR|DATA)|RESTORE[-_]?(?:FILES|MY[-_]?FILES)"
-                     r"|YOUR[_-]?FILES[_-]?ARE[_-]?ENCRYPTED)[^\n]{0,40}\.(?:txt|html|hta)\b)"
-                     r"|(?P<verdict>\bRansom(?:ware)?[:/](?:Win32|Win64|MSIL|Script|Linux|Android|O97M|HTML|Generic)[/.])"
-                     r"|(?P<doc>\.(?:docx?|xlsx?|pptx?|pdf|jpe?g|png|gif|bmp|tiff?|rtf|csv|odt|ods|odp|psd|dwg|eml|msg|pst|txt|vsdx?))?"
-                     r"\.(?P<ext>cryptolocker|crypt(?:ed)?|encrypted|encrypt|enc|locky|lockbit|locked|conti|ryuk|revil"
-                     r"|sodinokibi|djvu|wannacry|wncry|onion|makop|phobos|cerber|darkside|blackcat|blackbasta|akira"
-                     r"|avoslocker|hellokitty|blacksuit|nokoyawa|mallox|netwalker|egregor|clop|aes)\b", re.I)
-# Extensions that are a ransomware family and nothing else: they fire on their own.
-_RANSOM_FAMILY = ("locky, lockbit, cryptolocker, conti, ryuk, revil, sodinokibi, wannacry, wncry, makop, "
-                  "phobos, cerber, darkside, blackcat, blackbasta, akira, avoslocker, hellokitty, "
-                  "blacksuit, nokoyawa, mallox, netwalker, egregor, clop")
-# Extensions that ordinary software writes all day. They need the LINE to say something else.
-_RANSOM_AMBIGUOUS = "enc, encrypt, encrypted, crypt, crypted, locked, djvu, onion, aes"
-# Note stems that are not a ransom note by themselves. README.txt is the single biggest source of
-# false positives this rule had.
-_RANSOM_GENERIC_NOTES = "readme"
-# What a line must say for an AMBIGUOUS extension or a generic note name to mean anything. NOT a bare
-# "decrypt": `ansible-vault decrypt secrets.enc` is a normal line and it would corroborate itself.
-# NOT a bare ".onion" either, for the same reason — that IS the ambiguous match in a proxy log.
-_RANSOM_CONTEXT = re.compile(r"\bransom(?:ware|ed)?\b|decryptor|decryption\s+(?:key|tool|id|software)"
-                             r"|how[ _-]?to[ _-]?decrypt|(?:your|all)\s+(?:files|data|documents)\s+"
-                             r"(?:have\s+been|has\s+been|are|were)\s+encrypted|all\s+your\s+(?:files|data)"
-                             r"|bitcoin|monero|\bxmr\b|\bbtc\s+(?:wallet|address)|tor\s+browser"
-                             r"|(?:restore|recover)[ _-]?(?:your[ _-]?)?files", re.I)
-# Words that mean a security product STOPPED it. The finding is real and the claim is different:
-# "this was blocked" is not "the encryption has already started", and calling both critical is how an
-# analyst learns to skim the rule.
-_RANSOM_BLOCKED = ("blocked, quarantined, quarantine, cleaned, removed, prevented, remediated, "
-                   "contained, not allowed, denied, deleted, no action needed")
-# --- the ransom note's TEXT (SIGMA-APP-0085). A file NAME is a guess about what a file holds; the
-#     note's own words are the thing itself, and they survive every rename.
-_RANSOM_CLAIM = re.compile(r"(?:all\s+)?your\s+(?:files|data|documents|network|company|servers)\s+"
-                           r"(?:have\s+been|has\s+been|are|were|is)\s+(?:been\s+)?(?:encrypted|locked|stolen)"
-                           r"|we\s+have\s+(?:encrypted|locked)\s+(?:all\s+)?your"
-                           r"|all\s+of\s+your\s+files\s+(?:are|have\s+been)\s+encrypted"
-                           r"|your\s+(?:important\s+)?files\s+(?:are|have\s+been)\s+encrypted", re.I)
-_RANSOM_MARKERS = re.compile(r"decryptor|decryption\s+(?:key|tool|id|software)|\.onion\b|tor\s+browser"
-                             r"|bitcoin|monero|\bxmr\b|\bbtc\b|\bransom\b|personal\s+id|your\s+unique\s+id"
-                             r"|do\s+not\s+(?:rename|modify|try\s+to)|permanently\s+(?:lost|deleted)"
-                             r"|(?:leak|publish)(?:ed)?\s+(?:site|on\s+our)|contact\s+us", re.I)
-
-
-# The trailing file path in front of a match, so an ambiguous extension can be asked the one
-# question that separates ransomware from a backup job: was the SAME file renamed in place?
-_FNAME_TAIL = re.compile(r"[A-Za-z0-9_.\-/\\:]{3,120}$")
-# Characters a ransom note decorates its name with. `_readme.txt` (STOP/Djvu) and `!!!README!!!.txt`
-# are notes; `/usr/share/doc/openssl/README.txt` is a package.
-_NOTE_DECORATION = "_!#+@$~"
-
-
-def _rename_in_place(raw: str, start: int) -> bool:
-    """`payroll.xlsx -> payroll.xlsx.lockbit` / `renamed backup.sql to backup.sql.encrypted`.
-
-    Ransomware renames the file it found; a backup or secrets tool WRITES A NEW ONE. So the same
-    base name appearing twice before the extension is the shape that tells them apart, and it needs
-    no vocabulary at all. The base must itself carry a dot, or `cp secrets secrets.enc` would look
-    like a rename.
-    """
-    head = raw[:start]
-    m = _FNAME_TAIL.search(head)
-    if not m:
-        return False
-    name = re.split(r"[/\\]", m.group(0))[-1]
-    return len(name) >= 4 and "." in name and head.count(name) >= 2
-
-
-def _ransom_real(raw: str, rx: "re.Pattern[str]", family: set[str], ambiguous: set[str],
-                 generic_notes: set[str], context: "re.Pattern[str]") -> bool:
-    """Does `raw` describe ransomware, or only contain a string that a ransomware family also uses?
-
-    The same second-opinion shape as `_secret_real`, and for the same reason: the pattern is a claim
-    about a SUBSTRING and the evidence is the LINE. Measured on a 27-line corpus of ordinary evidence
-    (package logs, a web access log, ansible-vault, borg, a scanned .djvu, a Tor proxy row) the
-    pattern alone fired on 24 of them, every one at `critical`.
-
-    A match is STRONG when it is a specific ransom-note name, a security product's own ransomware
-    signature, a family extension, or an ambiguous extension appended to a USER DOCUMENT
-    (`payroll.xlsx.encrypted` — backup tools append to archives and databases, not to the things
-    people opened). It is WEAK when it is a bare `README.txt` or a bare ambiguous extension.
-
-    One strong match anywhere on the line is enough, exactly like `_secret_real`. A weak one needs the
-    line to corroborate it (`_RANSOM_CONTEXT`) — including via another match on the same line, which
-    is why the strong scan happens first. An analyst override with none of the named groups is
-    treated as all-strong: a gate derived from groups nobody has seen says nothing.
-    """
-    weak = False
-    for m in rx.finditer(raw):
-        gd = m.groupdict()
-        if not gd or ("note" not in gd and "ext" not in gd and "verdict" not in gd):
-            return True                                  # an override without the groups
-        if gd.get("verdict"):
-            return True
-        note = gd.get("note")
-        if note:
-            start = m.start("note")
-            if start > 0 and raw[start - 1] in _NOTE_DECORATION:
-                return True                              # _readme.txt, !!!README!!!.txt
-            stem = re.sub(r"[^a-z0-9]+", "", note.lower().rsplit(".", 1)[0])
-            if stem in generic_notes:
-                weak = True
-                continue
-            return True
-        ext = (gd.get("ext") or "").lower()
-        if not ext:
-            continue
-        if ext in family:
-            return True
-        if ext in ambiguous:
-            if gd.get("doc"):                            # …xlsx.encrypted, …pdf.enc
-                return True
-            if _rename_in_place(raw, m.start()):
-                return True
-            weak = True
-    return bool(weak and context.search(raw))
-
-
-def _ransom_blocked(raw: str, markers: Iterable[str]) -> bool:
-    """Did a security product say it STOPPED this? Then the claim is containment, not encryption."""
-    low = raw.lower()
-    return any(m in low for m in markers)
-
-
-def _ransom_note_text(raw: str, claim: "re.Pattern[str]", markers: "re.Pattern[str]", need: int) -> bool:
-    """A ransom NOTE, judged by its own words: the encryption claim plus `need` distinct markers.
-
-    The claim is mandatory. On its own it is a sentence an advisory could also contain, so the note
-    has to carry the rest of what a note carries — a decryptor offer, a wallet, an onion address, a
-    personal id, a threat. Distinct MATCHED TEXT, not occurrences: a note repeating the word bitcoin
-    nine times has said one thing.
-    """
-    if not claim.search(raw):
-        return False
-    if need <= 0:
-        return True
-    seen: set[str] = set()
-    for m in markers.finditer(raw):
-        seen.add(m.group(0).lower())
-        if len(seen) >= need:
-            return True
-    return False
-
-
 # ---- regexes for the Windows / Azure / Microsoft 365 tranche. Same rule as every other pattern here:
 #      each is the SHIPPED DEFAULT of a regex Param, never a bare constant read by run_rules.
 _WDIGEST = re.compile(r"UseLogonCredential|\\WDigest\\|SecurityProviders\\\\WDigest|RunAsPPL|LsaCfgFlags"
@@ -1502,40 +1320,6 @@ PARAMS: dict[str, tuple[Param, ...]] = {
     ),
     "SIGMA-APP-0075": (
         P("pattern", "Encoded command", "regex", _ENCODED_CMD.pattern, "raw", "Matched against the raw line of every event, whatever its source."),
-    ),
-    "SIGMA-APP-0080": (
-        P("pattern", "Ransomware indicator", "regex", _RANSOM.pattern, "raw",
-          "Matched against the raw line of every event, whatever its source. Keep the (?P<note>…) / "
-          "(?P<verdict>…) / (?P<doc>…) / (?P<ext>…) groups: they are what the checks below read. A "
-          "pattern without them is treated as all-real."),
-        P("familyExtensions", "Family extensions", "values", _RANSOM_FAMILY, "raw",
-          "Extensions that name a ransomware family and nothing else. These fire on their own."),
-        P("ambiguousExtensions", "Extensions needing corroboration", "values", _RANSOM_AMBIGUOUS, "raw",
-          "Extensions ordinary software writes constantly (backup archives, ansible-vault/sops secrets, "
-          "scanned documents, Tor addresses). One of these only fires when the line corroborates it, or "
-          "when it is appended to a user document."),
-        P("genericNotes", "Generic note names", "values", _RANSOM_GENERIC_NOTES, "raw",
-          "Note stems that are not a ransom note by themselves - README.txt ships with almost every "
-          "piece of software. Corroboration required, same as an ambiguous extension. Separators are "
-          "ignored when comparing, so 'readme' also covers READ_ME, read-me and READ ME; a name that "
-          "is DECORATED (_readme.txt, !!!README!!!.txt) is never treated as generic."),
-        P("corroboration", "Corroborating text", "regex", _RANSOM_CONTEXT.pattern, "raw",
-          "What a line must also say for a generic note name or an ambiguous extension to count. "
-          "Deliberately excludes a bare 'decrypt' and a bare '.onion' - both corroborate themselves."),
-        P("blockedMarkers", "Containment markers", "values", _RANSOM_BLOCKED, "raw",
-          "Words that mean a security product stopped it. Present, the hit is reported at high rather "
-          "than critical: blocked is a different claim from encrypted."),
-    ),
-    "SIGMA-APP-0085": (
-        P("pattern", "Encryption claim", "regex", _RANSOM_CLAIM.pattern, "raw",
-          "The sentence a ransom note always contains. Mandatory: matched against the raw line of every "
-          "event, whatever its source."),
-        P("markers", "Corroborating markers", "regex", _RANSOM_MARKERS.pattern, "raw",
-          "The rest of what a note carries - a decryptor offer, a wallet, an onion address, a personal "
-          "id, a do-not-rename threat."),
-        P("minMarkers", "Distinct markers needed", "int", "1", "raw",
-          "How many DIFFERENT markers must appear alongside the claim. Distinct matched text, not "
-          "occurrences: a note repeating 'bitcoin' nine times has said one thing."),
     ),
     "SIGMA-AUTH-0240": (
         P("window", "Time window", "seconds", "3600", "", "Length of the sliding window the addresses are counted in."),
@@ -2252,21 +2036,8 @@ _SECRET_LITERALS = ("akia", "asia", "-----begin", "eyj", "password", "passwd", "
                     "api_key", "api-key", "secret", "token", "xox", "gho_", "ghp_", "ghr_", "ghs_",
                     "ghu_", "github_pat_", "sk_live_", "hooks.slack.com")
 _ENCODED_LITERALS = ("powershell", "certutil", "base64")
-_RANSOM_LITERALS = ("read_me", "read me", "read-me", "readme", "decrypt", "recover", "restore",
-                    "encrypted", "ransom",
-                    # one per extension alternative, as a common PREFIX where several share one:
-                    # ".crypt" covers crypt/crypted/cryptolocker, ".enc" covers enc/encrypt/encrypted,
-                    # ".lock" covers locky/lockbit/locked, ".black" covers blackcat/blackbasta/blacksuit.
-                    ".crypt", ".enc", ".lock", ".black", ".conti", ".ryuk", ".revil", ".sodinokibi",
-                    ".djvu", ".wannacry", ".wncry", ".onion", ".makop", ".phobos", ".cerber",
-                    ".darkside", ".akira", ".avoslocker", ".hellokitty", ".nokoyawa", ".mallox",
-                    ".netwalker", ".egregor", ".clop", ".aes")
-# Every alternative of the encryption claim ends in one of these three words.
-_RANSOM_TEXT_LITERALS = ("encrypted", "locked", "stolen")
 _GATE_LITERALS = {_SECRET.pattern: _SECRET_LITERALS,
-                  _ENCODED_CMD.pattern: _ENCODED_LITERALS,
-                  _RANSOM.pattern: _RANSOM_LITERALS,
-                  _RANSOM_CLAIM.pattern: _RANSOM_TEXT_LITERALS}
+                  _ENCODED_CMD.pattern: _ENCODED_LITERALS}
 _GATE_CACHE: dict[tuple, "Optional[re.Pattern[str]]"] = {}
 
 
@@ -3076,36 +2847,23 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
             attackers.setdefault(ip, "port scan")
 
     _tick(55.0)
-    # --- any source: secrets, encoded commands, ransomware markers.
+    # --- any source: secrets and encoded commands.
     # This is the ONE pass that is not restricted to a family, so it is also the only one that can cost a
-    # full scan of the pool. It pays for itself by SCREENING first: the three patterns are joined into a
+    # full scan of the pool. It pays for itself by SCREENING first: the patterns are joined into a
     # single alternation and only a line that matches it is tested against them individually, so the
-    # common case is one regex over `raw` and nothing else. The whole pass is skipped when all three
+    # common case is one regex over `raw` and nothing else. The whole pass is skipped when both
     # rules are off — a disabled rule must not cost a scan of the evidence.
     rx_secret = _prx("SIGMA-APP-0070", "pattern", _SECRET)
     s70_public = set(_pl("SIGMA-APP-0070", "urlPublicParams"))
     s70_placeholders = set(_pl("SIGMA-APP-0070", "placeholders"))
     rx_encoded = _prx("SIGMA-APP-0075", "pattern", _ENCODED_CMD)
-    rx_ransom = _prx("SIGMA-APP-0080", "pattern", _RANSOM)
-    s80_family = set(_pl("SIGMA-APP-0080", "familyExtensions"))
-    s80_ambiguous = set(_pl("SIGMA-APP-0080", "ambiguousExtensions"))
-    # cleaned the same way `_ransom_real` cleans the matched stem, so READ_ME / read-me / READ ME are
-    # one value and an analyst can write whichever spelling they think in
-    s80_generic = {re.sub(r"[^a-z0-9]+", "", x) for x in _pl("SIGMA-APP-0080", "genericNotes")}
-    rx_ransom_ctx = _prx("SIGMA-APP-0080", "corroboration", _RANSOM_CONTEXT)
-    s80_blocked = _pl("SIGMA-APP-0080", "blockedMarkers")
-    rx_note_claim = _prx("SIGMA-APP-0085", "pattern", _RANSOM_CLAIM)
-    rx_note_markers = _prx("SIGMA-APP-0085", "markers", _RANSOM_MARKERS)
-    s85_min = _pn("SIGMA-APP-0085", "minMarkers")
     universal = [(rx_secret, R["APP-0070"], "credential exposure"),
-                 (rx_encoded, R["APP-0075"], "defense evasion"),
-                 (rx_ransom, R["APP-0080"], "impact"),
-                 (rx_note_claim, R["APP-0085"], "impact")]
+                 (rx_encoded, R["APP-0075"], "defense evasion")]
     universal = [u for u in universal if u[1].id not in _DISABLED]
     if universal and full:
         screen = _screen([u[0] for u in universal])
         gate = _literal_gate([u[0] for u in universal])
-        a70_rule, a80_rule, a85_rule = R["APP-0070"], R["APP-0080"], R["APP-0085"]
+        a70_rule = R["APP-0070"]
         if screen is not None:
             for e in events:
                 raw = e.raw
@@ -3118,23 +2876,14 @@ def run_rules(events: list[Event], ts: np.ndarray, disabled: Optional[set[str]] 
                 for rx, rule, tactic in universal:
                     if not rx.search(raw):
                         continue
-                    # Shape is not enough for any of the three any-source rules: each has a second
-                    # opinion that reads the LINE. See _secret_real / _ransom_real / _ransom_note_text.
+                    # Shape is not enough for the secret rule: it has a second
+                    # opinion that reads the LINE. See _secret_real.
                     level = None
                     if rule is a70_rule:
                         if not _secret_real(raw, rx, s70_public, s70_placeholders):
                             continue
-                    elif rule is a80_rule:
-                        if not _ransom_real(raw, rx, s80_family, s80_ambiguous, s80_generic, rx_ransom_ctx):
-                            continue
-                        if _ransom_blocked(raw, s80_blocked):
-                            level = "high"
-                    elif rule is a85_rule and not _ransom_note_text(raw, rx, rx_note_markers, s85_min):
-                        continue
                     _tag(e, rule, level)
                     e.set_field_default("tactic", tactic)
-                    if level == "high":
-                        e.set_field_default("containment", "reported blocked by a security product")
 
 
     _tick(80.0)

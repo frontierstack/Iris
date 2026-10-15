@@ -71,7 +71,10 @@ def _ok(rpc_id: Any, result: Any) -> dict[str, Any]:
 #: lines to it, on an impulse that came from another editor entirely. Offering an action whose cost
 #: lands on someone who did not ask for it is worse than not offering it, which is the same reasoning
 #: that keeps a write tool unlisted when writes are off.
-NOT_EXPOSED = {"delegate_investigation"}
+#:
+#: `checkpoint` records progress into the RUN's ledger, and an MCP session is not a run: there is no
+#: ledger to hold it, so offering it would be a tool that always answers "nothing kept".
+NOT_EXPOSED = {"delegate_investigation", "checkpoint"}
 
 
 def exposed_tools(allow_writes: bool) -> list[Any]:
