@@ -529,6 +529,84 @@ def _note_index_cache_mismatch(n: int, header: dict) -> None:
     print(f"[iris] search index cache: it holds {header.get('n')} events and the pool has {n}; rebuilding")
 
 
+
+
+# --------------------------------------------------------------------------- the device scan, ONE kernel
+# The windowed scan below is ~22-86 windows x (2-4 compare passes + flatnonzero + gather + searchsorted
+# + scatter), each a kernel launch and several a host sync. On the analyst's 5.5 GB index that was
+# ~1.1 s per needle — for a needle that matches NOTHING — and every free-text atom, every
+# `field:value` atom and every `rule:`/`detection:` lookup pays it, so opening a rule's sample hits or
+# typing a two-term query cost 1-4 s. This kernel reads the buffer ONCE: one thread per start
+# position, the rarest byte first, the rest only on a hit, and the event found by the same
+# `searchsorted(offsets, pos, 'right') - 1` the windowed path uses — so the mask is bit-identical
+# (`tests/test_gpu_substring_kernel.py`). Compiled once per process by NVRTC; any failure (no
+# compiler in the image, a driver quirk) is logged ONCE and the windowed path answers instead.
+_SUBSTR_SRC = r"""
+extern "C" __global__
+void iris_substr_mask(const unsigned char* __restrict__ hay, const long long span,
+                      const unsigned char* __restrict__ nd, const int m, const int k0,
+                      const long long* __restrict__ offsets, const long long n_off,
+                      unsigned char* __restrict__ mask, const long long n_ev) {
+    const unsigned char a = nd[k0];
+    const long long stride = (long long)blockDim.x * gridDim.x;
+    for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < span; i += stride) {
+        if (hay[i + k0] != a) continue;
+        int j = 0;
+        while (j < m && hay[i + j] == nd[j]) ++j;
+        if (j < m) continue;
+        long long lo = 0, hi = n_off;              /* first offset > i */
+        while (lo < hi) {
+            const long long mid = (lo + hi) >> 1;
+            if (offsets[mid] <= i) lo = mid + 1; else hi = mid;
+        }
+        const long long ev = lo - 1;
+        if (ev >= 0 && ev < n_ev) mask[ev] = 1;
+    }
+}
+"""
+_substr_kernel: Any = None
+_substr_failed = ""
+
+
+def _device_substr_kernel(ap) -> Any:
+    """The compiled kernel, or None once it has failed (said once, then the windowed path)."""
+    global _substr_kernel, _substr_failed
+    if _substr_kernel is not None or _substr_failed:
+        return _substr_kernel
+    try:
+        _substr_kernel = ap.RawKernel(_SUBSTR_SRC, "iris_substr_mask")
+        _substr_kernel.compile()
+    except Exception as exc:  # noqa: BLE001 — an optimisation may never cost a query
+        _substr_kernel = None
+        _substr_failed = f"{type(exc).__name__}: {exc}"
+        print(f"[iris] search: the single-pass GPU scan is unavailable ({_substr_failed[:200]}); "
+              f"using the windowed scan")
+    return _substr_kernel
+
+
+def _device_contains(ap, idx: "SearchIndex", nd: np.ndarray, k0: int) -> Any:
+    """`_contains` on the device in ONE pass, or None when the kernel is unavailable."""
+    kern = _device_substr_kernel(ap)
+    if kern is None:
+        return None
+    m = int(nd.shape[0])
+    N = int(idx.text.shape[0])
+    span = N - m + 1
+    mask = ap.zeros(idx.n, dtype=ap.uint8)
+    needle = ap.asarray(nd)
+    threads = 256
+    blocks = int(min(max(1, (span + threads - 1) // threads), 65535))
+    try:
+        kern((blocks,), (threads,),
+             (idx.text, np.int64(span), needle, np.int32(m), np.int32(k0),
+              idx.offsets, np.int64(int(idx.offsets.shape[0])), mask, np.int64(idx.n)))
+    except Exception as exc:  # noqa: BLE001
+        global _substr_failed, _substr_kernel
+        _substr_failed, _substr_kernel = f"{type(exc).__name__}: {exc}", None
+        print(f"[iris] search: GPU scan launch failed ({_substr_failed[:200]}); using the windowed scan")
+        return None
+    return mask.view(ap.bool_)
+
 class _Engine:
     """Lowers a query AST to a boolean candidate mask over the index."""
 
@@ -562,15 +640,20 @@ class _Engine:
           eleven million events a handful of masks is already a hundred megabytes.
         """
         idx = self.idx
-        if idx.on_gpu or self.ap is not np:
-            return self._contains(needle)
+        # ON THE DEVICE TOO. This returned early for a GPU index, so the Search screen's two requests
+        # per query (the page and its histogram), a drill-down that adds one term, and every re-open of
+        # a rule's sample hits each re-scanned the whole 5.5 GB buffer. A device array cannot be
+        # flagged read-only; what keeps it unedited is the same rule that keeps the host one honest —
+        # `lower()` and `search()` only ever combine masks into NEW arrays.
         with idx.mask_lock:
             hit = idx.mask_cache.get(needle)
             if hit is not None:
                 idx.mask_cache.move_to_end(needle)
                 return hit
-        mask = np.asarray(self._contains(needle))      # computed OUTSIDE the lock: a race costs a
-        mask.flags.writeable = False                   # duplicate scan, never a wrong answer
+        mask = self._contains(needle)                  # computed OUTSIDE the lock: a race costs a
+        if self.ap is np:                              # duplicate scan, never a wrong answer
+            mask = np.asarray(mask)
+            mask.flags.writeable = False
         keep = max(_MASK_CACHE_MIN, _MASK_CACHE_BYTES // max(1, int(mask.nbytes)))
         with idx.mask_lock:
             idx.mask_cache[needle] = mask
@@ -642,6 +725,10 @@ class _Engine:
         span = N - m + 1
         anchors, rest = self._anchors(nd, N)
 
+        if ap is not np:
+            fast = _device_contains(ap, idx, nd, int(anchors[0]))
+            if fast is not None:
+                return fast
         mask = ap.zeros(idx.n, dtype=bool)
         # `int(array.shape[0])` on a device array is a HOST SYNC. Skipping the chunk early is worth a
         # sync on numpy (it is free there) and costs one on the GPU — ~84 chunks over a 5.4 GB buffer,
@@ -1022,6 +1109,7 @@ def search(events: list[Event], ts: np.ndarray, version: int, q: str, lo: int, h
     """
     t0 = time.perf_counter()
     n = len(events)
+    dev_cand: Any = None            # an exact GPU answer kept on the device (only its page crosses)
     ast = parse_query(q)
     pred = node_pred(ast)
     engine = "cpu"
@@ -1058,9 +1146,16 @@ def search(events: list[Event], ts: np.ndarray, version: int, q: str, lo: int, h
                 rng[lo:min(hi, m)] = True
                 mask = mask & rng
             cand = ap.flatnonzero(mask)
-            cand_idx = compute.asnumpy(cand) if idx.on_gpu else np.asarray(cand)
             engine = "cuda" if idx.on_gpu else "vector"
             exact = eng.exact
+            if idx.on_gpu and exact and not positions and hi <= m:
+                # The answer is a popcount and a slice, so only the SLICE crosses to the host. The
+                # whole candidate array used to: on an empty query that is every position in the pool,
+                # 89 MB at 11 M events, to show 200 rows.
+                dev_cand = cand
+                cand_idx = np.empty(0, dtype=np.int64)
+            else:
+                cand_idx = compute.asnumpy(cand) if idx.on_gpu else np.asarray(cand)
         except Exception:
             cand_idx, exact = None, False
     else:
@@ -1099,7 +1194,12 @@ def search(events: list[Event], ts: np.ndarray, version: int, q: str, lo: int, h
         # Both filter masks are EXACT (severity by code, source by equality on the label/file/id
         # triple), so they no longer force the confirm pass. Only an approximate ATOM in the query
         # does — that is what `eng.exact` means.
-        if exact:
+        if exact and dev_cand is not None:
+            total = int(dev_cand.shape[0])
+            ordered = dev_cand[::-1] if desc else dev_cand
+            for i in compute.asnumpy(ordered[offset:offset + limit]).tolist():
+                rows.append(events[i])
+        elif exact:
             # NO budget here, deliberately. This branch does no Python walk at all: the total is a
             # popcount of the mask and the page is a slice, so it is already O(page) — that is the
             # whole point of `source_mask_exact` and of `eng.exact`. Adding a count-ahead ceiling here
@@ -1196,7 +1296,8 @@ def search(events: list[Event], ts: np.ndarray, version: int, q: str, lo: int, h
     out: dict[str, Any] = {
         "rows": rows, "total": total, "totalExact": exact_total,
         "engine": engine, "tookMs": round((time.perf_counter() - t0) * 1000.0, 1),
-        "candidates": int(cand_idx.shape[0]) if cand_idx is not None else n,
+        "candidates": (total if dev_cand is not None
+                       else int(cand_idx.shape[0]) if cand_idx is not None else n),
         "indexBytes": idx.bytes if idx else 0,
         "index": {**index_status(), "poolVersion": version,
                   # the answer to "it says ready, so why did this query scan?"
