@@ -21,7 +21,7 @@
  * sysctl.vm.compaction_proactiveness=0 — stops background compaction entirely. NOTE: the value that was
    here before, `sysctl.vm.compact_memory=0`, does nothing at all — `compact_memory` is a write-only
    TRIGGER, not a setting, so writing 0 to it is a no-op. That is why the guard never worked.
- * wsl2/maxCrashDumpCount=0 — a segfault in the VM writes a CORE DUMP of the crashed Linux process to
+ * wsl2/maxCrashDumpCount=-1 — NOT 0: with 0 set, WSL still wrote two dumps (29 GB) on 2026-10-14. A segfault in the VM writes a CORE DUMP of the crashed Linux process to
    %TEMP%\wsl-crashes. Four of them in one afternoon came to 146 GB (one was 116.5 GB), because the
    process being dumped holds the whole event pool. And such a dump contains the analyst's log
    contents in plaintext, in a temp directory — a disk problem and a handling problem at once.
@@ -45,7 +45,7 @@ $WslConfig = Join-Path $env:USERPROFILE '.wslconfig'
 # key = section/name, value = what Iris wants. `$null` means "leave whatever is there".
 $Wanted = [ordered]@{
   'wsl2/kernelCommandLine'          = 'transparent_hugepage=never sysctl.vm.compaction_proactiveness=0'
-  'wsl2/maxCrashDumpCount'          = '0'
+  'wsl2/maxCrashDumpCount'          = '-1'
   'experimental/autoMemoryReclaim'  = 'disabled'
 }
 # only applied when the key is MISSING — never overwrite a deliberate choice.

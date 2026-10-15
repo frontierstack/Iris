@@ -487,6 +487,7 @@ into `.wslconfig` from the machine's real hardware; `setup.ps1` prints both side
 | Variable | Default | What it does |
 |---|---|---|
 | `IRIS_POOL_MAX_MB` | **unset — unlimited** | Megabytes of **source log** the pool may load at startup. There is no cap by default: a file that was uploaded as evidence and is not in search is worse than a slow Iris, because nothing about a search tells you it was answered over part of the corpus. Set it (a shared box, a small VM) and anything over the cap stays in the library, listed by name, loadable one file at a time. Not a RAM figure — parsed events cost several times the source bytes. |
+| `IRIS_MEMORY_FLOOR_MB` | **1536, or 8 % of RAM if more** | Free memory below which reading a log into the pool STOPS, with the file named and the reason given, instead of reading on until the machine runs out (on Docker Desktop / WSL that is a crash, not an error). A file stopped this way, or one Iris died reading on two starts, is skipped at the next start and shown as *not loaded - memory* with **Load anyway**. `0` disables the check. |
 | `IRIS_AUTO_ENRICH` | `0` (off) | Seeds `settings.ingest.autoEnrich` on first run. `0` = a log lands as raw searchable lines and phase 2 (timestamps, fields, entities, detections) never starts on its own — see *Two-phase ingest* below. Like every `IRIS_*` variable it only seeds settings the first time; after that Settings wins. |
 | `IRIS_PARSE_WORKERS` | **derived** (see *Automatic sizing*) | Parallel parse workers for files over `IRIS_PARSE_MIN_MB`. `1` disables parallel parsing. |
 | `IRIS_ENRICH_WORKERS` | **derived**, at most half the parse count | Lanes that interpret SMALL sources in parallel during phase 2. `1` = one at a time. |
@@ -852,7 +853,8 @@ Full contract: `docs/API_CONTRACT.md`.
   WSL VM segfaults, WSL writes a CORE DUMP of it there, and a dump of Iris is the size of the pool it
   was holding: four of them in one afternoon came to **146 GB**, one of them 116.5 GB. Worse than the
   disk: that dump contains your log contents in plaintext, in a temp directory. `.wslconfig` now
-  carries `maxCrashDumpCount=0` (applied by `wsl.ps1 -Apply`), which stops them being written; delete
+  carries `maxCrashDumpCount=-1` (applied by `wsl.ps1 -Apply`), which stops them being written — `0`
+  did not: two dumps were still written with it set; delete
   any existing ones from `%TEMP%\wsl-crashes`. Raise the count only while diagnosing a crash, and
   clear the folder afterwards.
 - **Docker is eating my C: drive** — two separate things, and the first hides the second.

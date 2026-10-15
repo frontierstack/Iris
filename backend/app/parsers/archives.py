@@ -179,6 +179,10 @@ class Expanded:
     # ...and FROM WHAT: 'utf-16', 'utf-16-le', 'utf-16-be' or 'cp1252' (see parsers/textcodec.py).
     # Recorded as the `#<codec>` member so a re-read applies the same transcode.
     codec: str = ""
+    # `expand_path` only: (payload name, codec) — this file is ONE compressed text payload and the
+    # caller should READ IT AS A STREAM (`open_single`) instead of holding it. `members` is empty.
+    # Set only when the bytes path would have produced exactly one plain member: see `stream_single`.
+    stream: Optional[tuple[str, str]] = None
 
     @property
     def ok(self) -> bool:
@@ -340,6 +344,16 @@ def expand_path(filename: str, path) -> Expanded:
             return out
         # not actually a tar after all — fall through and let the byte path decide
 
+    # A single compressed TEXT payload is read as a stream. "gz/bz2/xz decompress into memory whatever
+    # we do" was true of `expand()` and false of the file: a 549 MB conn.log.gz was held as its 549 MB
+    # AND as a 2.7 GB decompressed `bytes` for the whole raw read — 3.2 GB on top of the events, on the
+    # VM that then died. Only when the bytes path would have produced one plain member; anything it
+    # would recurse into, cap or refuse still goes the old way below.
+    if head.startswith((GZIP_MAGIC, BZIP2_MAGIC, XZ_MAGIC)):
+        single = stream_single(filename, path)
+        if single is not None:
+            return Expanded(stream=single)
+
     # The formats that still need the whole file in memory. Each one either decompresses into RAM
     # regardless (gz/bz2/xz/zst), is handled by a third-party reader with its own file handling
     # (7z/rar), or rewrites the bytes before anything else sees them (a UTF-16 text export). All are
@@ -375,6 +389,80 @@ def _bytes_of(data: Optional[bytes], fileobj) -> bytes:
         return fileobj.read()
     except Exception:
         return b""
+
+
+_SINGLE_OPENERS = {"gzip": gzip.open, "bzip2": bz2.open, "xz": lzma.open}
+
+
+def single_codec(head: bytes) -> str:
+    """'gzip' | 'bzip2' | 'xz' from the MAGIC, '' otherwise. Never from the extension: a file named .gz
+    that is not gzip is the bytes path's to report."""
+    if head.startswith(GZIP_MAGIC):
+        return "gzip"
+    if head.startswith(BZIP2_MAGIC):
+        return "bzip2"
+    if head.startswith(XZ_MAGIC):
+        return "xz"
+    return ""
+
+
+def open_single(path, codec: str):
+    """A binary file object that DECOMPRESSES as it is read. Concatenated gzip / multistream bz2 /
+    xz behave exactly as `gzip.decompress` & co. treat them: every member, in order."""
+    return _SINGLE_OPENERS[codec](path, "rb")
+
+
+def single_payload_name(filename: str) -> str:
+    """What `_expand_single` names the payload at depth 0 — the provenance must not change."""
+    inner = _strip_compression_suffix(filename)
+    return inner if inner != filename else f"{filename}.out"
+
+
+def stream_single(filename: str, path) -> Optional[tuple[str, str]]:
+    """(payload name, codec) when `path` is one compressed payload that the bytes path would have
+    emitted as ONE PLAIN MEMBER, else None (and the caller expands it the old way).
+
+    Exactly the conditions under which `_expand_single` -> `_emit` appends the payload unchanged:
+    no per-member or total cap is configured (those need the size, which a stream does not have
+    up front — the defaults are 0, i.e. none), the payload decompresses, it is not empty, and its
+    head is not itself a container (`_looks_like_archive`, plus zstd and a tar header). A tar inside
+    a .gz never gets here: `expand_path` routes it to the tar branch first.
+    """
+    if MAX_MEMBER_BYTES or MAX_TOTAL_BYTES:
+        return None
+    try:
+        with open(path, "rb") as fh:
+            codec = single_codec(fh.read(8))
+        if not codec:
+            return None
+        with open_single(path, codec) as fh:
+            phead = fh.read(SNIFF_BYTES)
+    except Exception:  # noqa: BLE001 — a damaged stream is the bytes path's to report, by name
+        return None
+    if not phead:
+        return None
+    inner = single_payload_name(filename)
+    if _looks_like_archive(inner, phead) or phead.startswith(ZSTD_MAGIC):
+        return None
+    return inner, codec
+
+
+def open_member_stream(path, member: str):
+    """A decompressing stream over `member` when it is the single payload of a gz/bz2/xz file, else
+    None (the caller falls back to `read_member`). Lets a reader that wants a PREFIX, or wants the
+    payload a chunk at a time, avoid decompressing a multi-gigabyte member whole."""
+    parts = member.split("!")
+    if len(parts) != 2 or parts[1].startswith("#"):
+        return None
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(SNIFF_BYTES)
+        codec = single_codec(head)
+        if not codec or _compressed_tar(head):
+            return None
+        return open_single(path, codec)
+    except OSError:
+        return None
 
 
 def read_member(path, member: str) -> bytes:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import re
 import uuid
 
@@ -15,6 +16,7 @@ from fastapi import APIRouter, File, HTTPException, Query, Response, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from ..parsers import archives
 from .. import config
 from ..ai.mapping import suggest_mapping
 from ..jobs import REGISTRY
@@ -412,9 +414,14 @@ def _lines_of(blob: bytes):
         yield n, line
 
 
-def _read_lines(path: Path):
-    """Yield (n, text) for every line — universal newlines, utf-8 with replacement, no trailing newline."""
-    with open(path, "r", encoding="utf-8-sig", errors="replace", newline=None) as fh:
+def _read_lines(path: Path, stream=None):
+    """Yield (n, text) for every line — universal newlines, utf-8 with replacement, no trailing newline.
+
+    `stream` is an already-open BINARY reader to walk instead of `path` — the decompressing reader of
+    a single .gz/.bz2/.xz payload (`archives.open_member_stream`), so a 2.7 GB member is paged a line
+    at a time rather than decompressed, decoded and split whole for every page of the viewer."""
+    raw = stream if stream is not None else open(path, "rb")
+    with io.TextIOWrapper(raw, encoding="utf-8-sig", errors="replace", newline=None) as fh:
         for n, line in enumerate(fh, 1):
             if line.endswith("\n"):
                 line = line[:-1]
@@ -436,7 +443,16 @@ def source_raw(sid: str, offset: int = Query(0, ge=0), limit: int = Query(500, g
     binary = {"file": src.file, "size": src.size, "totalLines": 0, "matches": 0, "offset": offset,
               "limit": limit, "q": q, "lines": [], "truncatedLine": False, "binary": True,
               "hint": _BINARY_HINT}
-    if member:
+    stream = archives.open_member_stream(path, member) if member else None
+    if stream is not None:
+        with stream as probe:
+            head = probe.read(8192)
+        if Path(src.file.split("!")[-1]).suffix.lower() in _BINARY_EXT or b"\x00" in head:
+            return binary
+        st = path.stat()
+        rows = _read_lines(path, archives.open_member_stream(path, member))
+        key = (f"{path}!{member}", st.st_size, int(st.st_mtime_ns))
+    elif member:
         blob = _member_bytes(sid, src)
         if Path(src.file.split("!")[-1]).suffix.lower() in _BINARY_EXT or b"\x00" in blob[:8192]:
             return binary

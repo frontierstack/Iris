@@ -41,13 +41,14 @@ from __future__ import annotations
 import codecs
 import contextlib
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterable, Optional
 
-from . import jobs
+from . import jobs, resources
 from .models import Event
 from .normalize import leading_ts
 
@@ -133,7 +134,7 @@ def raw_events(sid: str, filename: str, family: str, data: bytes, prefix: str,
 
 def raw_events_from_file(sid: str, filename: str, family: str, path: Path, prefix: str,
                          first_id: int = 1, progress: Optional[Callable[[int, int], None]] = None,
-                         total: int = 0) -> list[Event]:
+                         total: int = 0, codec: str = "") -> list[Event]:
     """`raw_events` over a file on disk, never holding more than one chunk of it in memory.
 
     This is the point of streaming phase 1: the EVENTS are memory an evidence tool is supposed to spend,
@@ -148,7 +149,11 @@ def raw_events_from_file(sid: str, filename: str, family: str, path: Path, prefi
             total = 0
 
     def chunks() -> Iterable[bytes]:
-        with open(path, "rb") as fh:
+        # `codec` = the file is ONE compressed payload (parsers/archives.stream_single): read it through
+        # the decompressor, so the payload never exists in memory whole. `total` is then the payload's
+        # size, which is what the progress bar measures against.
+        from .parsers import archives
+        with (archives.open_single(path, codec) if codec else open(path, "rb")) as fh:
             while True:
                 block = fh.read(CHUNK_BYTES)
                 if not block:
@@ -156,6 +161,40 @@ def raw_events_from_file(sid: str, filename: str, family: str, path: Path, prefi
                 yield block
 
     return _raw_events(sid, filename, family, chunks(), total, prefix, first_id, progress)
+
+
+TS_CACHE_MAX = 4096
+MEMORY_CHECK_EVERY = 200_000
+
+
+def memory_floor_bytes() -> int:
+    """Free memory below which a raw read gives up: 1.5 GB, or 8 % of the machine if that is more.
+    `IRIS_MEMORY_FLOOR_MB` pins it (0 disables the check)."""
+    env = os.environ.get("IRIS_MEMORY_FLOOR_MB")
+    if env is not None:
+        try:
+            return max(0, int(env)) << 20
+        except ValueError:
+            pass
+    total = 0
+    try:
+        total = resources.resources().memTotalMB << 20
+    except Exception:  # noqa: BLE001
+        pass
+    return max(1536 << 20, int(total * 0.08))
+
+
+class OutOfMemoryForSource(MemoryError):
+    """A raw read stopped because the machine was about to run out — said in the analyst's terms."""
+
+    def __init__(self, lines: int, done: int, total: int, free: int) -> None:
+        self.lines, self.done, self.total, self.free = lines, done, total, free
+        share = f" ({done / total:.0%} of the file)" if total else ""
+        super().__init__(
+            f"stopped after {lines:,} lines{share}: only {free / 1e9:.1f} GB of memory was left, and "
+            f"reading on would have crashed Iris. Its events are NOT searchable. Give the machine more "
+            f"memory (on Windows: .\\wsl.ps1 -Apply, or raise memory in .wslconfig), or split the file, "
+            f"then load it again.")
 
 
 def _raw_events(sid: str, filename: str, family: str, chunks: Iterable[bytes], total: int, prefix: str,
@@ -173,7 +212,19 @@ def _raw_events(sid: str, filename: str, family: str, chunks: Iterable[bytes], t
     # The cache matters more than it looks: an export is mostly runs of lines sharing one second, so
     # this turns the parse into a dict hit for nearly every line after the first of each second.
     ts_cache: dict[str, str] = {}
+    # ...and it must be BOUNDED. It is keyed on the matched TEXT, and a Zeek log writes a distinct
+    # microsecond epoch on nearly every line, so on a 22.7 M-line conn.log the "cache" held an entry
+    # per line on top of the pool it was building. The runs it exists for are consecutive, so a small
+    # window keeps every hit that matters.
+    ts_cap = TS_CACHE_MAX
     lead = leading_ts
+    # The read stops BEFORE the machine runs out, rather than at it. Past the floor the next
+    # allocation is not a MemoryError on this VM: it is SIGSEGV inside the garbage collector, which
+    # kills every other loaded source and — because startup re-reads the library — does it again on
+    # the next start. Checked every MEMORY_CHECK_EVERY lines; a reading of 0 means "unknown" and
+    # never stops a read.
+    floor = memory_floor_bytes()
+    next_check = MEMORY_CHECK_EVERY
     every = max(1, int(jobs.PROGRESS_EVERY_RECORDS))   # read once per call, so a test can turn it down
     # ...and a BYTE step as well, because a record count alone never fires on a small file: at
     # 20,000 records a 5,000-line log published nothing at all and its bar read 0 % start to
@@ -185,6 +236,13 @@ def _raw_events(sid: str, filename: str, family: str, chunks: Iterable[bytes], t
         done += len(line) + 1
         if not line.strip():
             continue
+        if len(ts_cache) > ts_cap:
+            ts_cache.clear()
+        if len(out) >= next_check:
+            next_check += MEMORY_CHECK_EVERY
+            free = resources.available_bytes()
+            if free and free < floor:
+                raise OutOfMemoryForSource(len(out), done, total, free)
         # No fields/entities/detections and no explicit msg: `Event` derives msg from raw[:200] and
         # points the three containers at the shared frozen empties. On a gigabyte of DNS log that is
         # the difference between ~666 and ~386 bytes an event — see the note in models.py.

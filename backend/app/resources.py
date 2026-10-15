@@ -158,6 +158,28 @@ def detect() -> Resources:
                      container=_in_container(), platform=sys.platform)
 
 
+def available_bytes() -> int:
+    """Memory this process may still allocate, NOW — the container limit when there is one, else the
+    machine's available figure. 0 = unknown, and unknown never stops anything.
+
+    `detect()` answers the same question but also re-reads the CPU topology; this is the half a hot
+    loop can afford to ask every few hundred thousand lines.
+    """
+    avail = 0
+    try:
+        import psutil
+        avail = int(psutil.virtual_memory().available)
+    except Exception:
+        pass
+    limit_mb = _cgroup_mem_limit_mb()
+    if limit_mb:
+        used = _cgroup_mem_used_mb()
+        if used is not None:
+            room = max(0, limit_mb - used) << 20
+            avail = min(avail, room) if avail else room
+    return avail
+
+
 def _cgroup_mem_used_mb() -> Optional[int]:
     for p in ("/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory/memory.usage_in_bytes"):
         raw = _read(p)

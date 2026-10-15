@@ -33,7 +33,7 @@ from typing import Any, Iterable, Optional
 
 import numpy as np
 
-from . import config, enrich, metrics, pool_store
+from . import config, enrich, metrics, pool_store, resources
 from .detect import RULES, run_rules
 from .exclusions import EXCLUSIONS
 from .rules import RULES_STORE
@@ -199,6 +199,106 @@ def pool_headroom_bytes() -> int:
         return max(0, int(psutil.virtual_memory().available * 0.8 / STORE.pool_bytes_per_source_byte()[0]))
     except Exception:
         return 0
+
+
+# --------------------------------------------------------------------------- how much LOG a file holds
+# Bytes on disk are not bytes of log. A 549 MB `conn.log.gz` is 2.7 GB of Zeek lines, and the memory
+# check below was handed the 549: it judged the file a fifth of its real size, let it load, and the
+# process died. These are the sizes the pool will actually have to hold.
+_COMPRESSED_GUESS = 6     # bz2 / xz carry no cheap size field; a text log compresses about this much
+
+
+def source_bytes_estimate(path: Path) -> int:
+    """Bytes of LOG in a staged file: uncompressed for .gz (its trailer) and .zip (its directory),
+    a conservative multiple for .bz2/.xz, the file size for everything else. Never below the size on
+    disk, and never raises — an unreadable file is the caller's to report."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return 0
+    low = path.name.lower()
+    try:
+        if low.endswith((".gz", ".tgz")) and size >= 18:
+            with open(path, "rb") as fh:
+                fh.seek(-4, 2)
+                isize = int.from_bytes(fh.read(4), "little")
+            # ISIZE is the length modulo 2**32: a multi-gigabyte log wraps. Text compresses, so the
+            # real length is at least the compressed one — add whole wraps until it is.
+            for _ in range(64):
+                if isize >= size:
+                    break
+                isize += 1 << 32
+            return max(size, isize)
+        if low.endswith(".zip"):
+            import zipfile
+            with zipfile.ZipFile(path) as zf:
+                return max(size, sum(i.file_size for i in zf.infolist()))
+        if low.endswith((".bz2", ".xz", ".tbz2", ".txz")):
+            return size * _COMPRESSED_GUESS
+    except Exception:  # noqa: BLE001 — an estimate may never fail a load
+        pass
+    return size
+
+
+# --------------------------------------------------------------------------- the crash-loop guard
+# Startup re-reads every staged library file. A file whose read KILLS the process (SIGSEGV when the VM
+# runs out — it is not a catchable MemoryError) was therefore read again on the next start, killed it
+# again, and so on: "conn.log.gz keeps restarting and not finishing", with a 15 GB crash dump in the
+# host's temp directory per round. The guard is a small file naming the library file being read; it
+# is written BEFORE the read and removed after, so it only survives a process that died mid-read.
+# After CRASH_SKIP_AFTER such deaths the file is skipped (reason 'memory', with "Load anyway"), and an
+# explicit Load anyway re-arms it — the analyst's request outranks the guess, and if it dies again the
+# next start is protected again.
+CRASH_SKIP_AFTER = 2
+
+
+def _guard_path() -> Path:
+    return config.DATA_DIR / "cache" / "pool-loading.json"
+
+
+def guard_read() -> dict[str, int]:
+    try:
+        raw = json.loads(_guard_path().read_text(encoding="utf-8"))
+        return {str(k): int(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _guard_write(state: dict[str, int]) -> None:
+    path = _guard_path()
+    try:
+        if not state:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(state), encoding="utf-8")
+        tmp.replace(path)
+    except OSError as exc:
+        print(f"[iris] could not update the pool-load guard: {config.safe_os_error(exc)}")
+
+
+def guard_begin(name: str, *, reset: bool = False) -> int:
+    """About to read `name`: count the attempt BEFORE it can kill the process. Returns the count."""
+    state = guard_read()
+    state[name] = 1 if reset else state.get(name, 0) + 1
+    _guard_write(state)
+    return state[name]
+
+
+def guard_end(name: str) -> None:
+    """`name` was read to the end (or failed in Python, which the process survived)."""
+    state = guard_read()
+    if state.pop(name, None) is not None:
+        _guard_write(state)
+
+
+def guard_mark(name: str) -> None:
+    """Skip `name` from the next start on, without waiting for a second death."""
+    state = guard_read()
+    state[name] = max(state.get(name, 0), CRASH_SKIP_AFTER)
+    _guard_write(state)
+
 
 def _under_data_dir(path: Path) -> bool:
     """True when `path` resolves inside $IRIS_DATA_DIR. Used to decide whether a path READ OUT OF
@@ -413,6 +513,8 @@ class Store:
         # keyed by on-disk library name. The AGGREGATE (pool_skipped) is derived from this, never set on its
         # own: "2 files skipped" without saying which two hid 526 MB of evidence from search.
         self.pool_skips: "OrderedDict[str, PoolSkip]" = OrderedDict()
+        # library files whose raw read was stopped for memory this run (enrich.OutOfMemoryForSource)
+        self._oom_files: set[str] = set()
         # The PLAN of the background pool load, on-disk name -> {file, size, state}, in library order.
         # `poolProgress` carried only an aggregate plus `currentFile`, so a load of 40 files said nothing
         # about which ones were already in the pool; this is the per-file half (PoolProgress.files).
@@ -1149,6 +1251,23 @@ class Store:
             expanded = self.expand_upload_ex(display or name, data)
         members = expanded.members
         own = display or name
+        if expanded.stream is not None:
+            # ONE compressed text payload, read as a stream rather than held decompressed. Same sid
+            # (index 0), same member provenance `<container>!<payload>`, same payload name as the bytes
+            # path gave it — so the same event ids, and phase 2 / the pool cache cannot tell them apart.
+            inner, codec = expanded.stream
+            sid = self._member_sid(name, 0)
+            with self.lock:
+                exists = sid in self.sources
+            if exists:
+                return []
+            src = self._add_member(inner, None, background_ok=background_ok, sid=sid, path=path,
+                                   origin="library", library_name=name, id_prefix=f"l{sid}",
+                                   member=f"{own}!{inner}", stream_codec=codec)
+            pool_store.save_manifest(name, [src.id],
+                                     [{"sid": src.id, "source": src.model_dump(), "member": f"{own}!{inner}"}]
+                                     if src.state == "ERROR" and not src.events else None)
+            return [src]
         if expanded.errors:
             # The container came back as its own member when it could not be opened; parsing that as
             # binary strings on top of the ERROR notice would be noise. Everything ELSE that came out
@@ -1257,6 +1376,10 @@ class Store:
         if path is None:
             raise FileNotFoundError(f"source {sid} has no file on disk")
         if member:
+            stream = archives.open_member_stream(path, member)
+            if stream is not None:
+                with stream:
+                    return stream.read(limit)
             return archives.read_member(path, member)[:limit]
         with open(path, "rb") as fh:
             return fh.read(limit)
@@ -1289,6 +1412,22 @@ class Store:
                 f"events are NOT searchable.{held} Interpreting a source is what costs the memory, so "
                 f"leaving a large one raw (or deleting one you are done with) frees several times its "
                 f"size; more RAM for the machine is the other way. Then load it from Sources.")
+
+    def _settle_guard(self, name: str) -> None:
+        """A library read is over and the process survived it. Clear the guard — unless the read was
+        stopped for memory, in which case the next start skips it rather than repeating the read."""
+        if name in self._oom_files:
+            self._oom_files.discard(name)
+            guard_mark(name)
+        else:
+            guard_end(name)
+
+    def _crash_skip_detail(self, size: int, deaths: int) -> str:
+        return (f"Iris stopped while reading this file on its last {deaths} start(s) - almost certainly "
+                f"out of memory: it holds about {size / 1e9:.1f} GB of log, and this machine has about "
+                f"{resources.available_bytes() / 1e9:.1f} GB free. It was skipped so the rest of the "
+                f"workspace could load; its events are NOT searchable. Give the machine more memory "
+                f"(on Windows, raise memory in .wslconfig) or split the file, then Load anyway.")
 
     def _room_for(self, source_bytes: int) -> bool:
         """Is there live memory for a source of this size? Never blocks a small file.
@@ -1418,7 +1557,16 @@ class Store:
                 # same thing again. Seen live on an 11.4 M-event workspace: a crash LOOP in which the
                 # app was never usable long enough to delete a case. A refusal that names the file and
                 # offers "load it anyway" is the honest form of the same limit.
-                size = self._library_size(name)
+                size = source_bytes_estimate(path)
+                deaths = guard_read().get(name, 0)
+                if deaths >= CRASH_SKIP_AFTER:
+                    self.note_pool_skip(name, display, size, "memory", self._crash_skip_detail(size, deaths))
+                    print(f"[iris] skipping {display or name}: Iris stopped while reading it on {deaths} "
+                          f"previous start(s) - Load anyway from the Sources page to try again")
+                    with self.lock:
+                        self.pool_pending = max(0, self.pool_pending - 1)
+                        self._plan_state(name, "skipped", size=size)
+                    continue
                 if not self._room_for(size):
                     self.note_pool_skip(name, display, size, "memory", self._memory_skip_detail(size))
                     with self.lock:
@@ -1457,7 +1605,9 @@ class Store:
                         self.pool_pending = max(0, self.pool_pending - 1)
                         self._plan_state(name, "error")
                     continue
+                guard_begin(name)
                 sids = self._add_library_members(name, display, None, background_ok=False)
+                self._settle_guard(name)
                 added += len(sids)
                 files_parsed += 1
                 with self.lock:
@@ -1599,8 +1749,10 @@ class Store:
         path = config.LIBRARY_DIR / Path(name).name
         with open(path, "rb") as probe:   # OSError is the caller's to report, before anything changes
             probe.read(1)
+        guard_begin(path.name, reset=True)
         with self.bulk_load():
             added = self._add_library_members(path.name, display or path.name, None, background_ok=True)
+        self._settle_guard(path.name)
         self.clear_pool_skip(path.name)
         # The same shape `_parse_source` settled on, and for the reason its comment already gives:
         # this path used to run the WHOLE catalogue over the WHOLE pool, synchronously, on the
@@ -1798,6 +1950,15 @@ class Store:
         sid = kw.pop("sid", None) or uuid.uuid4().hex[:8]
         try:
             return self.add_file(name, blob, sid=sid, **kw)
+        except enrich.OutOfMemoryForSource as exc:
+            lib = kw.get("library_name", "")
+            if lib:
+                self._oom_files.add(lib)
+            print(f"[iris] ingest: {name}: {exc}")
+            return self._failed_source(sid, name, str(exc),
+                                       size=len(blob) if blob is not None else 0,
+                                       path=kw.get("path"), origin=kw.get("origin", "case"),
+                                       library_name=lib, member=kw.get("member", ""))
         except Exception as exc:
             traceback.print_exc()
             print(f"[iris] ingest: {name}: {type(exc).__name__}: {exc}")
@@ -1926,8 +2087,13 @@ class Store:
 
     def add_file(self, filename: str, data: Optional[bytes] = None, background_ok: bool = True,
                  sid: Optional[str] = None, path: Optional[Path] = None, origin: str = "case",
-                 library_name: str = "", id_prefix: str = "", member: str = "") -> Source:
+                 library_name: str = "", id_prefix: str = "", member: str = "",
+                 stream_codec: str = "") -> Source:
         """Register and parse a raw file into the pool. Files above SYNC_LIMIT parse in a background thread.
+
+        `stream_codec` (with `data=None`) says the file at `path` is ONE compressed payload — `member`
+        names it — and is read through the decompressor: sniffed from its decompressed head, sized by
+        what it decompresses to, and streamed through phase 1. See `archives.stream_single`.
 
         origin='library' means the bytes live in $IRIS_DATA_DIR/library/ and belong to no case: the source
         is parsed and searchable, but it is never written into case.json and a pending case stays pending.
@@ -1951,7 +2117,12 @@ class Store:
                 # failed with a bare FileNotFoundError and a restart lost the member for good.
                 raise OSError(f"could not write {filename} into the case ({config.safe_os_error(exc)})") from exc
         streamed = data is None
-        if streamed:
+        if streamed and stream_codec:
+            # The PAYLOAD is what gets sniffed and counted, exactly as when it was a decompressed blob.
+            size = source_bytes_estimate(path)
+            with archives.open_single(path, stream_codec) as fh:
+                head = fh.read(SNIFF_HEAD_BYTES)
+        elif streamed:
             # Never read the whole file to answer "what is this?" — the sniffer only ever looks at a
             # prefix, and this branch exists precisely because the file can be gigabytes.
             try:
@@ -1984,7 +2155,8 @@ class Store:
         if self._raw_first_ok(parser):
             # Phase 1: the lines land in the pool and the index NOW; the parse and the normalization that
             # cost 85% of ingest are queued behind it. See app/enrich.py for the measurements.
-            self._raw_source(sid, data, fp.state, fp.confidence, path=path if streamed else None, size=size)
+            self._raw_source(sid, data, fp.state, fp.confidence, path=path if streamed else None, size=size,
+                             codec=stream_codec)
             if origin == "library" and pool_store.was_skipped(sid):
                 # The analyst declined phase 2 for this file before the restart. Re-asking would undo
                 # the decision, and on a big workspace it is the decision that unblocked their screen.
@@ -2014,7 +2186,7 @@ class Store:
         return bool(getattr(parser, "chunkable", False)) or getattr(parser, "family", "") in _RAW_FIRST_FAMILIES
 
     def _raw_source(self, sid: str, data: Optional[bytes], state: str, confidence: float,
-                    path: Optional[Path] = None, size: int = 0) -> None:
+                    path: Optional[Path] = None, size: int = 0, codec: str = "") -> None:
         """Phase 1 of a two-phase ingest: raw lines into the pool, nothing interpreted.
 
         `path` (with `data=None`) reads the file a chunk at a time instead of holding it — see
@@ -2037,7 +2209,8 @@ class Store:
         first_id = 1 if prefix else base + 1
         if data is None and path is not None:
             events = enrich.raw_events_from_file(sid, src.file, parser.family, path, prefix,
-                                                 first_id=first_id, progress=tick, total=total)
+                                                 first_id=first_id, progress=tick, total=total,
+                                                 codec=codec)
         else:
             events = enrich.raw_events(sid, src.file, parser.family, data or b"", prefix,
                                        first_id=first_id, progress=tick)
