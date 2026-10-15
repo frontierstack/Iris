@@ -133,6 +133,12 @@ const TABLE_SEP = /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/;
 /** `- [ ] still to do` / `- [x] done` — a checklist line, once its bullet marker has been eaten. */
 const TASK = /^\[([ xX])\]\s+(.*)$/;
 
+/** A header row followed by a `|---|` separator row. */
+function isTableStart(lines: string[], i: number): boolean {
+  const sep = lines[i + 1] ?? '';
+  return (lines[i] ?? '').includes('|') && sep.includes('|') && TABLE_SEP.test(sep);
+}
+
 function cells(line: string): string[] {
   return line.trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
 }
@@ -295,7 +301,7 @@ export function renderMarkdown(src: string): ReactNode {
     }
 
     // | pipe | table | — header row followed by a --- separator row
-    if (line.includes('|') && TABLE_SEP.test(lines[i + 1] ?? '') && (lines[i + 1] ?? '').includes('|')) {
+    if (isTableStart(lines, i)) {
       const head = cells(line);
       const align = alignsOf(lines[i + 1] ?? '');
       i += 2;
@@ -343,6 +349,9 @@ export function renderMarkdown(src: string): ReactNode {
     while (i < lines.length) {
       const l = lines[i] ?? '';
       if (!l.trim() || FENCE.test(l) || HEAD.test(l) || RULE.test(l) || QUOTE.test(l) || BULLET.test(l) || NUMBER.test(l)) break;
+      // A table written straight under a line of text ("**Top domains:**" then "| Domain | … |") has
+      // no blank line before it; without this the header and the |---| row were swallowed as prose.
+      if (para.length && isTableStart(lines, i)) break;
       para.push(l);
       i++;
     }
