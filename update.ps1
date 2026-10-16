@@ -44,8 +44,19 @@ $ErrorActionPreference = 'Continue'
 Set-Location $PSScriptRoot
 $DefaultUrl = 'https://github.com/frontierstack/Iris.git'
 # "LF will be replaced by CRLF" on every git call of a Windows checkout is noise, not a finding.
-# Set for THIS process only (git >= 2.31 reads config from the environment); nothing is written.
-$env:GIT_CONFIG_COUNT = '1'; $env:GIT_CONFIG_KEY_0 = 'core.safecrlf'; $env:GIT_CONFIG_VALUE_0 = 'false'
+# Passed as an ordinary `git -c` option on each call; nothing is written to any config file.
+$GitCfg = @('-c', 'core.safecrlf=false')
+# THE UPDATER IS DELIBERATELY PLAIN. It runs on managed machines whose security software judges a
+# script by what it DOES, and several things it used to do are patterns such software blocks on sight:
+# compiling C# in memory (Add-Type + DllImport), downloading an .exe/.msixbundle and running it
+# silently, installing modules from PSGallery, and relaunching PowerShell with -ExecutionPolicy Bypass.
+# Any one of them can get the whole script stopped before its first line runs. So, by construction:
+#   - the code arrives through plain `git fetch` + `git merge --ff-only` over HTTPS, nothing else;
+#   - nothing is downloaded and executed - a missing tool is installed through winget (a signed
+#     Microsoft package manager), with consent, or the exact command is printed for you to run;
+#   - no C# is compiled, no PowerShell child is spawned with policy flags (start.ps1 / setup.ps1 run IN
+#     this process), and PATH changes go through the documented .NET environment API.
+# Keep it that way: a new feature that needs any of the above belongs in setup.ps1, not here.
 $BindHost = if ($env:IRIS_BIND_HOST) { $env:IRIS_BIND_HOST } else { '127.0.0.1' }
 if ($BindHost -in @('0.0.0.0', '::', '*')) { $BindHost = '127.0.0.1' }
 $Url = "http://${BindHost}:$Port"
@@ -69,7 +80,7 @@ function Head([string]$m) { Write-Host ""; Write-Host "    $m" -ForegroundColor 
 # Named G, NOT Git: PowerShell names are case-insensitive and a function outranks an executable, so a
 # function called Git would resolve `& git` inside itself to ITSELF and recurse until the stack ran out.
 function G([string[]]$a) {
-  $out = & $script:GitExe @a 2>&1
+  $out = & $script:GitExe @GitCfg @a 2>&1
   $script:GitExit = $LASTEXITCODE
   # The leading comma is load-bearing: PowerShell UNROLLS a returned array, so a one-line answer came back
   # as a bare string and (G ...)[0] was its first CHARACTER - every single-line git answer was wrong.
@@ -111,7 +122,7 @@ function Test-Healthy {
 # reports). Same rules as setup.ps1 - see "Setup bootstraps the machine" in CLAUDE.md, and the two traps
 # it records: a function returning a boolean must send native output to Out-Host, and a fresh install
 # is invisible to THIS process until its PATH is rebuilt from the registry.
-$GitMin    = [version]'2.31'   # GIT_CONFIG_COUNT (the per-process config at the top) needs 2.31
+$GitMin    = [version]'2.20'   # anything older lacks options the diff check relies on
 $WingetMin = [version]'1.6'    # older builds lack --disable-interactivity and stall on source agreements
 $NodeMin   = 18                # Vite 5
 $EnvKeyMachine = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
@@ -127,7 +138,6 @@ function Ask-Fix([string]$q) {
   $a = Read-Host "    ? $q [Y/n]"
   return ($a -eq '' -or $a -match '^(y|yes)$')
 }
-function Use-Tls12 { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 }
 function Norm-Dir([string]$p) { return ([Environment]::ExpandEnvironmentVariables($p.Trim().Trim('"'))).TrimEnd('\').ToLower() }
 
 # PATH as STORED, with %VARS% unexpanded - GetEnvironmentVariable expands them, and writing that back
@@ -143,14 +153,10 @@ function Set-RawPath([string]$scope, [string]$value) {
   else { $k = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($EnvKeyMachine, $true) }
   if (-not $k) { throw "cannot open the $scope environment for writing" }
   try { $k.SetValue('Path', $value, [Microsoft.Win32.RegistryValueKind]::ExpandString) } finally { $k.Close() }
-  # Tell Explorer the environment changed, so every NEW window sees it without a sign-out.
-  try {
-    if (-not ('IrisUpdate.Env' -as [type])) {
-      Add-Type -Namespace IrisUpdate -Name Env -MemberDefinition '[DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern IntPtr SendMessageTimeout(IntPtr h, uint m, UIntPtr w, string l, uint f, uint t, out UIntPtr r);'
-    }
-    $r = [UIntPtr]::Zero
-    [void][IrisUpdate.Env]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$r)
-  } catch { }
+  # Tell Explorer the environment changed, so every NEW window sees it without a sign-out. The .NET
+  # environment API broadcasts that message itself after any User/Machine write, so clearing a variable
+  # that does not exist is a broadcast with no other effect - and needs no compiled code (no Add-Type).
+  try { [Environment]::SetEnvironmentVariable('IRIS_UPDATE_ENV_REFRESH', $null, $scope) } catch { }
 }
 function Test-OnPath([string]$dir, [string]$raw) {
   $n = Norm-Dir $dir
@@ -218,44 +224,23 @@ function Invoke-Winget([string]$verb, [string]$id) {
   # 0 done; 0x8A15002B nothing newer to install; 0x8A150061 already installed
   return ($code -eq 0 -or $code -eq -1978335189 -or $code -eq -1978335135)
 }
-function Install-WingetBundle {
-  # The App Installer bundle itself, from Microsoft's short link - the last resort for both a missing
-  # and an outdated winget.
-  $ProgressPreference = 'SilentlyContinue'   # PS 5.1's progress bar makes a large download crawl
-  $f = Join-Path $env:TEMP 'iris-AppInstaller.msixbundle'
-  try {
-    Use-Tls12
-    Invoke-WebRequest -Uri 'https://aka.ms/getwinget' -OutFile $f -UseBasicParsing -ErrorAction Stop
-    Add-AppxPackage -Path $f -ForceApplicationShutdown -ErrorAction Stop
-  } catch { Warn "installing the App Installer bundle failed: $($_.Exception.Message)" }
-  Remove-Item $f -Force -ErrorAction SilentlyContinue
-  Merge-SessionPath
-}
 function Install-Winget {
-  # 1. App Installer is often PROVISIONED on the machine but not REGISTERED for this user (a new
-  #    profile, a Sandbox, a machine that never opened the Store). Registering needs no download.
+  # App Installer (which carries winget) is usually PROVISIONED on the machine but not REGISTERED for
+  # this user (a new profile, a Sandbox, a machine that never opened the Store). Registering it needs no
+  # download. Anything beyond that - fetching the bundle or a module from the internet and installing
+  # it - is NOT done here: it is the download-and-install shape endpoint protection blocks, and the
+  # Microsoft Store does it properly.
   try { Add-AppxPackage -RegisterByFamilyName -MainPackage 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe' -ErrorAction Stop } catch { }
   Merge-SessionPath
   if (Get-Command winget -ErrorAction SilentlyContinue) { return $true }
-  # 2. Microsoft's own repair path: the WinGet PowerShell module installs winget AND its dependencies
-  #    (VCLibs, UI.Xaml), which the bare bundle does not.
-  try {
-    Use-Tls12
-    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser -ErrorAction Stop | Out-Null
-    Install-Module -Name Microsoft.WinGet.Client -Force -Scope CurrentUser -Repository PSGallery -AllowClobber -ErrorAction Stop | Out-Null
-    Import-Module Microsoft.WinGet.Client -ErrorAction Stop
-    Repair-WinGetPackageManager -Latest -Force -ErrorAction Stop 2>&1 | Out-Host
-  } catch { Warn "the WinGet module route failed: $($_.Exception.Message)" }
-  Merge-SessionPath
-  if (Get-Command winget -ErrorAction SilentlyContinue) { return $true }
-  Install-WingetBundle
-  return [bool](Get-Command winget -ErrorAction SilentlyContinue)
+  Warn "winget could not be registered - install 'App Installer' from the Microsoft Store (or ask IT), then re-run"
+  return $false
 }
 function Update-Winget {
   $before = Get-WingetVersion
   $null = Invoke-Winget 'upgrade' 'Microsoft.AppInstaller'
-  if (-not ((Get-WingetVersion) -gt $before)) { Install-WingetBundle }
   $after = Get-WingetVersion
+  if (-not ($after -gt $before)) { Warn "winget did not update itself - update 'App Installer' from the Microsoft Store" }
   return [bool]($after -and $after -ge $WingetMin)
 }
 
@@ -295,28 +280,6 @@ function Find-GitInstalls {
   }
   return ,$out.ToArray()
 }
-function Install-GitDirect {
-  # No winget, or winget could not: Git for Windows' own installer from its latest GitHub release, run
-  # silently - for the whole machine when elevated, for this user when not (no UAC prompt either way).
-  $ProgressPreference = 'SilentlyContinue'
-  try {
-    Use-Tls12
-    $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/git-for-windows/git/releases/latest' -Headers @{ 'User-Agent' = 'iris-update' } -ErrorAction Stop
-    $arch = '32-bit'
-    if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { $arch = 'arm64' } elseif ([Environment]::Is64BitOperatingSystem) { $arch = '64-bit' }
-    $asset = @($rel.assets | Where-Object { $_.name -match "^Git-[\d.]+-$arch\.exe$" })[0]
-    if (-not $asset) { Warn "no $arch installer in $($rel.tag_name)"; return $false }
-    $dest = Join-Path $env:TEMP $asset.name
-    Info "downloading $($asset.browser_download_url)"
-    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $dest -UseBasicParsing -ErrorAction Stop
-  } catch { Warn "downloading Git for Windows failed: $($_.Exception.Message)"; return $false }
-  $inst = @('/VERYSILENT', '/NORESTART', '/NOCANCEL', '/SP-', '/SUPPRESSMSGBOXES', '/o:PathOption=Cmd')
-  if (-not (Test-Admin)) { $inst += '/CURRENTUSER' }
-  $p = Start-Process -FilePath $dest -ArgumentList $inst -Wait -PassThru
-  Remove-Item $dest -Force -ErrorAction SilentlyContinue
-  Merge-SessionPath
-  return ($p.ExitCode -eq 0)
-}
 function Install-Git([bool]$upgrade) {
   $ok = $false
   if (Get-Command winget -ErrorAction SilentlyContinue) {
@@ -329,7 +292,7 @@ function Install-Git([bool]$upgrade) {
       $ok = [bool]($g -and (Get-ExeVersion $g.Source @('--version')) -ge $GitMin)
     }
   }
-  if (-not $ok) { $ok = Install-GitDirect }
+  if (-not $ok) { Warn "winget could not install git - install Git for Windows from https://git-scm.com/download/win (or your software portal) and re-run" }
   # The installer writes PATH to the registry; if this window still cannot see git, point it there.
   if (-not (Get-Command git -CommandType Application -ErrorAction SilentlyContinue)) {
     # Assigned first, never piped or @()-wrapped: the function returns ,$array, and either of those
@@ -383,16 +346,16 @@ if (-not $winner -or -not $winVer) {
 }
 if ($needGit) {
   if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-    Add-Fix 20 "install winget (App Installer) so dependencies can be installed" "Add-AppxPackage -RegisterByFamilyName ...DesktopAppInstaller / Repair-WinGetPackageManager / aka.ms/getwinget" { param($a) Install-Winget }
+    Add-Fix 20 "register winget (App Installer) so git can be installed" "Add-AppxPackage -RegisterByFamilyName -MainPackage Microsoft.DesktopAppInstaller_8wekyb3d8bbwe" { param($a) Install-Winget }
   }
   if ($needGit -eq 'install') {
-    Add-Fix 30 "install Git for Windows" "winget install --id Git.Git -e   (else: the silent installer from github.com/git-for-windows)" { param($a) Install-Git $false }
+    Add-Fix 30 "install Git for Windows" "winget install --id Git.Git -e" { param($a) Install-Git $false }
   } else {
-    Add-Fix 30 "upgrade git $winVer -> the latest (the updater needs $GitMin+)" "winget upgrade --id Git.Git -e   (else: the silent installer from github.com/git-for-windows)" { param($a) Install-Git $true }
+    Add-Fix 30 "upgrade git $winVer -> the latest (the updater needs $GitMin+)" "winget upgrade --id Git.Git -e" { param($a) Install-Git $true }
   }
 }
 if ($wgVer -and $wgVer -lt $WingetMin) {
-  Add-Fix 20 "update winget $wgVer -> the latest" "winget upgrade --id Microsoft.AppInstaller -e   (else: aka.ms/getwinget)" { param($a) Update-Winget }
+  Add-Fix 20 "update winget $wgVer -> the latest" "winget upgrade --id Microsoft.AppInstaller -e" { param($a) Update-Winget }
 }
 
 # PATH hygiene, limited to GIT's entries - the rest of PATH is not the updater's business. An entry that
@@ -453,7 +416,7 @@ if (-not $gitCmd) {
 $GitExe = $gitCmd.Source
 $gv = Get-ExeVersion $GitExe @('--version')
 if (-not $gv) { Die "git at $GitExe does not run - reinstall it (winget install --id Git.Git -e --force) and re-run." }
-if ($gv -lt $GitMin) { Warn "git $gv is older than $GitMin - the update still works; expect a line-ending warning on every call" }
+if ($gv -lt $GitMin) { Warn "git $gv is older than $GitMin - the update may still work; upgrade it if a git step below fails" }
 Ok "git $gv  ($GitExe)"
 
 # -- 1. the checkout ----------------------------------------------------------
@@ -461,7 +424,7 @@ Step "Checking this copy of Iris"
 # "dubious ownership": git refuses a repository owned by another account (a copy made elevated, a
 # folder on another drive, an unzipped download) - and every git call then fails, which would read
 # below as "not a git checkout". It is a one-line trust entry, so it is named and offered.
-$probe = & $GitExe -C $PSScriptRoot rev-parse --show-toplevel 2>&1
+$probe = & $GitExe @GitCfg -C $PSScriptRoot rev-parse --show-toplevel 2>&1
 if ((@($probe) -join ' ') -match 'dubious ownership') {
   $safe = ($PSScriptRoot -replace '\\', '/')
   Warn "git refuses this folder: it is owned by another Windows account (git calls this 'dubious ownership')"
@@ -540,9 +503,24 @@ if ($Action -eq 'rollback') {
   Step "Fetching the latest version from GitHub"
   $env:GIT_TERMINAL_PROMPT = '0'
   $fetchLog = Join-Path $State 'fetch.log'
-  if (-not (Run-Spin "git fetch $Remote $Branch" $GitExe @('fetch', '--prune', '--quiet', $Remote, $Branch) $fetchLog)) {
+  # A plain HTTPS fetch of one branch - the same thing `git pull` does. A stalled connection gives up
+  # after 60 s under 1 KB/s instead of hanging the window forever.
+  $fetchArgs = @('-c', 'http.lowSpeedLimit=1000', '-c', 'http.lowSpeedTime=60', 'fetch', '--prune', '--quiet', $Remote, $Branch)
+  $fetched = Run-Spin "git fetch $Remote $Branch" $GitExe ($GitCfg + $fetchArgs) $fetchLog
+  if (-not $fetched) {
+    $why = (Get-Content $fetchLog -ErrorAction SilentlyContinue) -join ' '
+    # A network that inspects HTTPS re-signs github.com with the ORGANISATION's certificate, which is in
+    # the Windows certificate store and not in git's own CA bundle - so git (OpenSSL) refuses it. Git for
+    # Windows can use the Windows store instead (schannel). Retried once that way, for this call only.
+    if ($why -match 'certificate|SSL|schannel|self.signed|issuer') {
+      Warn "the HTTPS certificate was refused - retrying with the Windows certificate store (http.sslBackend=schannel)"
+      $fetched = Run-Spin "git fetch $Remote $Branch (Windows certificate store)" $GitExe ($GitCfg + @('-c', 'http.sslBackend=schannel') + $fetchArgs) $fetchLog
+      if ($fetched) { Info "to make this permanent for git on this machine: git config --global http.sslBackend schannel" }
+    }
+  }
+  if (-not $fetched) {
     Get-Content $fetchLog -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "        $_" -ForegroundColor DarkGray }
-    Die "could not fetch $Remote/$Branch - check the network, or that the branch exists"
+    Die "could not fetch $Remote/$Branch - check the network (a proxy needs: git config --global http.proxy http://host:port), or that the branch exists"
   }
   $Up = "$Remote/$Branch"
   Ok ("fetched " + (G @('log', '-1', '--format=%h  %ad', '--date=short', $Up))[0])
@@ -774,14 +752,17 @@ if ($NoRestart) {
 } elseif ($install -eq 'docker') {
   Step "Rebuilding and restarting the Docker install"
   Info "start.ps1 -Build: new image, container recreated, health checked, the old image removed"
-  # the same PowerShell this runs in (Windows PowerShell or pwsh), not whichever one PATH finds first
-  $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
-  & $shell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'start.ps1') -Build -NoBrowser -Port $Port
+  # Run IN this process, not as a new powershell.exe with -ExecutionPolicy Bypass: a script relaunching
+  # PowerShell with policy flags is a pattern security software blocks, and nothing here needs it -
+  # start.ps1 sits beside this file, so whatever let this script run lets it run. Its `exit` returns
+  # here with $LASTEXITCODE set; reset first, so a stale value from an earlier native call cannot pass.
+  $global:LASTEXITCODE = 0
+  & (Join-Path $PSScriptRoot 'start.ps1') -Build -NoBrowser -Port $Port
   $startOk = ($LASTEXITCODE -eq 0)
+  Set-Location $PSScriptRoot
   if (-not $startOk) { Die "the rebuild failed - the code is updated; fix the error above and run .\start.ps1 -Build (or .\update.ps1 -Action rollback)" }
 } elseif ($install -eq 'local') {
   Step "Refreshing the local install"
-  $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
   # A .venv is a pointer to the Python it was made from. Upgrading or uninstalling that Python leaves a
   # .venv whose python.exe cannot start - pip would fail with a message about the venv, not about why.
   $venvPy = '.venv\Scripts\python.exe'
@@ -795,10 +776,13 @@ if ($NoRestart) {
     Info "      .\setup.ps1 -Mode local   (installs Python if needed, rebuilds .venv, the dependencies and the UI)"
     if ($NoInstall) { Die "-NoInstall: run the command above yourself" 3 }
     if (-not (Ask-Fix "Run setup for the local install now?")) { Die "declined - the code is updated; run .\setup.ps1 -Mode local before starting Iris" 3 }
-    $sArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'setup.ps1'), '-Mode', 'local')
-    if ($Yes) { $sArgs += '-Yes' }
-    & $shell @sArgs
+    # In this process, for the same reason as start.ps1 above.
+    $sArgs = @{ Mode = 'local' }
+    if ($Yes) { $sArgs.Yes = $true }
+    $global:LASTEXITCODE = 0
+    & (Join-Path $PSScriptRoot 'setup.ps1') @sArgs
     $setupOk = ($LASTEXITCODE -eq 0)
+    Set-Location $PSScriptRoot
     if (-not $setupOk) { Die "setup failed - the code is updated; fix the error above and run .\setup.ps1 -Mode local" }
     Ok "local install rebuilt by setup"
     if (Test-Healthy) { Warn "something is serving Iris on $Url - if that is this local install, it is still running the OLD code: stop it (Ctrl-C in its window) and run .\start.ps1 -Mode local" }

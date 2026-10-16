@@ -23,21 +23,16 @@
 set -uo pipefail
 
 # THE UPDATER UPDATES ITSELF. bash reads a script as it runs, so a `git merge` that rewrites this file
-# mid-run makes bash continue from a byte offset into the NEW file - it executes half a line of
-# something else. Run from a private copy instead, and point it back at the checkout.
-if [ -z "${IRIS_UPDATE_COPY:-}" ]; then
-  _root="$(cd "$(dirname "$0")" && pwd)"
-  _copy="$(mktemp "${TMPDIR:-/tmp}/iris-update.XXXXXX" 2>/dev/null)" || _copy=""
-  if [ -n "$_copy" ] && cp "$0" "$_copy" 2>/dev/null; then
-    IRIS_UPDATE_COPY="$_copy" IRIS_UPDATE_ROOT="$_root" exec bash "$_copy" "$@"
-  fi
-  IRIS_UPDATE_ROOT="$_root"
-fi
-ROOT="${IRIS_UPDATE_ROOT:-$(cd "$(dirname "$0")" && pwd)}"
-# "LF will be replaced by CRLF" on every git call of a Windows checkout is noise, not a finding.
-# Set for THIS process only (git >= 2.31 reads config from the environment); nothing is written.
-export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.safecrlf GIT_CONFIG_VALUE_0=false
-[ -n "${IRIS_UPDATE_COPY:-}" ] && trap 'rm -f "$IRIS_UPDATE_COPY"' EXIT
+# mid-run would make bash continue from a byte offset into the NEW file. The whole body below is ONE
+# brace group, and bash parses a compound command completely before running any of it - so the rewrite
+# is harmless. (It used to copy itself into /tmp and `exec` the copy, which works, and which is also the
+# shape security software flags: a script dropping an executable copy of itself in a temp dir.)
+#
+# THE UPDATER IS DELIBERATELY PLAIN: the code arrives through `git fetch` + `git merge --ff-only` over
+# HTTPS and nothing else, a missing tool is installed only through this machine's own package manager
+# (with consent), and nothing is downloaded and run. Keep it that way - see the note in update.ps1.
+{
+ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT" || exit 1
 
 DEFAULT_URL="https://github.com/frontierstack/Iris.git"
@@ -119,7 +114,7 @@ healthy() {
 # Everything it needs is checked HERE, every fix is printed with its exact command, and ONE question
 # covers them all (--yes answers it; --no-install only reports; a non-interactive run declines). The
 # package-manager helpers are setup.sh's, copied: this script has to work on a machine setup never saw.
-GIT_MIN="2.31"      # GIT_CONFIG_COUNT (the per-process config at the top) needs 2.31
+GIT_MIN="2.20"      # anything older lacks options the diff check relies on
 NODE_MIN=18         # Vite 5
 GIT_DIRS="/usr/bin /usr/local/bin /opt/homebrew/bin /home/linuxbrew/.linuxbrew/bin /opt/local/bin /Library/Developer/CommandLineTools/usr/bin"
 OS="$(uname -s 2>/dev/null || echo unknown)"
@@ -230,7 +225,7 @@ if command -v git >/dev/null 2>&1 && git_runs; then
   esac
   GV="$(git_ver)"
   if ! ver_ge "$GV" "$GIT_MIN"; then
-    warn "git ${GV%%.windows*} is older than $GIT_MIN - the update works, with a line-ending warning on every call"
+    warn "git ${GV%%.windows*} is older than $GIT_MIN - the update may still work; upgrade it if a git step below fails"
     [ "$MGR" != none ] && NEED_GIT=upgrade
   fi
 else
@@ -282,6 +277,10 @@ if ! { command -v git >/dev/null 2>&1 && git_runs; }; then
   esac
 fi
 ok "git $(git_ver)  ($(command -v git))"
+# "LF will be replaced by CRLF" on every git call of a Windows checkout is noise, not a finding. An
+# ordinary `git -c` option on every call from here on; nothing is written to any config file. Defined
+# only AFTER the checks above, which ask `command -v git` for the real executable.
+git() { command git -c core.safecrlf=false "$@"; }
 
 # ── 1. the checkout ──────────────────────────────────────────────────────────
 step "Checking this copy of Iris"
@@ -350,10 +349,11 @@ if [ "$ACTION" = "rollback" ]; then
 else
   # ── 2. fetch ───────────────────────────────────────────────────────────────
   step "Fetching the latest version from GitHub"
-  GIT_TERMINAL_PROMPT=0 git fetch --prune --quiet "$REMOTE" "$BRANCH" >"$STATE/fetch.log" 2>&1 &
+  # A plain HTTPS fetch of one branch - what `git pull` does. A stalled link gives up after 60 s under 1 KB/s.
+  GIT_TERMINAL_PROMPT=0 git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 fetch --prune --quiet "$REMOTE" "$BRANCH" >"$STATE/fetch.log" 2>&1 &
   if ! spin "git fetch $REMOTE $BRANCH" $!; then
     sed 's/^/        /' "$STATE/fetch.log" >&2
-    die "could not fetch $REMOTE/$BRANCH - check the network, or that the branch exists"
+    die "could not fetch $REMOTE/$BRANCH - check the network (a proxy needs: git config --global http.proxy http://host:port), or that the branch exists"
   fi
   UP="$REMOTE/$BRANCH"
   ok "fetched $(git log -1 --format='%h  %ad' --date=short "$UP")"
@@ -647,3 +647,4 @@ printf '\n'
 ok "Iris is at $(git log -1 --format='%h  %ad  %s' --date=short HEAD)"
 [ -s "$STATE/previous" ] && info "to go back: ./update.sh rollback"
 exit 0
+}

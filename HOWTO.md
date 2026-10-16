@@ -250,24 +250,36 @@ including ones that have nothing to do with Iris. That is why `-Restart` is opt-
 listed with its exact command, then ONE question (`--yes` / `-Yes` answers it, `--no-install` /
 `-NoInstall` only reports, a run with no terminal declines):
 
-- **git** — installed, on PATH, new enough (2.31+). Windows: a git that is installed but off PATH (found
+- **git** — installed, on PATH, new enough (2.20+). Windows: a git that is installed but off PATH (found
   through Git for Windows' registry record, Program Files, the per-user folder, PortableGit or scoop) is
-  used for the run and its `cmd` folder added to your user PATH; a missing one is installed with winget,
-  or with Git for Windows' own silent installer when winget cannot. Linux/macOS: the package manager
+  used for the run and its `cmd` folder added to your user PATH; a missing one is installed with winget.
+  If winget cannot, the updater says so and names git-scm.com — it never downloads and runs an
+  installer itself. Linux/macOS: the package manager
   (`apt`/`dnf`/`yum`/`pacman`/`zypper`/`apk`/`brew`), or `xcode-select --install` on a Mac without brew.
 - **git's PATH entries** (Windows) — an entry that names a FILE (`git-bash.exe`) or a folder that no
   longer exists is removed from the user PATH; `%VARS%` in the rest of PATH are kept as written. Other
   gits on the machine are listed, with a warning when an older one shadows a newer one. Only git's own
   entries are touched.
-- **winget** (Windows) — registered for this user if it is on the machine but not registered, installed
-  through Microsoft's WinGet module (or the App Installer bundle) if it is not, updated when older than
-  1.6, and its alias folder put back on PATH when it is missing from it.
+- **winget** (Windows) — registered for this user if it is on the machine but not registered, updated
+  when older than 1.6, and its alias folder put back on PATH when it is missing from it. If it is not on
+  the machine at all, install **App Installer** from the Microsoft Store.
+- **A network that inspects HTTPS** — when the fetch fails on a certificate error, it is retried once with
+  the Windows certificate store (`http.sslBackend=schannel`), which holds your organisation's
+  certificate, and the permanent setting is printed. A proxy is `git config --global http.proxy …`.
 - **"dubious ownership"** — a checkout owned by another account (an elevated copy, another drive) makes
   every git call fail; the updater names it and offers the `safe.directory` entry instead of reporting
   "not a git checkout".
 - **A local install**: Node.js is installed or upgraded when it is missing or older than 18, and a
   `.venv` whose Python no longer starts (that Python was upgraded or removed) is rebuilt by running
   `setup.* local` — offered, not silent.
+
+**What the updater does NOT do, on purpose.** It behaves like any ordinary admin script, so managed
+machines can run it: the code arrives only through `git fetch` + `git merge --ff-only` over HTTPS;
+nothing is downloaded and executed; no C# is compiled at runtime; `start.ps1` / `setup.ps1` run inside
+the same PowerShell process (never a new one with `-ExecutionPolicy Bypass`); PATH changes use the
+documented .NET environment API; and `update.sh` does not copy itself to `/tmp` (its body is one brace
+group, which bash parses before running, so an update that rewrites the script mid-run is harmless).
+Installing a missing Python is `setup.*`'s job, not the updater's.
 
 **The diff check comes next, every time**, and it is what `check` prints on its own:
 
